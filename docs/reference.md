@@ -174,20 +174,41 @@ Run the MCP server over stdio. See §4.
 Watch the roots and reindex as files change. A trigger, not a second indexing
 path: every change goes through the same `index --root` the CLI performs.
 
-`index.exclude` is applied to events, so a write inside `node_modules` or
-`.ralph` no longer wakes a reindex. It is layered on watchfiles' own defaults
-rather than replacing them, so editor scratch files (`.swp`, `~`, `.pyc`) stay
-ignored too.
+**The watch is placed on exactly the directories the index looks in.** The
+Rust watcher underneath accepts no exclusion of any kind — its whole
+configuration is `watch_paths`, `debug`, `force_polling`, `poll_delay_ms`,
+`recursive` and `ignore_permission_denied` — so an exclusion can only be
+expressed by *not handing it the path*. Every watchable directory is therefore
+enumerated up front and watched without recursion.
 
-**What that does not do is stop the watcher descending into an excluded
-directory.** watchfiles filters changes the underlying Rust watcher has already
-produced, so recursion happens first and filtering second. If a path inside an
-excluded tree cannot be read at all — a dangling symlink, a broken Windows
-reparse point — the walk still fails, and no configuration avoids it. When that
-happens the watcher logs `watch.walk_failed` naming the path and saying why
-`index.exclude` could not help, instead of dying with a raw traceback. Remove or
-repair the path and restart. `ignore_permission_denied` is set, which covers the
-permission case but not that IO one.
+Two things follow, and both are the point.
+
+**An excluded tree is never touched at all.** That is what stops the watcher
+dying on a dangling symlink or broken reparse point inside a directory
+`index.exclude` already skips — a failure no configuration could avoid before,
+because recursion descended before any filter ran.
+
+**The watch is far smaller.** inotify watches directories, so the cost is per
+directory either way; recursion just meant *every* directory. Measured on a
+1,154-file workspace: **1,517 watched before, 215 after — an 86% reduction**,
+enumerated in 0.06s. `watch.scoped` logs the count at startup.
+
+A new directory the index cares about cannot be added to a running watch, so
+one appearing rebuilds it (`watch.rescoping`). A new *file* does not — its
+directory is already watched — and neither does a new directory the index
+ignores, which is what keeps a build from restarting the watcher every time it
+runs.
+
+`UNWATCHED_DIRS` (`.git`, `node_modules`, `.venv`, `target`, `dist`, `build`,
+`__pycache__`) is applied on top, and is deliberately **not** the same list as
+`index.exclude`: it is about the watch budget. Index one of those trees without
+excluding it and the index will hold it while the watcher will not notice it
+changing — a real divergence, accepted because exhausting the inotify limit
+stops the watcher working at all.
+
+`ExcludeFilter` still applies to events, dropping editor scratch files
+(`.swp`, `~`, `.pyc`) beside a file that *is* watched — which choosing
+directories cannot do.
 
 Failures are logged as well as printed. A watcher runs unattended, so a
 console-only report is a report to nobody:

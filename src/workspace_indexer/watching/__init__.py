@@ -10,7 +10,8 @@ from workspace_indexer.watching.filesystem_probe import (
     FilesystemProbe,
 )
 from workspace_indexer.watching.inotify_budget import InotifyBudget
-from workspace_indexer.watching.watcher import UNWATCHED_DIRS, Watcher
+from workspace_indexer.watching.watch_scope import UNWATCHED_DIRS, WatchScope
+from workspace_indexer.watching.watcher import Watcher
 
 __all__ = [
     "NATIVE_FILESYSTEMS",
@@ -20,5 +21,6 @@ __all__ = [
     "FilesystemProbe",
     "InotifyBudget",
     "WatchMode",
+    "WatchScope",
     "Watcher",
 ]

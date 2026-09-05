@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -318,3 +319,107 @@ async def test_the_watch_filter_and_permission_flag_are_passed_to_awatch(
 
     assert isinstance(seen["watch_filter"], ExcludeFilter)
     assert seen["ignore_permission_denied"] is True
+
+
+# --- issue #62: watching only what the index looks at --------------------
+
+
+async def test_the_watch_is_scoped_and_not_recursive(tmp_path: Path) -> None:
+    """Recursion is what descends into excluded trees.
+
+    The Rust layer accepts no exclusion, so the only way to stay out of a tree
+    is to not name it and to not recurse into its parent.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".ralph" / "tasks").mkdir(parents=True)
+    config = WorkspaceConfig.model_validate(
+        {
+            "workspace": {"name": "w", "roots": [{"path": str(tmp_path), "label": "main"}]},
+            "index": {"exclude": ["**/.ralph/**"]},
+        }
+    )
+    watcher = _watcher(config)
+    seen: dict[str, Any] = {}
+
+    async def capture(*paths: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        seen["paths"] = [str(p) for p in paths]
+        seen.update(kwargs)
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    with patch("workspace_indexer.watching.watcher.awatch", capture):
+        await watcher.run()
+
+    assert seen["recursive"] is False
+    assert any(p.endswith("src") for p in seen["paths"])
+    assert not any(".ralph" in p for p in seen["paths"])
+
+
+async def test_a_new_indexed_directory_rebuilds_the_watch(tmp_path: Path) -> None:
+    """A watch cannot be extended while it runs.
+
+    Without a rebuild the new tree would simply never be watched, and edits in
+    it would never reindex -- silently, which is the worst version.
+    """
+    (tmp_path / "src").mkdir()
+    watcher = _watcher(_config(tmp_path))
+    scopes: list[int] = []
+
+    async def capture(*paths: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        scopes.append(len(paths))
+        if len(scopes) == 1:
+            (tmp_path / "src" / "feature").mkdir()
+            yield {(Change.added, str(tmp_path / "src" / "feature"))}
+        return
+
+    with patch("workspace_indexer.watching.watcher.awatch", capture):
+        await watcher.run()
+
+    assert len(scopes) == 2, "expected exactly one rebuild"
+    assert scopes[1] == scopes[0] + 1
+
+
+async def test_a_new_excluded_directory_does_not(tmp_path: Path) -> None:
+    """Build output appears constantly. Rebuilding for it would restart the
+    watcher every time a build runs."""
+    (tmp_path / "src").mkdir()
+    config = WorkspaceConfig.model_validate(
+        {
+            "workspace": {"name": "w", "roots": [{"path": str(tmp_path), "label": "main"}]},
+            "index": {"exclude": ["**/obj/**"]},
+        }
+    )
+    watcher = _watcher(config)
+    scopes: list[int] = []
+
+    async def capture(*paths: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        scopes.append(len(paths))
+        if len(scopes) == 1:
+            (tmp_path / "obj").mkdir()
+            yield {(Change.added, str(tmp_path / "obj"))}
+        return
+
+    with patch("workspace_indexer.watching.watcher.awatch", capture):
+        await watcher.run()
+
+    assert len(scopes) == 1, "an ignored directory must not rebuild the watch"
+
+
+async def test_a_new_file_does_not_rebuild_the_watch(tmp_path: Path) -> None:
+    """Its directory is already watched; only directories need new watches."""
+    (tmp_path / "src").mkdir()
+    watcher = _watcher(_config(tmp_path))
+    scopes: list[int] = []
+
+    async def capture(*paths: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        scopes.append(len(paths))
+        if len(scopes) == 1:
+            new = tmp_path / "src" / "app.py"
+            new.write_text("x = 1\n", encoding="utf-8")
+            yield {(Change.added, str(new))}
+        return
+
+    with patch("workspace_indexer.watching.watcher.awatch", capture):
+        await watcher.run()
+
+    assert len(scopes) == 1
