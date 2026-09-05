@@ -19,7 +19,11 @@ from pathlib import Path
 from workspace_indexer.config import RootConfig, WorkspaceConfig
 from workspace_indexer.discovery.classify import classify, is_lockfile
 from workspace_indexer.discovery.file_candidate import FileCandidate
-from workspace_indexer.discovery.git_metadata import is_linked_worktree, read_repo_info
+from workspace_indexer.discovery.git_metadata import (
+    is_linked_worktree,
+    read_repo_info,
+    repo_root,
+)
 from workspace_indexer.discovery.ignore_matcher import IgnoreMatcher
 from workspace_indexer.discovery.skip_reason import SkipReason
 from workspace_indexer.models import RepoInfo
@@ -47,6 +51,12 @@ class Walker:
         # not read is not a root that turned out to be empty, and only one of
         # those two justifies deleting its index.
         self.unobservable_roots: set[str] = set()
+        # Files that no .gitignore could have filtered, per root and unit: a
+        # plain folder has no .gitignore to respect, so `respect_gitignore`
+        # does nothing for it. Counted rather than merely flagged, because
+        # "this unit contributed 8,000 files" is actionable and "check your
+        # config" is not.
+        self._unprotected: dict[str, dict[str, int]] = {}
 
     def walk(self, only_root: str | None = None) -> Iterator[FileCandidate]:
         for root in self._config.workspace.roots:
@@ -63,6 +73,7 @@ class Walker:
                 )
                 continue
             yield from self._walk_root(root)
+            self._warn_if_unfiltered(root)
 
     def _walk_root(self, root: RootConfig) -> Iterator[FileCandidate]:
         matcher = IgnoreMatcher(
@@ -70,8 +81,10 @@ class Walker:
             self._config.all_excludes,
             self._config.index.respect_gitignore,
         )
-        # Repo metadata is read once per unit directory, never per file.
+        # Repo metadata is read once per directory, and once per repository
+        # behind that -- never per file.
         repo_cache: dict[str, RepoInfo | None] = {}
+        self._unprotected.setdefault(root.resolved_label, {})
         follow = self._config.index.follow_symlinks
         max_bytes = self._config.index.max_file_bytes
 
@@ -175,9 +188,12 @@ class Walker:
 
         rel_path = path.relative_to(root.path).as_posix()
         unit = self._unit_for(root, rel_path)
-        if unit not in repo_cache:
-            unit_dir = root.path / unit if unit else root.path
-            repo_cache[unit] = read_repo_info(unit_dir)
+        repo = self._repo_for(path.parent, repo_cache)
+        if repo is None:
+            # No repository above it, so `respect_gitignore` had nothing to
+            # respect. Recorded per unit; reported once, at the end of the root.
+            counts = self._unprotected.setdefault(root.resolved_label, {})
+            counts[unit] = counts.get(unit, 0) + 1
 
         return FileCandidate(
             root_label=root.resolved_label,
@@ -188,8 +204,73 @@ class Walker:
             language=language,
             size=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
-            repo=repo_cache[unit],
+            repo=repo,
         )
+
+    def _warn_if_unfiltered(self, root: RootConfig) -> None:
+        """Say once that a root had files no ignore rule could reach.
+
+        `respect_gitignore` does the filtering in practice, and it only works
+        inside a git repository. Point a root at a vendored SDK or an unpacked
+        sample and nothing filters it -- an `obj/` directory contributes
+        thousands of generated `.cs` files that are real, parseable source and
+        compete with the code on every query. The only symptom is worse
+        results.
+
+        Suppressed when `index.exclude` is configured, which is the issue's own
+        rule and the right one: someone who has written exclude patterns has
+        already met this problem, and a warning they cannot silence is a
+        warning they learn to ignore.
+
+        A warning, never a filter. Inventing a default exclude list for a plain
+        folder would be the tool deciding what a user's directory contains.
+        """
+        if self._config.index.exclude:
+            return
+        counts = self._unprotected.get(root.resolved_label, {})
+        if not counts:
+            return
+        named = ", ".join(
+            f"{unit or '(root)'} ({files:,} files)"
+            for unit, files in sorted(counts.items(), key=lambda kv: -kv[1])
+        )
+        log.warning(
+            "root.unfiltered",
+            root=root.resolved_label,
+            units=named,
+            files=sum(counts.values()),
+            detail="these files are in no git repository, so respect_gitignore had "
+            "nothing to respect, and index.exclude is empty. Build output and "
+            "dependencies will be indexed and will compete with real code on every "
+            "query. Add exclude patterns for whatever this holds.",
+        )
+
+    def _repo_for(self, directory: Path, cache: dict[str, RepoInfo | None]) -> RepoInfo | None:
+        """Which repository holds `directory`, memoised per directory.
+
+        Read from the directory rather than from the unit, which is what this
+        did before. A unit is the first path segment of a root, and that stops
+        being the repository the moment a workspace nests one -- after which
+        every file under it was attributed to no repository at all, losing
+        `repo_name`, `repo_branch` and `repo_head_sha` from the payload and
+        making the `repo` search filter unable to find them. Measured on this
+        workspace: 309 files.
+
+        Still never per file. `repo_root` is one git call per *directory*, and
+        the repository's own metadata is read once per repository -- the same
+        shape as before, one level lower.
+        """
+        key = str(directory)
+        if key not in cache:
+            top = repo_root(directory)
+            if top is None:
+                cache[key] = None
+            else:
+                top_key = f"\0{top}"
+                if top_key not in cache:
+                    cache[top_key] = read_repo_info(top)
+                cache[key] = cache[top_key]
+        return cache[key]
 
     @staticmethod
     def _unit_for(root: RootConfig, rel_path: str) -> str:

@@ -241,6 +241,20 @@ that is the escape hatch for working inside one. The watcher drops worktree
 changes for the same reason, so an agent saving into a worktree does not
 re-walk the whole root to discover nothing.
 
+**A root with no repository in it is reported once per run.**
+`respect_gitignore` only works inside a git repository, so a plain folder — a
+vendored SDK, an unpacked sample, a dropped-in copy of a solution — has nothing
+to respect. An `obj/` directory then contributes thousands of generated `.cs`
+files that are real, parseable source and compete with your code on every
+query, and the only symptom is worse results. `root.unfiltered` names the units
+and their file counts.
+
+It is suppressed once `index.exclude` is non-empty: anyone who has written
+exclude patterns has already met this problem, and a warning that cannot be
+silenced is one people learn to ignore. **It never filters anything** —
+inventing a default exclude list for a plain folder would be the tool guessing
+what your directory contains.
+
 | `exclude` | `[]` | gitignore syntax. Excluded directories are *pruned*, not filtered, so `**/node_modules/**` costs one `stat()` rather than a walk. Exclusion is retroactive: adding a pattern removes chunks already indexed. |
 | `secret_allow` | `[]` | Files where the content secret-scan is expected to false-positive — token fixtures, checksum lists. Scoped by glob, so allowing one file does not disable the check elsewhere. |
 
