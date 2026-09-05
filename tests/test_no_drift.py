@@ -159,6 +159,50 @@ def test_both_factories_agree_on_what_database_reranking_means() -> None:
     assert rerank_side == store_side
 
 
+def test_every_package_is_named_in_the_layer_list() -> None:
+    """CLAUDE.md's layer list is the map a newcomer reads first.
+
+    The failure it already had: eleven of nineteen packages were missing,
+    including two added weeks earlier. A list covering half the packages is
+    worse than no list, because the omissions read as "these do not exist"
+    rather than "nobody updated this".
+
+    It drifted for a findable reason. Every other list in this repository is
+    either derived or guarded, and `docs/reference.md` stayed correct through
+    the same period *because* a test enforced it. This is that test, pointed at
+    the other file.
+    """
+    documented = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    packages = sorted(
+        path.name
+        for path in SRC.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file() and path.name != "__pycache__"
+    )
+    missing = [name for name in packages if f"`{name}/`" not in documented]
+    assert not missing, (
+        f"packages with no entry in CLAUDE.md's layer list: {missing}. "
+        "Add a line saying what seam each one owns, or the map stops matching "
+        "the territory."
+    )
+
+
+def test_the_layer_list_names_no_package_that_is_gone() -> None:
+    """The other direction, which is the quieter half.
+
+    A deleted package leaves a line describing a seam that no longer exists,
+    and a reader trusts it precisely because the rest of the list is accurate.
+    """
+    import re
+
+    documented = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    listed = set(re.findall(r"^- `([a-z_]+)/`", documented, re.MULTILINE))
+    real = {
+        path.name for path in SRC.iterdir() if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    stale = sorted(listed - real)
+    assert not stale, f"CLAUDE.md describes packages that no longer exist: {stale}"
+
+
 def test_ci_installs_every_extra_so_optional_tests_actually_run() -> None:
     """Tests behind an optional dependency skip silently without it.
 
