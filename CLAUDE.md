@@ -5,17 +5,37 @@ LLM can find code and docs by meaning instead of by grep. See
 `docs/iteration-1-plan.md` for the design and the reasoning behind it, and
 `docs/iteration-2-plan.md` for document classification and the MCP server.
 
-Layers, and the seam each one owns:
+Layers, and the seam each one owns. Kept complete on purpose: a list that
+covers half the packages is worse than none, because it reads as if the others
+do not exist.
 
 - `config/` — `workspace.yaml` (what to index, committable) and `.env` (how to
   index, secret). Only the former is hot-reloaded.
 - `obs/` — logging. Set up before anything else runs.
+- `models/` — the shared value objects. No behaviour beyond validation.
 - `discovery/` — what files exist and what we know about them. Never opens a file.
+- `secrets/` — keeps credentials out of the index, and therefore out of API
+  requests. Withholding is destructive, so a false positive is silent data loss.
+- `classification/` — what *role* a document plays (spec, design, changelog),
+  which is a different axis from how to chunk it.
 - `chunking/` — one strategy per `FileKind`, resolved through a registry.
 - `embedding/` — dense via pydantic-ai (provider-swappable), sparse via fastembed.
 - `rerank/` — `Reranker` protocol; `NoopReranker` is how reranking turns off.
-- `storage/` — `VectorStore` protocol over Qdrant, one collection per embedding space.
+- `storage/` — `VectorStore` protocol over **Qdrant and MongoDB Atlas**, one
+  collection per embedding space. A cross-backend contract suite keeps them
+  honest.
 - `state/` — SQLite manifest driving incremental reindex.
+- `graph/` — what files reference, and what references them: imports, and HTTP
+  route edges that cross repositories.
+- `grounding/` — whether a codebase records *why* it is the way it is, so an
+  empty answer can be told from an absent one.
+- `worktrees/` — reporting results as one git checkout sees them.
+- `pipeline/` — the indexing run itself, including the brakes on deletion.
+- `search/` — embed the query, fuse the branches, rerank, flag stale results.
+- `mcp/` — the MCP surface: how an agent reaches the index mid-session.
+- `watching/` — keeping the index fresh without a manual run.
+- `evaluation/` — retrieval-quality measurement. Every tuning knob is settled
+  here rather than by feel.
 
 # Code organization mandates
 

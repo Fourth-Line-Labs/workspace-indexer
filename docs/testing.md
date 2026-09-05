@@ -93,7 +93,7 @@ filter. It takes about two minutes.
 
 ---
 
-## 3. structlog: the trap worth knowing
+## 3. structlog: two traps worth knowing
 
 `capture_logs` mutates the configured processor list **in place** rather than
 replacing it. Its source says why:
@@ -133,6 +133,40 @@ stop mattering.
 exactly like *"the code never logged"*. It surfaced as two `StopIteration`s in
 `test_watcher.py`; the same leak under an `assert not [...]` would have been
 invisible.
+
+### The other way `capture_logs` returns nothing
+
+The trap above is about a *fresh list*. There is a second one with the same
+symptom and a different cause, and it costs the same hour.
+
+`capture_logs` installs its capturing processor when it is entered. Anything
+that calls `configure_logging` **after** that replaces the processor list
+outright and the capture is silently undone:
+
+```python
+with structlog.testing.capture_logs() as logs:
+    CliRunner().invoke(app, ["watch", ...])   # calls configure_logging inside
+assert logs == []                              # empty -- and the line *was* logged
+```
+
+It surfaced writing the tests for #61. `capture_logs` came back empty while
+pytest's own captured output plainly showed the event being emitted a few lines
+below — which is the tell: **if the event appears in captured stdout but not in
+`logs`, the capture was replaced, not missed.**
+
+The fix is not to fight it. Any test that drives a CLI command should assert on
+the **log file** instead:
+
+```python
+entries = [json.loads(line) for line in (tmp_path / "l-watch.jsonl").read_text().splitlines()]
+```
+
+That is closer to the thing under test anyway — the complaint in #61 was that a
+crash left no trace *in the JSONL*, so the JSONL is what has to be checked. Two
+details it needs: the file name carries the command (`l-watch.jsonl`, not
+`l.jsonl`), and `configure_logging` is idempotent, so a test module driving more
+than one command needs `reset_for_tests()` between them or the first one pins
+the path for all of them.
 
 ---
 
