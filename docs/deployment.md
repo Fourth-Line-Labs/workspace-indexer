@@ -241,6 +241,15 @@ names it for exactly that reason.
 the protocol channel; a single stray line on it makes the stream unparseable
 and every call fails. If you add logging, keep it off stdout.
 
+**Each command writes its own file**, with its name spliced in before the
+suffix: `workspace-indexer-serve.jsonl`, `-index.jsonl`, `-watch.jsonl`. Two
+processes sharing one rotating file cannot both roll it over — measured on
+Linux with three writers through the stdlib handler, 346 of 360 lines survived
+— and on Windows the rename fails outright with `WinError 32`. The file sink
+locks around appends and rollover for the same reason: every editor session
+running an MCP server is another `serve` process on the same file. Sessions
+stay tellable apart by the `run_id` on every line.
+
 ---
 
 ## 5. Keeping the index current
@@ -282,12 +291,24 @@ watches per *user* — often 65536, sometimes 8192 — and it is shared with eve
 editor and language server already running. A workspace containing
 `node_modules` will exhaust it, and the failure reads
 `OSError: [Errno 28] No space left on device`, which has nothing to do with
-disk space. The watcher counts directories up front and logs the headroom;
-`node_modules`, `.venv`, `target` and friends are skipped for watching whatever
-your index excludes say.
+disk space.
+
+**The watch is placed on exactly the directories the index looks in**, and
+nowhere else. inotify watches directories, so the cost is per directory either
+way — watching a root recursively just meant watching every directory under it,
+including the ones the index ignores. Measured on a 1,154-file workspace:
+**1,517 directories watched before, 215 after**. `watch.scoped` logs the count
+at startup and the budget check counts the real scope.
+
+`node_modules`, `.venv`, `target` and friends are skipped whatever your index
+excludes say, because this is about the watch budget rather than index quality.
+Index one of those trees without excluding it and the index will hold it while
+the watcher will not see it change — accepted, because exhausting the limit
+stops the watcher working at all.
 
 This is the other reason the ignore rules matter. They are not only about index
-quality — they are what keeps the watcher functional.
+quality — they are what keeps the watcher functional, and now they are also
+what keeps it from walking into a path it cannot read.
 
 Editing `workspace.yaml` reloads it live. Settings and ignore rules take effect
 immediately; **a newly added root still needs `watch` restarted**, because the
