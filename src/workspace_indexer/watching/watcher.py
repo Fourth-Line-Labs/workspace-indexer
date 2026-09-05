@@ -25,15 +25,13 @@ from workspace_indexer.watching.change_debouncer import ChangeDebouncer
 from workspace_indexer.watching.exclude_filter import ExcludeFilter
 from workspace_indexer.watching.filesystem_probe import FilesystemProbe
 from workspace_indexer.watching.inotify_budget import InotifyBudget
+from workspace_indexer.watching.watch_scope import UNWATCHED_DIRS, WatchScope
 
 log = get_logger("workspace_indexer.watching")
 
-# Directory names never worth an inotify watch. Not the same list as the index
-# excludes: this is about the watch *budget*, and these are the trees that
-# exhaust it. A file inside one is still ignored by the index rules anyway.
-UNWATCHED_DIRS = frozenset(
-    {".git", "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build"}
-)
+# Re-exported from its new home so `from ...watching.watcher import
+# UNWATCHED_DIRS` keeps working; it lives with the code that applies it.
+__all__ = ["UNWATCHED_DIRS", "Watcher"]
 
 
 class Watcher:
@@ -54,6 +52,11 @@ class Watcher:
         self._budget = budget or InotifyBudget.detect()
         self._reload_config = reload_config
         self._debouncer = ChangeDebouncer(config, self._config_path)
+        self._scope = WatchScope(config)
+        # Set when a directory appears that the index would look in. The
+        # watch cannot be extended while it runs, so this asks run() to
+        # rebuild rather than silently leaving the new tree unwatched.
+        self._rescope = False
 
     @property
     def settings(self) -> WatchSection:
@@ -95,11 +98,15 @@ class Watcher:
         ]
         if not native:
             return
+        # Counted from the scope rather than from a coarse name list: the
+        # watch is placed on exactly these directories, so this is the real
+        # number rather than an estimate that was always too high.
+        watched = set(self._scope.directories())
+        native_roots = {root.path.expanduser().resolve() for root in native}
         needed = sum(
-            self._budget.count_directories(
-                root.path.expanduser().resolve(), excluded=set(UNWATCHED_DIRS)
-            )
-            for root in native
+            1
+            for directory in watched
+            if any(directory == base or base in directory.parents for base in native_roots)
         )
         self._budget.check(needed)
 
@@ -107,11 +114,6 @@ class Watcher:
         """Watch until cancelled, reindexing each root whose files changed."""
         plan = self.plan()
         self.check_budget()
-        paths = [str(r.path.expanduser().resolve()) for r in self._config.workspace.roots]
-        if self._config_path is not None and self._config.watch.reload_config:
-            # Watched explicitly: workspace.yaml usually sits outside every
-            # root, so nothing else would notice it change.
-            paths.append(str(self._config_path))
 
         # One poll interval covers the whole watch, so any polled root forces
         # polling for all of them. watchfiles offers no per-path mode, and
@@ -124,25 +126,64 @@ class Watcher:
             debounce_ms=self._config.watch.debounce_ms,
         )
 
-        try:
-            await self._watch(paths, stop, force_polling)
-        except WatchfilesRustInternalError as exc:
-            # The Rust watcher failed while walking, not while reporting. A
-            # filter cannot prevent this: watchfiles filters changes the
-            # watcher has already produced, so recursion happens first. The
-            # observed trigger is a dangling symlink or broken reparse point
-            # *inside* a directory `index.exclude` already skips -- which means
-            # there is no configuration that avoids it, and a raw traceback
-            # leaves the operator with nothing to act on.
-            log.error(
-                "watch.walk_failed",
-                error=str(exc),
-                detail="the filesystem watcher could not read a path while walking a "
-                "watched root. This happens even for paths index.exclude skips, "
-                "because the OS-level watch descends before any filter runs. The "
-                "error names the path: remove or repair it, then restart watch.",
+        while True:
+            paths = [str(p) for p in self._scope.directories()]
+            if self._config_path is not None and self._config.watch.reload_config:
+                # Watched explicitly: workspace.yaml usually sits outside every
+                # root, so nothing else would notice it change.
+                paths.append(str(self._config_path))
+            log.info("watch.scoped", directories=len(paths))
+
+            self._rescope = False
+            try:
+                await self._watch(paths, stop, force_polling)
+            except WatchfilesRustInternalError as exc:
+                self._report_walk_failure(exc)
+                raise
+            if not self._rescope or (stop is not None and stop.is_set()):
+                return
+            # A directory the index cares about appeared. Nothing can be added
+            # to a running watch, so the only way to cover it is to rebuild --
+            # rare in practice, because build output is excluded and excluded
+            # directories do not trigger this.
+            log.info(
+                "watch.rescoping",
+                detail="a new directory inside a watched tree needs its own watch, "
+                "which cannot be added to a running watcher",
             )
-            raise
+
+    def _is_new_directory(self, path: Path) -> bool:
+        """Is this a directory the index would look in?
+
+        Both halves matter. A new *file* needs no new watch -- its directory is
+        already watched. And a new directory the index ignores is not worth a
+        rebuild, which is what keeps build output from restarting the watcher
+        every time it runs.
+        """
+        try:
+            if not path.is_dir():
+                return False
+        except OSError:
+            return False
+        return self._scope.covers(path)
+
+    def _report_walk_failure(self, exc: WatchfilesRustInternalError) -> None:
+        """The Rust watcher failed on a path, rather than reporting a change.
+
+        Much rarer than it was: the watch is now scoped to the directories the
+        index would look in, so a broken symlink inside an excluded tree is
+        never touched at all. What is left is a path we *do* watch becoming
+        unreadable while the watcher holds it -- which no configuration avoids,
+        and which a raw traceback gives an operator nothing to act on.
+        """
+        log.error(
+            "watch.walk_failed",
+            error=str(exc),
+            detail="the filesystem watcher could not read a path it was watching. "
+            "The error names it: remove or repair it, then restart watch. If it "
+            "sits in a tree you do not index, adding it to index.exclude will keep "
+            "the watcher out of it as well.",
+        )
 
     async def _watch(
         self, paths: list[str], stop: asyncio.Event | None, force_polling: bool
@@ -154,13 +195,15 @@ class Watcher:
             step=min(50, self._config.watch.debounce_ms),
             force_polling=force_polling,
             poll_delay_ms=self._config.watch.poll_interval_ms,
-            recursive=True,
-            # Excluded trees stop waking a reindex. Does not prevent the walk
-            # -- see ExcludeFilter -- but removes the work after it.
+            # Not recursive: recursion is what descends into excluded trees,
+            # and the Rust layer accepts no exclusion of its own. Every
+            # directory worth watching is named explicitly instead.
+            recursive=False,
+            # Still worth having with a scoped watch: it drops editor
+            # scratch files and `.pyc` beside a file we do watch, which no
+            # amount of choosing directories can exclude.
             watch_filter=ExcludeFilter(self._config),
             # A directory we cannot read is not a reason to kill the watch.
-            # Partial mitigation only: the observed Windows failure is an IO
-            # error rather than a permission one, and this does not cover it.
             ignore_permission_denied=True,
         ):
             await self.handle_changes(batch)
@@ -172,8 +215,11 @@ class Watcher:
         loop, and driving a torn config write through the real watch is a race
         rather than a test.
         """
-        for _, raw in batch:
-            self._debouncer.add(Path(raw))
+        for change, raw in batch:
+            path = Path(raw)
+            if change is Change.added and not self._rescope and self._is_new_directory(path):
+                self._rescope = True
+            self._debouncer.add(path)
 
         roots, config_changed = self._debouncer.drain()
 
@@ -204,3 +250,4 @@ class Watcher:
             log.error("watch.config_invalid", error=str(exc))
             return
         self._debouncer = ChangeDebouncer(self._config, self._config_path)
+        self._scope = WatchScope(self._config)
