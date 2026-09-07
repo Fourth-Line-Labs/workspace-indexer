@@ -866,3 +866,88 @@ def test_coverage_separates_no_edges_from_no_extractor(manifest: Manifest) -> No
     # Present, at zero -- the caller decides what that means from the
     # supported-language list, which is why both numbers are reported.
     assert coverage["scss"] == (0, 1)
+
+
+def test_origins_round_trip_and_group_by_language(manifest: Manifest) -> None:
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(source.root_label, source.rel_path, [_edge("os"), _edge("mine")])
+
+    manifest.record_origins(
+        [
+            (source.root_label, source.rel_path, "os", "framework"),
+            (source.root_label, source.rel_path, "mine", "first_party"),
+        ]
+    )
+
+    coverage = manifest.origin_coverage()["python"]
+    assert coverage.total == 2
+    assert coverage.framework == 1
+    assert coverage.first_party == 1
+    assert coverage.unrecorded == 0
+
+
+def test_an_unclassified_origin_stays_distinguishable_from_an_unrecorded_one(
+    manifest: Manifest,
+) -> None:
+    """The distinction the whole bucket scheme exists to preserve.
+
+    "Classification never ran" means re-index; "it ran and no rule claimed
+    this" means write a rule. One number for both loses the difference.
+    """
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(source.root_label, source.rel_path, [_edge("a"), _edge("b", line=2)])
+    manifest.record_origins([(source.root_label, source.rel_path, "a", "unclassified")])
+
+    coverage = manifest.origin_coverage()["python"]
+    assert coverage.unclassified == 1
+    assert coverage.unrecorded == 1
+
+
+def test_imports_for_origin_reports_the_resolution_state(manifest: Manifest) -> None:
+    """Classification needs to know what resolved, because a resolved edge is
+    first-party by construction whatever it is called."""
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(source.root_label, source.rel_path, [_edge("os"), _edge(".sib", 2)])
+    manifest.set_resolved_path(source.root_label, source.rel_path, ".sib", "repo/sib.py")
+
+    by_module = {module: resolved for _, _, module, _, _, resolved in manifest.imports_for_origin()}
+    assert by_module == {"os": None, ".sib": "repo/sib.py"}
+
+
+def test_the_gate_counts_only_resolved_first_party_edges(manifest: Manifest) -> None:
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(
+        source.root_label,
+        source.rel_path,
+        [_edge(".hit"), _edge(".miss", line=2), _edge("os", line=3)],
+    )
+    manifest.set_resolved_path(source.root_label, source.rel_path, ".hit", "repo/hit.py")
+    manifest.record_origins(
+        [
+            (source.root_label, source.rel_path, ".hit", "first_party"),
+            (source.root_label, source.rel_path, ".miss", "first_party"),
+            (source.root_label, source.rel_path, "os", "framework"),
+        ]
+    )
+
+    coverage = manifest.origin_coverage()["python"]
+    # The framework edge is excluded from the denominator, which is the point:
+    # against all three edges this would read 33%.
+    assert coverage.first_party == 2
+    assert coverage.first_party_resolved == 1
+    assert coverage.first_party_resolution == 0.5
+
+
+def test_origins_are_dropped_with_their_file(manifest: Manifest) -> None:
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(source.root_label, source.rel_path, [_edge("os")])
+    manifest.record_origins([(source.root_label, source.rel_path, "os", "framework")])
+
+    manifest.forget_file(source.root_label, source.rel_path)
+
+    assert manifest.origin_coverage() == {}

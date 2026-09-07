@@ -6,6 +6,7 @@ files on a rerun stop at the first step for the price of one stat().
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 
 from workspace_indexer.chunking import ChunkerRegistry, prefetch_languages, read_source
@@ -17,6 +18,7 @@ from workspace_indexer.embedding.embedding_service import EmbeddingService
 from workspace_indexer.embedding.sparse_backend import SparseBackend
 from workspace_indexer.graph import ImportEdge, ImportScanner
 from workspace_indexer.graph.import_resolver import ImportResolver
+from workspace_indexer.graph.origin_classifier import OriginClassifier
 from workspace_indexer.graph.route_resolver import RouteResolver
 from workspace_indexer.graph.route_scanner import RouteScanner
 from workspace_indexer.models import EmbeddingSpace, RunStats, SourceFile
@@ -255,6 +257,7 @@ class Indexer:
                 allow_deletes=allow_deletes,
             )
             self._resolve_imports(stats)
+            self._classify_origins()
             self._resolve_routes(stats)
 
     def _prepare(
@@ -546,6 +549,50 @@ class Indexer:
             resolved=resolved,
             detail="unresolved edges are packages, tsconfig aliases or C# "
             "namespaces, which need more than the file list",
+        )
+
+    def _classify_origins(self) -> None:
+        """Record where each import points, so coverage has a denominator.
+
+        After resolution, never before: a resolved edge is first-party by
+        construction, so running this first would classify an edge by what
+        resolution had not managed yet.
+
+        Every edge each run rather than only the unclassified ones. A
+        resolution landing this run changes a decision made last run, and one
+        SELECT plus one executemany is cheaper than tracking which rows a
+        resolution pass invalidated.
+        """
+        edges = self._manifest.imports_for_origin()
+        if not edges:
+            return
+
+        classifier = OriginClassifier()
+        origins = [
+            (
+                root_label,
+                rel_path,
+                module,
+                classifier.classify(
+                    module,
+                    language=language,
+                    is_relative=is_relative,
+                    resolved=resolved,
+                    root_label=root_label,
+                    from_path=rel_path,
+                ).value,
+            )
+            for root_label, rel_path, module, language, is_relative, resolved in edges
+        ]
+        self._manifest.record_origins(origins)
+
+        counts = Counter(origin for *_, origin in origins)
+        log.info(
+            "graph.origins_classified",
+            edges=len(origins),
+            **{str(name): count for name, count in counts.items()},
+            detail="first_party is the only bucket where an unresolved edge is "
+            "a defect; unclassified is the queue for the next rule",
         )
 
     def _resolve_routes(self, stats: RunStats) -> None:

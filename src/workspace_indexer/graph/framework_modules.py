@@ -3,8 +3,9 @@
 Kept apart from declared dependencies because the evidence differs in kind: a
 package id is read from a manifest the build already depends on, while this is
 a membership test against a list that ships with the language. Where the two
-overlap -- `System.Text.Json` is both a BCL namespace and a NuGet package --
-the declared one wins, because declared data beats a prefix.
+overlap the declared one wins, because declared data beats a prefix -- and they
+do overlap: `System.Text.Json` is part of .NET's standard library *and* a
+NuGet package you can reference explicitly.
 
 Everything unrecognised returns False so it lands in `UNCLASSIFIED`, where the
 gap is visible and countable. A permissive default would put it in `FRAMEWORK`,
@@ -51,10 +52,17 @@ def is_framework_module(module: str, language: str) -> bool:
         # claimed as first-party before this is ever consulted.
         return module.split(".", 1)[0] in sys.stdlib_module_names
     if language == "csharp":
-        # The BCL is one namespace root. `Microsoft.*` is deliberately not
-        # treated as framework: some of it is the BCL, some ships as packages,
-        # and much arrives via the shared framework with no PackageReference
-        # anywhere. Left for the declared-dependency rule to claim, and
+        # .NET's standard library sits under one namespace root, so this is a
+        # prefix test rather than a list.
+        #
+        # `Microsoft.*` is deliberately NOT treated as framework, because the
+        # prefix tells you nothing about where the code comes from. It spans
+        # three different origins at once: `Microsoft.Win32.*` is standard
+        # library, `Microsoft.Extensions.*` is mostly NuGet packages, and
+        # `Microsoft.AspNetCore.*` arrives through the shared framework that
+        # the Web SDK references implicitly -- so it appears in no
+        # PackageReference anywhere. One prefix, three answers. Left for the
+        # declared-dependency rule to claim where a manifest names it, and
         # otherwise counted as unclassified rather than guessed at.
         return module == "System" or module.startswith("System.")
     if language in _JS_LANGUAGES:

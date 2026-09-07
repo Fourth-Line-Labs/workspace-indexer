@@ -24,6 +24,7 @@ from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.graph.dependency import Dependency
 from workspace_indexer.graph.dependent import Dependent
 from workspace_indexer.graph.import_edge import ImportEdge
+from workspace_indexer.graph.origin_coverage import OriginCoverage
 from workspace_indexer.graph.route_call import RouteCall
 from workspace_indexer.graph.route_declaration import RouteDeclaration
 from workspace_indexer.graph.route_target import RouteTarget
@@ -74,7 +75,10 @@ class Manifest:
                 "unpriced_requests": "INTEGER NOT NULL DEFAULT 0",
                 "cost_is_estimate": "INTEGER NOT NULL DEFAULT 0",
             },
-            "imports": {"resolved_path": "TEXT"},
+            # Nullable on purpose: NULL means classification has never run
+            # over this row, which must stay distinguishable from "it ran
+            # and no rule claimed this edge".
+            "imports": {"resolved_path": "TEXT", "origin": "TEXT"},
             "route_edges": {"resolved_root": "TEXT"},
         }
         for table, columns in additions.items():
@@ -376,6 +380,45 @@ class Manifest:
             for r in rows
         ]
 
+    def imports_for_origin(self) -> list[tuple[str, str, str, str, bool, str | None]]:
+        """Every edge as (root_label, rel_path, module, language, is_relative,
+        resolved_path), for classification.
+
+        All of them, not just the unclassified ones: an edge that resolves is
+        first-party by construction, so a resolution that lands this run
+        changes an origin decided last run. Re-deciding all of them is one
+        SELECT and one executemany, which is cheaper than tracking which rows
+        a resolution pass invalidated.
+        """
+        rows = self._db.execute(
+            "SELECT i.root_label, i.rel_path, i.module, i.is_relative, "
+            "i.resolved_path, f.language "
+            "FROM imports i JOIN files f "
+            "ON f.root_label = i.root_label AND f.rel_path = i.rel_path"
+        )
+        return [
+            (
+                str(r["root_label"]),
+                str(r["rel_path"]),
+                str(r["module"]),
+                str(r["language"] or ""),
+                bool(r["is_relative"]),
+                None if r["resolved_path"] is None else str(r["resolved_path"]),
+            )
+            for r in rows
+        ]
+
+    def record_origins(self, origins: Iterable[tuple[str, str, str, str]]) -> None:
+        """Set the origin for each (root_label, rel_path, module, origin).
+
+        Keyed without `line`, like `set_resolved_path`: a file importing the
+        same module twice imports it from the same place both times.
+        """
+        self._db.executemany(
+            "UPDATE imports SET origin = ? WHERE root_label = ? AND rel_path = ? AND module = ?",
+            [(origin, root, rel, module) for root, rel, module, origin in origins],
+        )
+
     def set_resolved_path(self, root_label: str, rel_path: str, module: str, resolved: str) -> None:
         self._db.execute(
             "UPDATE imports SET resolved_path = ? "
@@ -640,6 +683,42 @@ class Manifest:
             "WHERE f.language IS NOT NULL GROUP BY f.language"
         )
         return {str(r["language"]): (int(r["resolved"] or 0), int(r["total"])) for r in rows}
+
+    def origin_coverage(self) -> dict[str, OriginCoverage]:
+        """Per language: edges split by where the import points.
+
+        Counted in SQL rather than by loading the edges, because the only
+        question asked of this is how many, and the table is the one thing that
+        already knows.
+        """
+        rows = self._db.execute(
+            """
+            SELECT f.language AS language,
+                   COUNT(*) AS total,
+                   SUM(i.origin = 'first_party') AS first_party,
+                   SUM(i.origin = 'first_party'
+                       AND i.resolved_path IS NOT NULL) AS first_party_resolved,
+                   SUM(i.origin = 'declared_dependency') AS declared_dependency,
+                   SUM(i.origin = 'framework') AS framework,
+                   SUM(i.origin = 'unclassified') AS unclassified,
+                   SUM(i.origin IS NULL) AS unrecorded
+            FROM imports i JOIN files f
+            ON f.root_label = i.root_label AND f.rel_path = i.rel_path
+            WHERE f.language IS NOT NULL GROUP BY f.language
+            """
+        )
+        return {
+            str(r["language"]): OriginCoverage(
+                total=int(r["total"]),
+                first_party=int(r["first_party"] or 0),
+                first_party_resolved=int(r["first_party_resolved"] or 0),
+                declared_dependency=int(r["declared_dependency"] or 0),
+                framework=int(r["framework"] or 0),
+                unclassified=int(r["unclassified"] or 0),
+                unrecorded=int(r["unrecorded"] or 0),
+            )
+            for r in rows
+        }
 
     def indexed_documents(self) -> list[tuple[str, str, str]]:
         """Every indexed file as (abs_path, rel_path, doc_type).

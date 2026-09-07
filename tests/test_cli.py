@@ -124,6 +124,26 @@ def test_status_reports_roots_spaces_and_runs(project: Path) -> None:
 
 
 @pytest.mark.integration
+def test_status_reports_import_origins_with_nested_denominators(project: Path) -> None:
+    """The gate has to be visible, not just stored.
+
+    Asserted through the command rather than by calling the formatter, because
+    what matters is that a reader of `status` can see which denominator a
+    percentage is against.
+    """
+    runner.invoke(app, ["index"])
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.stdout
+    out = plain(result.stdout)
+    assert "import resolution by origin" in out
+    assert "first-party" in out
+    assert "non-framework" in out
+    # An index that has just run must not report edges as unclassified-by-
+    # omission; classification is part of the run, not a later step.
+    assert "no origin recorded" not in out
+
+
+@pytest.mark.integration
 def test_explain_shows_chunks_for_one_file(project: Path, workspace: Path) -> None:
     target = workspace / "repo_one" / "src" / "widget.py"
     result = runner.invoke(app, ["explain", str(target)])

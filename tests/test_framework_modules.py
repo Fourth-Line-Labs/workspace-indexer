@@ -34,20 +34,22 @@ def test_python_relative_import_is_not_framework() -> None:
     assert not is_framework_module("..db.models", "python")
 
 
-def test_csharp_bcl_root_and_namespaces() -> None:
+def test_csharp_standard_library_root_and_namespaces() -> None:
     assert is_framework_module("System", "csharp")
     assert is_framework_module("System.Text.Json", "csharp")
 
 
 def test_csharp_system_prefix_requires_a_separator() -> None:
-    # `SystemTools` is somebody's own namespace, not the BCL.
+    # `SystemTools` is somebody's own namespace, not the standard library.
     assert not is_framework_module("SystemTools", "csharp")
     assert not is_framework_module("SystemsBiology.Core", "csharp")
 
 
 def test_csharp_microsoft_is_deliberately_not_framework() -> None:
-    # Ambiguous by nature: some is BCL, some ships as a package, much arrives
-    # through the shared framework. Left unclassified rather than guessed.
+    # Ambiguous by nature: `Microsoft.Win32.*` is standard library,
+    # `Microsoft.Extensions.*` is mostly packages, and `Microsoft.AspNetCore.*`
+    # comes from the shared framework with no PackageReference at all. One
+    # prefix cannot answer for all three, so it stays unclassified.
     assert not is_framework_module("Microsoft.Extensions.AI", "csharp")
     assert not is_framework_module("Microsoft.AspNetCore.Mvc", "csharp")
 
