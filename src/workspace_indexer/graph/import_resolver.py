@@ -24,6 +24,7 @@ What it deliberately does not do:
 from __future__ import annotations
 
 from workspace_indexer.graph.import_edge import ImportEdge
+from workspace_indexer.graph.unit import unit_of
 from workspace_indexer.obs.logging import get_logger
 
 log = get_logger("workspace_indexer.graph.resolve")
@@ -62,8 +63,7 @@ class ImportResolver:
     def resolve(
         self, edge: ImportEdge, *, from_path: str, root_label: str, language: str
     ) -> str | None:
-        # A unit is the first path segment: the repository this file is in.
-        unit = from_path.split("/")[0] if "/" in from_path else ""
+        unit = unit_of(from_path)
         known = self._files.get((root_label, unit))
         if not known:
             return None

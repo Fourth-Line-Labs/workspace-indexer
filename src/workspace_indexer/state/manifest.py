@@ -27,6 +27,7 @@ from workspace_indexer.graph.import_edge import ImportEdge
 from workspace_indexer.graph.route_call import RouteCall
 from workspace_indexer.graph.route_declaration import RouteDeclaration
 from workspace_indexer.graph.route_target import RouteTarget
+from workspace_indexer.graph.unit import unit_of
 from workspace_indexer.models import Chunk, DocumentType, RunStats, SourceFile, ToolCall
 from workspace_indexer.obs.logging import get_logger
 from workspace_indexer.state.chunk_delta import ChunkDelta
@@ -668,7 +669,7 @@ class Manifest:
         grouped: dict[tuple[str, str], set[str]] = {}
         for row in self._db.execute("SELECT root_label, rel_path FROM files"):
             rel = str(row["rel_path"])
-            unit = rel.split("/")[0] if "/" in rel else ""
+            unit = unit_of(rel)
             grouped.setdefault((str(row["root_label"]), unit), set()).add(rel)
         return grouped
 
