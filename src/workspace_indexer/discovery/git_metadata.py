@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from workspace_indexer.discovery.tracked_paths import TrackedPaths
 from workspace_indexer.models import RepoInfo
 from workspace_indexer.obs.logging import get_logger
 
@@ -18,7 +19,10 @@ log = get_logger("workspace_indexer.discovery.git")
 _TIMEOUT = 10
 
 
-def _git(root: Path, *args: str) -> str | None:
+def _git(root: Path, *args: str, strip: bool = True) -> str | None:
+    """`strip=False` for `-z` output: a path may legitimately end in
+    whitespace, and trimming one while fixing silent file loss would be the
+    same bug in a new place."""
     try:
         result = subprocess.run(
             ["git", *args],
@@ -33,13 +37,30 @@ def _git(root: Path, *args: str) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def is_repo(root: Path) -> bool:
     # --git-dir gives a truthy answer for worktrees and submodules too, where a
     # bare `(root / ".git").is_dir()` check would say no.
     return _git(root, "rev-parse", "--git-dir") is not None
+
+
+def tracked_paths(root: Path) -> TrackedPaths | None:
+    """Everything in the repository's index, relative to its root.
+
+    One subprocess per repository, which is what makes this affordable where
+    `git check-ignore` per file is not: the answer is identical for every path
+    in the repository, so it is fetched once and cached by the caller.
+
+    None when the directory is not a repository, or git could not answer. Both
+    degrade to pattern-matching alone -- the behaviour before this existed --
+    rather than to indexing something a user asked to be ignored.
+    """
+    out = _git(root, "ls-files", "-z", strip=False)
+    if out is None:
+        return None
+    return TrackedPaths.from_files(path for path in out.split("\0") if path)
 
 
 def is_linked_worktree(path: Path) -> bool:
