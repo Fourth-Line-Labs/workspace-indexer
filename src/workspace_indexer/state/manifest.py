@@ -473,7 +473,7 @@ class Manifest:
         """
         rows = self._db.execute(
             "SELECT i.module AS module, i.line AS line, i.resolved_path AS resolved_path, "
-            "f.doc_type AS doc_type, f.language AS language "
+            "i.origin AS origin, f.doc_type AS doc_type, f.language AS language "
             "FROM imports i LEFT JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.resolved_path "
             "WHERE i.root_label = ? AND i.rel_path = ? "
@@ -485,6 +485,7 @@ class Manifest:
                 module=str(r["module"]),
                 line=int(r["line"]),
                 rel_path=str(r["resolved_path"]) if r["resolved_path"] else None,
+                origin=str(r["origin"]) if r["origin"] else None,
                 doc_type=str(r["doc_type"]) if r["doc_type"] else None,
                 language=str(r["language"]) if r["language"] else None,
             )

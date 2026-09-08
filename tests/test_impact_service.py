@@ -19,6 +19,7 @@ import pytest
 from tests.conftest import make_source
 from workspace_indexer.classification import Classification
 from workspace_indexer.graph import ImportEdge
+from workspace_indexer.graph.import_origin import ImportOrigin
 from workspace_indexer.mcp.impact_service import ImpactService
 from workspace_indexer.models import DocumentType, FileKind
 from workspace_indexer.state import Manifest
@@ -98,9 +99,25 @@ def graph(manifest: Manifest) -> Manifest:
         line=7,
         resolved="app/src/helper.py",
     )
-    # An edge we cannot follow: names a package, not a file in the index.
+    # Two edges we cannot follow, for opposite reasons. `httpx` is a declared
+    # package with no file in this workspace, so leaving it unresolved is
+    # correct. `app.src.missing` is first-party and unresolved, which is a gap
+    # in the graph -- the distinction the note has to keep.
     add_import(manifest, "app/src/helper.py", "httpx", line=1)
     add_import(manifest, "app/src/helper.py", "./service", line=2, resolved="app/src/service.py")
+
+    # Origins last, in one call: record_imports replaces every row for a file,
+    # so anything set between add_import calls would be wiped by the next one.
+    first = ImportOrigin.FIRST_PARTY.value
+    manifest.record_origins(
+        [
+            (ROOT, "app/src/service.py", "./helper", first),
+            (ROOT, "app/tests/test_helper.py", "app.src.helper", first),
+            (ROOT, "app/tests/test_service.py", "app.src.helper", first),
+            (ROOT, "app/src/helper.py", "./service", first),
+            (ROOT, "app/src/helper.py", "httpx", ImportOrigin.DECLARED_DEPENDENCY.value),
+        ]
+    )
     return manifest
 
 
@@ -144,7 +161,13 @@ def test_an_unfollowable_import_is_listed_not_dropped(graph: Manifest) -> None:
     assert modules["httpx"].rel_path is None
     assert modules["./service"].resolved is True
     assert modules["./service"].rel_path == "app/src/service.py"
-    assert report.note is not None and "outside the index" in report.note
+    # The note has to say *why* it could not be followed. A declared package
+    # is outside this workspace by nature; calling that the same thing as an
+    # unresolved first-party edge would send an agent to read a package that
+    # does not exist.
+    assert report.note is not None
+    assert "outside this workspace by nature" in report.note
+    assert "first-party but unresolved" not in report.note
 
 
 def test_an_ambiguous_path_is_not_guessed(graph: Manifest) -> None:
@@ -334,3 +357,55 @@ def test_the_calling_side_lists_what_it_reaches(manifest: Manifest) -> None:
     assert report.calls_total == 1
     # Unresolved, and saying so rather than implying the endpoint is missing.
     assert report.calls[0].resolved is False
+
+
+def test_the_note_reports_the_first_party_rate_not_the_all_edges_rate(graph: Manifest) -> None:
+    """The number an agent sees has to be the one that means something.
+
+    Against every edge this workspace reads 4 of 5 (80%), because one edge is a
+    declared package that was never reachable. Against first-party edges it is
+    4 of 4 -- and that is the figure worth acting on, because first-party is
+    the only origin where an unresolved edge is a defect.
+    """
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+
+    assert report.note is not None
+    assert "4 of 4 first-party python import edges resolve" in report.note
+    assert "(100%)" in report.note
+    # The remainder is accounted for rather than quietly dropped from view.
+    assert "1 edge(s) name the standard library or a declared dependency" in report.note
+    # And the old, misleading denominator is gone.
+    assert "4 of 5" not in report.note
+
+
+def test_an_unresolved_first_party_edge_is_called_a_gap_not_a_package(
+    graph: Manifest,
+) -> None:
+    """A first-party edge names a file that is indexed, so failing to reach it
+    is a hole in the graph. Reporting it as an external dependency sends an
+    agent off to read a package that does not exist."""
+    add_import(graph, "app/src/helper.py", "app.src.absent", line=4)
+    graph.record_origins(
+        [(ROOT, "app/src/helper.py", "app.src.absent", ImportOrigin.FIRST_PARTY.value)]
+    )
+
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+
+    assert report.note is not None
+    assert "first-party but unresolved" in report.note
+    assert "does exist and is indexed" in report.note
+
+
+def test_a_language_with_no_first_party_edges_reports_no_rate(manifest: Manifest) -> None:
+    """The C# position today: edges extracted, none identified as first-party
+    because that needs the namespace declarations table. No rate is not the
+    same as a rate of zero, and must not read as one."""
+    add_file(manifest, "app/Thing.cs", language="csharp")
+    add_import(manifest, "app/Thing.cs", "System.Text", line=1)
+    manifest.record_origins([(ROOT, "app/Thing.cs", "System.Text", ImportOrigin.FRAMEWORK.value)])
+
+    report = ImpactService(manifest).impact_of("app/Thing.cs")
+
+    assert report.note is not None
+    assert "no csharp import edge has been identified as first-party" in report.note
+    assert "%" not in report.note

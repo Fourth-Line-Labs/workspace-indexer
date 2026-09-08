@@ -18,6 +18,7 @@ import time
 
 from workspace_indexer.graph.dependency import Dependency
 from workspace_indexer.graph.dependent import Dependent
+from workspace_indexer.graph.import_origin import ImportOrigin
 from workspace_indexer.graph.import_scanner import SUPPORTED
 from workspace_indexer.mcp.impact_report import ImpactReport
 from workspace_indexer.mcp.tool_call_recorder import ToolCallRecorder
@@ -141,20 +142,8 @@ class ImpactService:
                     "here, so the real number of callers is higher -- run impact_of on "
                     "the re-export file to follow the next hop."
                 )
-            unresolved = sum(1 for d in dependencies if not d.resolved)
-            if unresolved:
-                parts.append(
-                    f"{unresolved} of {len(dependencies)} imports point outside the "
-                    "index -- packages, stdlib, or aliases we cannot follow -- and "
-                    "are listed with rel_path null."
-                )
-            coverage = self._manifest.resolution_coverage().get(language)
-            if coverage and coverage[1]:
-                got, total = coverage
-                parts.append(
-                    f"Workspace-wide, {got} of {total} {language} import edges resolve "
-                    "to an indexed file."
-                )
+            parts.extend(_unresolved_notes(dependencies))
+            parts.extend(_workspace_notes(language, self._manifest))
         if callers:
             parts.append(
                 f"{len(callers)} file(s) reach this one over HTTP rather than by import. "
@@ -184,6 +173,90 @@ class ImpactService:
                 duration_ms=(time.monotonic() - started) * 1000,
             )
         )
+
+
+def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
+    """What this file imports that we did not reach, split by why.
+
+    One sentence used to cover all of it, saying every unresolved edge pointed
+    "outside the index -- packages, stdlib, or aliases". That is true of a
+    framework or declared-dependency edge and false of a first-party one, which
+    names something indexed that the resolver could not follow. Reporting the
+    second as the first sends an agent off to read a package that does not
+    exist.
+    """
+    unresolved = [d for d in dependencies if not d.resolved]
+    if not unresolved:
+        return []
+
+    outside = [d for d in unresolved if d.origin in _OUTSIDE_ORIGINS]
+    inside = [d for d in unresolved if d.origin == _FIRST_PARTY]
+    unknown = [d for d in unresolved if d.origin is None]
+
+    notes: list[str] = []
+    if outside:
+        notes.append(
+            f"{len(outside)} of {len(dependencies)} imports name the standard library "
+            "or a declared dependency. Those are outside this workspace by nature, "
+            "are listed with rel_path null, and are not missing."
+        )
+    if inside:
+        notes.append(
+            f"{len(inside)} import(s) are first-party but unresolved -- they name code "
+            "in this workspace the resolver could not follow, so the file at the other "
+            "end does exist and is indexed. Gaps in the graph, not external "
+            "dependencies."
+        )
+    if unknown:
+        notes.append(
+            f"{len(unknown)} unresolved import(s) have no origin recorded, so whether "
+            "they should have resolved is unknown."
+        )
+    return notes
+
+
+def _workspace_notes(language: str, manifest: Manifest) -> list[str]:
+    """The workspace-wide rate, against the denominator that means something.
+
+    First-party edges rather than every edge. The all-edges figure is dominated
+    by however many packages a project happens to import, so it reads as a
+    broken graph when the resolver is working: python resolves every first-party
+    edge it has and scored 60% on the old denominator.
+    """
+    coverage = manifest.origin_coverage().get(language)
+    if coverage is None or not coverage.total:
+        return []
+
+    percent = coverage.first_party_resolution_percent
+    if percent is None:
+        return [
+            f"Workspace-wide, no {language} import edge has been identified as "
+            f"first-party, so there is no resolution rate to report for {language} "
+            f"yet -- all {coverage.total:,} edges are framework, declared dependencies "
+            "or unclassified."
+        ]
+
+    note = (
+        f"Workspace-wide, {coverage.first_party_resolved:,} of {coverage.first_party:,} "
+        f"first-party {language} import edges resolve to an indexed file ({percent}%). "
+        "First-party is the only denominator where an unresolved edge is a defect."
+    )
+    external = coverage.framework + coverage.declared_dependency
+    if external:
+        note += (
+            f" A further {external:,} edge(s) name the standard library or a declared "
+            "dependency and can never resolve to a file here."
+        )
+    if coverage.unclassified:
+        note += (
+            f" {coverage.unclassified:,} more have no origin rule yet, so they are "
+            "neither counted as reachable nor written off."
+        )
+    return [note]
+
+
+_FIRST_PARTY = ImportOrigin.FIRST_PARTY.value
+_OUTSIDE_ORIGINS = frozenset({ImportOrigin.FRAMEWORK.value, ImportOrigin.DECLARED_DEPENDENCY.value})
 
 
 def _pick(path: str, matches: list[tuple[str, str]]) -> tuple[str, str] | None:
