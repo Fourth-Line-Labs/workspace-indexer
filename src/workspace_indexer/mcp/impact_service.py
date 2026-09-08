@@ -222,37 +222,58 @@ def _workspace_notes(language: str, manifest: Manifest) -> list[str]:
     by however many packages a project happens to import, so it reads as a
     broken graph when the resolver is working: python resolves every first-party
     edge it has and scored 60% on the old denominator.
+
+    The counts here always sum to the total, deliberately. An agent that cannot
+    reconcile them has to guess whether the difference is unreachable code or a
+    number we withheld.
     """
     coverage = manifest.origin_coverage().get(language)
     if coverage is None or not coverage.total:
         return []
 
-    percent = coverage.first_party_resolution_percent
-    if percent is None:
+    # Nothing was classified at all. Said plainly rather than described as
+    # buckets that were never filled in: "we never looked" must not read as
+    # "we looked and found nothing", which is the conflation OriginCoverage
+    # exists to keep apart.
+    if coverage.unrecorded == coverage.total:
         return [
-            f"Workspace-wide, no {language} import edge has been identified as "
-            f"first-party, so there is no resolution rate to report for {language} "
-            f"yet -- all {coverage.total:,} edges are framework, declared dependencies "
-            "or unclassified."
+            f"Workspace-wide, none of the {coverage.total:,} {language} import edges "
+            "has an origin recorded, so there is no resolution rate to report -- this "
+            "index predates origin classification rather than having failed it. "
+            "Re-run `index` to populate it."
         ]
 
-    note = (
-        f"Workspace-wide, {coverage.first_party_resolved:,} of {coverage.first_party:,} "
-        f"first-party {language} import edges resolve to an indexed file ({percent}%). "
-        "First-party is the only denominator where an unresolved edge is a defect."
-    )
+    percent = coverage.first_party_resolution_percent
+    if percent is None:
+        parts = [
+            f"Workspace-wide, no {language} import edge has been identified as "
+            "first-party, so there is no resolution rate to report for it yet."
+        ]
+    else:
+        parts = [
+            f"Workspace-wide, {coverage.first_party_resolved:,} of "
+            f"{coverage.first_party:,} first-party {language} import edges resolve to "
+            f"an indexed file ({percent}%). First-party is the only denominator where "
+            "an unresolved edge is a defect."
+        ]
+
     external = coverage.framework + coverage.declared_dependency
     if external:
-        note += (
-            f" A further {external:,} edge(s) name the standard library or a declared "
+        parts.append(
+            f"A further {external:,} edge(s) name the standard library or a declared "
             "dependency and can never resolve to a file here."
         )
     if coverage.unclassified:
-        note += (
-            f" {coverage.unclassified:,} more have no origin rule yet, so they are "
+        parts.append(
+            f"{coverage.unclassified:,} more have no origin rule yet, so they are "
             "neither counted as reachable nor written off."
         )
-    return [note]
+    if coverage.unrecorded:
+        parts.append(
+            f"{coverage.unrecorded:,} predate the last classification run and have no "
+            "origin recorded at all."
+        )
+    return [" ".join(parts)]
 
 
 _FIRST_PARTY = ImportOrigin.FIRST_PARTY.value

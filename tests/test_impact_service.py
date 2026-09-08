@@ -384,12 +384,17 @@ def test_an_unresolved_first_party_edge_is_called_a_gap_not_a_package(
     """A first-party edge names a file that is indexed, so failing to reach it
     is a hole in the graph. Reporting it as an external dependency sends an
     agent off to read a package that does not exist."""
-    add_import(graph, "app/src/helper.py", "app.src.absent", line=4)
+    # On the decoy, not on helper.py. `record_imports` replaces every row for
+    # a file, so adding an edge to helper.py here would delete and re-insert
+    # its others -- losing `./service`'s resolution and `httpx`'s origin, and
+    # quietly testing against a graph the fixture did not intend. legacy/
+    # helper.py has no imports of its own, so there is nothing to wipe.
+    add_import(graph, "legacy/helper.py", "app.src.absent", line=1)
     graph.record_origins(
-        [(ROOT, "app/src/helper.py", "app.src.absent", ImportOrigin.FIRST_PARTY.value)]
+        [(ROOT, "legacy/helper.py", "app.src.absent", ImportOrigin.FIRST_PARTY.value)]
     )
 
-    report = ImpactService(graph).impact_of("app/src/helper.py")
+    report = ImpactService(graph).impact_of("legacy/helper.py")
 
     assert report.note is not None
     assert "first-party but unresolved" in report.note
@@ -409,3 +414,61 @@ def test_a_language_with_no_first_party_edges_reports_no_rate(manifest: Manifest
     assert report.note is not None
     assert "no csharp import edge has been identified as first-party" in report.note
     assert "%" not in report.note
+
+
+def test_adding_an_edge_to_the_decoy_leaves_the_fixture_intact(graph: Manifest) -> None:
+    """Guards the trap the previous test walks around.
+
+    `record_imports` deletes and re-inserts every row for a file, so an
+    `add_import` against an already-classified file silently strips the
+    resolutions and origins the fixture set. Pinned here so a future test that
+    reaches for the convenient file finds out from a failure rather than from a
+    passing assertion over a degraded graph.
+    """
+    add_import(graph, "legacy/helper.py", "app.src.absent", line=1)
+
+    helper = {d.module: d for d in graph.dependencies_of(ROOT, "app/src/helper.py")}
+    assert helper["./service"].rel_path == "app/src/service.py"
+    assert helper["httpx"].origin == ImportOrigin.DECLARED_DEPENDENCY.value
+
+
+def test_an_unclassified_index_is_not_described_as_a_classified_one(
+    manifest: Manifest,
+) -> None:
+    """ "We never looked" must not read as "we looked and found nothing".
+
+    An index predating the origin column has every edge unrecorded. Reporting
+    that as "all N edges are framework, declared dependencies or unclassified"
+    asserts a classification result that never happened.
+    """
+    add_file(manifest, "app/src/thing.py")
+    add_import(manifest, "app/src/thing.py", "httpx", line=1)
+
+    report = ImpactService(manifest).impact_of("app/src/thing.py")
+
+    assert report.note is not None
+    assert "has an origin recorded" in report.note
+    assert "predates origin classification" in report.note
+    assert "are framework, declared dependencies or unclassified" not in report.note
+
+
+def test_the_workspace_note_accounts_for_every_edge(graph: Manifest) -> None:
+    """The listed counts have to sum to the total, or an agent cannot tell a
+    withheld number from unreachable code."""
+    add_import(graph, "legacy/helper.py", "some.unruled.thing", line=1)
+
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+    coverage = graph.origin_coverage()["python"]
+
+    assert (
+        coverage.first_party
+        + coverage.framework
+        + coverage.declared_dependency
+        + coverage.unclassified
+        + coverage.unrecorded
+        == coverage.total
+    )
+    assert report.note is not None
+    # The unrecorded edge just added must be spoken for, not dropped.
+    assert coverage.unrecorded
+    assert "predate the last classification run" in report.note
