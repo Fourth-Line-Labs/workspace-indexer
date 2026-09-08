@@ -25,6 +25,9 @@ import pathspec
 from workspace_indexer.discovery.git_metadata import tracked_paths
 from workspace_indexer.discovery.skip_reason import SkipReason
 from workspace_indexer.discovery.tracked_paths import TrackedPaths
+from workspace_indexer.obs.logging import get_logger
+
+log = get_logger("workspace_indexer.discovery.ignore")
 
 _GITIGNORE = ".gitignore"
 
@@ -92,10 +95,20 @@ class IgnoreMatcher:
         checked-out workspace. Walking up finds the nearest one, so a submodule
         is answered with itself rather than its parent.
 
-        Stops at the matcher's root, matching where the .gitignore walk stops.
-        A repository above the root is not looked for and does not need to be:
-        no .gitignore above the root is applied either, so nothing up there can
-        wrongly ignore anything.
+        Stops at the matcher's root, and returns the root itself when nothing
+        above it was found. That fallback is not a nicety: a root that is a
+        subdirectory of a repository -- one package of a monorepo, say -- has
+        no `.git` at or below it, so the walk finds nothing, while a
+        `.gitignore` *at* the root still applies. Without the fallback the
+        override switches off for exactly those roots and a tracked file
+        matching such a pattern is dropped, which is the bug this module was
+        changed to fix, reproduced one level up.
+
+        Running `git ls-files` at the root rather than at the true repository
+        top is deliberate: it returns paths relative to where it ran and
+        limited to that subtree, which is the shape `holds` wants, so no
+        rebasing is needed. A root in no repository at all costs one failed
+        subprocess and then answers from cache.
         """
         if directory in self._repo_roots:
             return self._repo_roots[directory]
@@ -106,6 +119,9 @@ class IgnoreMatcher:
                 found = current
                 break
             if current == self._root:
+                # Nothing above it inside our reach, so ask at the root. If the
+                # root sits inside a repository, git answers from there.
+                found = self._root
                 break
             parent = current.parent
             if parent == current:
@@ -115,8 +131,28 @@ class IgnoreMatcher:
         return found
 
     def _tracked_for(self, repo: Path) -> TrackedPaths | None:
+        """Cached per repository, and loud when git owed us an answer.
+
+        The distinction matters because losing the override is silent by
+        nature: patterns still apply, files still disappear, and nothing
+        records that the thing meant to prevent that was switched off. A root
+        that is simply not a repository is an ordinary state and says nothing;
+        a directory holding a `.git` that git then declined to describe -- a
+        timeout on a cold index, a broken checkout -- is worth a line in the
+        log, because every tracked file under it is now at risk of being
+        skipped by a pattern.
+        """
         if repo not in self._tracked:
-            self._tracked[repo] = tracked_paths(repo)
+            found = tracked_paths(repo)
+            if found is None and (repo / ".git").exists():
+                log.warning(
+                    "gitignore.tracked_override_unavailable",
+                    repo=str(repo),
+                    detail="git could not list this repository's index, so "
+                    "gitignore patterns are applied without the tracked-file "
+                    "override and a committed file matching one may be skipped",
+                )
+            self._tracked[repo] = found
         return self._tracked[repo]
 
     def _is_tracked(self, path: Path, is_dir: bool) -> bool:
@@ -137,6 +173,14 @@ class IgnoreMatcher:
             relative = path.relative_to(repo).as_posix()
         except ValueError:  # pragma: no cover - defensive
             return False
+        if relative == ".":
+            # `path` *is* the repository root -- a submodule or nested checkout
+            # whose own directory matches a pattern in the parent. `TrackedPaths`
+            # derives directories from file paths, so it never holds ".", and
+            # answering False here pruned the entire nested repository. Git's
+            # view is the opposite: the gitlink is tracked in the parent index,
+            # so the pattern has no effect on it.
+            return bool(tracked.files)
         return tracked.holds(relative, is_dir=is_dir)
 
     def reason(self, path: Path, is_dir: bool = False) -> SkipReason | None:

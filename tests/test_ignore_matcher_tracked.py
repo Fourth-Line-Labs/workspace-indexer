@@ -7,6 +7,7 @@ specification wrong. Only git can settle what git would do.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,16 @@ def test_configured_excludes_still_win_over_tracked_status(repo: Path) -> None:
     write(repo / "logs" / "workspace-indexer.jsonl", "{}\n")
     write(repo / "data" / "manifest.sqlite3", "x")
     git_init(repo)  # commits them, so they are genuinely tracked
+    # And gitignore-matched, which the fixture's `lib/`+`build/` did not do.
+    # Without this the gitignore branch never fires, the tracked override is
+    # never consulted, and the ordering this test names cannot fail.
+    write(repo / ".gitignore", "lib/\nbuild/\nlogs/\n*.sqlite3\n")
+
+    both = IgnoreMatcher(repo, [], respect_gitignore=True)
+    assert both.reason(repo / "logs" / "workspace-indexer.jsonl") is None, (
+        "precondition: tracked + gitignored alone must be kept, or the test "
+        "below proves nothing about excludes winning"
+    )
 
     matcher = IgnoreMatcher(repo, ["logs/**", "**/*.sqlite3"], respect_gitignore=True)
     assert matcher.reason(repo / "logs" / "workspace-indexer.jsonl") is SkipReason.EXCLUDED
@@ -143,3 +154,83 @@ def test_a_file_at_the_repository_root_contributes_no_directories() -> None:
 def test_a_sibling_directory_is_not_claimed() -> None:
     paths = TrackedPaths.from_files(["a/b/thing.ts"])
     assert not paths.holds("a/c", is_dir=True)
+
+
+def test_a_nested_repository_whose_own_root_matches_a_parent_pattern(tmp_path: Path) -> None:
+    """A submodule or vendored checkout must not be pruned at its own root.
+
+    When the path being judged *is* the repo root the walk found,
+    `path.relative_to(repo)` is ".", and `TrackedPaths` derives directories
+    from file paths so it never holds that entry. Answering False there pruned
+    the whole nested repository, and because the walker prunes directories
+    before reading what is inside them, every file under it went with it.
+
+    Git's view is the opposite: the gitlink is tracked in the parent index, so
+    the pattern has no effect on it.
+    """
+    outer = tmp_path / "outer"
+    write(outer / "app.ts", "export const a = 1\n")
+    inner = outer / "vendor" / "inner"
+    write(inner / "core.ts", "export const c = 1\n")
+    git_init(inner)
+    git_init(outer)
+    write(outer / ".gitignore", "vendor/\n")
+
+    matcher = IgnoreMatcher(outer, [], respect_gitignore=True)
+    assert matcher.reason(inner, is_dir=True) is None
+    assert matcher.reason(inner / "core.ts") is None
+
+
+def test_a_root_inside_a_repository_still_gets_the_override(tmp_path: Path) -> None:
+    """One package of a monorepo, indexed as its own root.
+
+    The upward `.git` walk stops at the matcher root, so a root that is a
+    subdirectory of a repository used to find nothing and switch the override
+    off -- while a `.gitignore` *at* that root still applied. That dropped
+    tracked files for exactly those roots: issue #84 again, one level up.
+    """
+    repo = tmp_path / "mono"
+    write(repo / "packages" / "app" / "src" / "lib" / "thing.ts", "export const t = 1\n")
+    git_init(repo)
+    write(repo / "packages" / "app" / ".gitignore", "lib/\n")
+    write(repo / "packages" / "app" / "src" / "lib" / "scratch.ts", "// untracked\n")
+
+    root = repo / "packages" / "app"
+    matcher = IgnoreMatcher(root, [], respect_gitignore=True)
+    assert matcher.reason(root / "src" / "lib" / "thing.ts") is None
+    # Still discriminating: the untracked sibling is skipped.
+    assert matcher.reason(root / "src" / "lib" / "scratch.ts") is SkipReason.GITIGNORED
+
+
+def test_a_filename_that_is_not_utf8_does_not_crash_the_walk(tmp_path: Path) -> None:
+    """Filenames are bytes on this platform, and some are not valid UTF-8.
+
+    Decoding `git ls-files -z` as text raised an uncaught UnicodeDecodeError,
+    so a single such file aborted the run rather than degrading it.
+    """
+    repo = tmp_path / "weird"
+    repo.mkdir()
+    odd = os.fsdecode(b"caf\xe9.ts")
+    (repo / odd).write_text("export const x = 1\n", encoding="utf-8")
+    (repo / "normal.ts").write_text("export const y = 1\n", encoding="utf-8")
+    git_init(repo)
+
+    paths = tracked_paths(repo)
+    assert paths is not None
+    assert odd in paths.files
+    assert "normal.ts" in paths.files
+
+
+def test_a_filename_containing_a_carriage_return_is_not_rewritten(tmp_path: Path) -> None:
+    """`text=True` turns on universal newlines, which rewrote a CR inside a
+    filename to LF -- so the lookup missed and a tracked file read as
+    untracked. Exactly the silent loss this module exists to prevent."""
+    repo = tmp_path / "cr"
+    repo.mkdir()
+    (repo / "we\rird.ts").write_text("export const z = 1\n", encoding="utf-8")
+    git_init(repo)
+
+    paths = tracked_paths(repo)
+    assert paths is not None
+    assert "we\rird.ts" in paths.files
+    assert "we\nird.ts" not in paths.files

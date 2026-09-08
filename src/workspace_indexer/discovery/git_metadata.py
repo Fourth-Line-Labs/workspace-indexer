@@ -7,6 +7,7 @@ worktrees, submodules, and detached HEADs without us reimplementing any of it.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,16 +20,13 @@ log = get_logger("workspace_indexer.discovery.git")
 _TIMEOUT = 10
 
 
-def _git(root: Path, *args: str, strip: bool = True) -> str | None:
-    """`strip=False` for `-z` output: a path may legitimately end in
-    whitespace, and trimming one while fixing silent file loss would be the
-    same bug in a new place."""
+def _run(root: Path, args: tuple[str, ...]) -> bytes | None:
+    """Raw stdout, or None when git could not answer."""
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=root,
             capture_output=True,
-            text=True,
             timeout=_TIMEOUT,
             check=False,
         )
@@ -37,7 +35,40 @@ def _git(root: Path, *args: str, strip: bool = True) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.strip() if strip else result.stdout
+    return result.stdout
+
+
+def _git(root: Path, *args: str) -> str | None:
+    """One line of git output, decoded.
+
+    For commands whose output we control the shape of -- a branch name, a SHA,
+    a remote URL. Never for paths: see `_paths`.
+    """
+    out = _run(root, args)
+    return None if out is None else out.decode("utf-8", errors="replace").strip()
+
+
+def _paths(root: Path, args: tuple[str, ...]) -> list[str] | None:
+    """NUL-separated paths from git, decoded the way the filesystem spells them.
+
+    `os.fsdecode` rather than `str`, and bytes rather than `text=True`, because
+    a path is not text on this platform -- it is bytes. Two ways that bites:
+
+    - A filename that is not valid UTF-8 is legal on Linux, and decoding it
+      strictly raises `UnicodeDecodeError`. That crashed the walk rather than
+      degrading it, on any repository holding one.
+    - `text=True` turns on universal newlines, which rewrites a CR inside a
+      filename to LF. The lookup then misses and the file is treated as
+      untracked, which is the silent loss this module exists to prevent.
+
+    Both verified against a repository containing `caf\xe9.ts` and `we\rird.ts`.
+    Nothing is stripped: a path may legitimately end in whitespace, and the
+    trailing NUL is handled by dropping empty entries instead.
+    """
+    out = _run(root, args)
+    if out is None:
+        return None
+    return [os.fsdecode(entry) for entry in out.split(b"\0") if entry]
 
 
 def is_repo(root: Path) -> bool:
@@ -56,11 +87,22 @@ def tracked_paths(root: Path) -> TrackedPaths | None:
     None when the directory is not a repository, or git could not answer. Both
     degrade to pattern-matching alone -- the behaviour before this existed --
     rather than to indexing something a user asked to be ignored.
+
+    Read through `_paths`, which decodes with `os.fsdecode` from bytes: a
+    filename is not text on this platform, a non-UTF-8 name would otherwise
+    crash the walk, and universal newlines would rewrite a CR inside a name
+    and turn a tracked file into an untracked one.
     """
-    out = _git(root, "ls-files", "-z", strip=False)
-    if out is None:
+    paths = _paths(root, ("ls-files", "-z"))
+    if paths is None:
+        # Silent here on purpose. A workspace holds plain folders alongside
+        # repositories and both get indexed, so "not a repository" is an
+        # ordinary answer and warning about it would be noise on every such
+        # root. Whether an absent answer is *surprising* is the caller's
+        # question -- see IgnoreMatcher._tracked_for, which warns only for a
+        # directory it has already confirmed holds a `.git`.
         return None
-    return TrackedPaths.from_files(path for path in out.split("\0") if path)
+    return TrackedPaths.from_files(paths)
 
 
 def is_linked_worktree(path: Path) -> bool:
