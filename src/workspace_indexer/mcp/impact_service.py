@@ -184,6 +184,14 @@ def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
     names something indexed that the resolver could not follow. Reporting the
     second as the first sends an agent off to read a package that does not
     exist.
+
+    Four buckets, not three. `unclassified` and a null origin both mean "we
+    cannot say", but for different reasons and with different fixes: the first
+    is an edge no rule has claimed, which needs a rule; the second has never
+    been looked at, which needs a run. Folding them together is the conflation
+    OriginCoverage exists to prevent, and dropping `unclassified` entirely --
+    as an earlier version of this did -- left the counts unable to account for
+    the unresolved edges listed in `depends_on`.
     """
     unresolved = [d for d in dependencies if not d.resolved]
     if not unresolved:
@@ -191,6 +199,7 @@ def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
 
     outside = [d for d in unresolved if d.origin in _OUTSIDE_ORIGINS]
     inside = [d for d in unresolved if d.origin == _FIRST_PARTY]
+    unruled = [d for d in unresolved if d.origin == _UNCLASSIFIED]
     unknown = [d for d in unresolved if d.origin is None]
 
     notes: list[str] = []
@@ -207,10 +216,16 @@ def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
             "end does exist and is indexed. Gaps in the graph, not external "
             "dependencies."
         )
+    if unruled:
+        notes.append(
+            f"{len(unruled)} unresolved import(s) match no origin rule yet, so we "
+            "cannot say whether they name something in this workspace or outside it. "
+            "Do not read these as external."
+        )
     if unknown:
         notes.append(
-            f"{len(unknown)} unresolved import(s) have no origin recorded, so whether "
-            "they should have resolved is unknown."
+            f"{len(unknown)} unresolved import(s) have no origin recorded at all, so "
+            "nothing has looked at them."
         )
     return notes
 
@@ -269,14 +284,27 @@ def _workspace_notes(language: str, manifest: Manifest) -> list[str]:
             "neither counted as reachable nor written off."
         )
     if coverage.unrecorded:
+        # "Added since", not "predate". Classification re-decides every edge
+        # each run -- `imports_for_origin` selects the whole table, not just
+        # the NULL rows -- so a completed run leaves none behind. A NULL here
+        # can only be a row written after the last one: an interrupted run, or
+        # a reindex that recorded imports without reaching classification. The
+        # direction is the diagnosis. "Predate" would say the classifier
+        # skipped old edges, which is a bug to chase; the truth is that new
+        # edges are not classified yet, which the next `index` fixes.
+        #
+        # The all-unrecorded branch above says "predates" and is right to: it
+        # is talking about an index older than the feature, not older than a
+        # run.
         parts.append(
-            f"{coverage.unrecorded:,} predate the last classification run and have no "
-            "origin recorded at all."
+            f"{coverage.unrecorded:,} were added since the last classification run and "
+            "have no origin recorded yet."
         )
     return [" ".join(parts)]
 
 
 _FIRST_PARTY = ImportOrigin.FIRST_PARTY.value
+_UNCLASSIFIED = ImportOrigin.UNCLASSIFIED.value
 _OUTSIDE_ORIGINS = frozenset({ImportOrigin.FRAMEWORK.value, ImportOrigin.DECLARED_DEPENDENCY.value})
 
 

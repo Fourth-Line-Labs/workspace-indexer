@@ -471,4 +471,73 @@ def test_the_workspace_note_accounts_for_every_edge(graph: Manifest) -> None:
     assert report.note is not None
     # The unrecorded edge just added must be spoken for, not dropped.
     assert coverage.unrecorded
-    assert "predate the last classification run" in report.note
+    assert "added since the last classification run" in report.note
+
+
+def test_the_unresolved_note_accounts_for_every_unresolved_edge(graph: Manifest) -> None:
+    """No unresolved edge may go unmentioned.
+
+    An earlier version bucketed on framework/declared, first-party and null
+    origin, so an edge classified `unclassified` matched nothing and vanished.
+    Measured on a real workspace that dropped 493 edges, and the worst file
+    produced no unresolved note at all -- an agent seeing eleven null
+    rel_paths with nothing said about them.
+
+    Asserted through the report rather than the bucketing helper: what matters
+    is what an agent is told, and every origin an edge can carry has to be
+    reachable from that text.
+    """
+    add_import(graph, "legacy/helper.py", "some.unruled.thing", line=1)
+    graph.record_origins(
+        [(ROOT, "legacy/helper.py", "some.unruled.thing", ImportOrigin.UNCLASSIFIED.value)]
+    )
+
+    report = ImpactService(graph).impact_of("legacy/helper.py")
+    unresolved = [d for d in report.depends_on if not d.resolved]
+    assert unresolved, "fixture must produce an unresolved edge"
+    # Every origin present is one the note has wording for. A value outside
+    # this set is an edge that would fall through silently.
+    assert {d.origin for d in unresolved} <= {
+        ImportOrigin.FIRST_PARTY.value,
+        ImportOrigin.DECLARED_DEPENDENCY.value,
+        ImportOrigin.FRAMEWORK.value,
+        ImportOrigin.UNCLASSIFIED.value,
+        None,
+    }
+
+    assert report.note is not None
+    assert "match no origin rule yet" in report.note
+    # And it must not be called external, which dropping it into the outside
+    # bucket would have done.
+    assert "outside this workspace by nature" not in report.note
+
+
+def test_no_rule_yet_and_never_looked_at_read_differently(graph: Manifest) -> None:
+    """Both mean "we cannot say", but the fixes differ: write a rule, or run
+    the classifier. Folding them together is the conflation OriginCoverage
+    exists to prevent."""
+    add_import(graph, "legacy/helper.py", "unruled.thing", line=1)
+    add_import(graph, "legacy/helper.py", "never.looked", line=2)
+    graph.record_origins(
+        [(ROOT, "legacy/helper.py", "unruled.thing", ImportOrigin.UNCLASSIFIED.value)]
+    )
+
+    report = ImpactService(graph).impact_of("legacy/helper.py")
+
+    assert report.note is not None
+    assert "match no origin rule yet" in report.note
+    assert "nothing has looked at them" in report.note
+
+
+def test_unrecorded_edges_are_described_as_newer_not_older(graph: Manifest) -> None:
+    """Classification re-decides every edge each run, so a NULL origin in a
+    partially classified index is a row added *since* the last run -- never one
+    the classifier skipped. The direction is the diagnosis an agent acts on.
+    """
+    add_import(graph, "legacy/helper.py", "written.after.the.run", line=1)
+
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+
+    assert report.note is not None
+    assert "added since the last classification run" in report.note
+    assert "predate the last classification run" not in report.note
