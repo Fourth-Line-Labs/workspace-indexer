@@ -27,14 +27,26 @@ class Dependency(BaseModel):
     # is a real DocumentType meaning "the classifier could not decide".
     doc_type: str | None = None
     language: str | None = None
+    # Where the import points: first_party, declared_dependency, framework, or
+    # unclassified. None when classification has not run over this edge.
+    #
+    # Needed because `resolved` alone cannot say what an unresolved edge means.
+    # A first-party edge names a file that *is* indexed, so failing to reach it
+    # is a defect worth chasing; a framework edge was never reachable and
+    # nothing is wrong. Same null rel_path, opposite next move.
+    origin: str | None = None
 
     @computed_field
     @property
     def resolved(self) -> bool:
-        """False means "points outside the index", never "no such import".
+        """False means "we did not reach a file", not "there is no such import"
+        and not "it points outside the index".
 
+        Read it with `origin`. An unresolved edge whose origin is
+        `declared_dependency` or `framework` genuinely is outside the index. An
+        unresolved `first_party` edge is not -- it names something indexed that
+        the resolver could not follow, which is a bug rather than a boundary.
         Spelled out as its own field rather than left implicit in a null
-        rel_path, because the two readings lead an agent to opposite next
-        moves: chase the file, or go and read the package.
+        rel_path because the readings lead an agent to opposite next moves.
         """
         return self.rel_path is not None

@@ -23,7 +23,9 @@ What it deliberately does not do:
 
 from __future__ import annotations
 
+from workspace_indexer.graph.framework_modules import JS_LANGUAGES
 from workspace_indexer.graph.import_edge import ImportEdge
+from workspace_indexer.graph.unit import unit_of
 from workspace_indexer.obs.logging import get_logger
 
 log = get_logger("workspace_indexer.graph.resolve")
@@ -43,7 +45,11 @@ _ESM_REWRITES = {
     ".cjs": (".cts",),
 }
 
-_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+# Shared with the origin classifier rather than redefined. The two have to
+# agree: this decides an edge is JS and resolves it as a path, while the
+# classifier decides `.` is not a subpath separator for the same edge. Two
+# copies means adding a dialect to one makes them disagree, and both keep
+# returning confident answers while they do.
 
 
 class ImportResolver:
@@ -62,14 +68,13 @@ class ImportResolver:
     def resolve(
         self, edge: ImportEdge, *, from_path: str, root_label: str, language: str
     ) -> str | None:
-        # A unit is the first path segment: the repository this file is in.
-        unit = from_path.split("/")[0] if "/" in from_path else ""
+        unit = unit_of(from_path)
         known = self._files.get((root_label, unit))
         if not known:
             return None
         if language == "python":
             return self._python(edge, from_path, known)
-        if language in _JS_LANGUAGES:
+        if language in JS_LANGUAGES:
             return self._javascript(edge, from_path, known)
         return None
 

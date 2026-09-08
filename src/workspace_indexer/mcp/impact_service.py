@@ -15,9 +15,11 @@ result carries a note saying which one it is.
 from __future__ import annotations
 
 import time
+from collections import Counter
 
 from workspace_indexer.graph.dependency import Dependency
 from workspace_indexer.graph.dependent import Dependent
+from workspace_indexer.graph.import_origin import ImportOrigin
 from workspace_indexer.graph.import_scanner import SUPPORTED
 from workspace_indexer.mcp.impact_report import ImpactReport
 from workspace_indexer.mcp.tool_call_recorder import ToolCallRecorder
@@ -141,20 +143,8 @@ class ImpactService:
                     "here, so the real number of callers is higher -- run impact_of on "
                     "the re-export file to follow the next hop."
                 )
-            unresolved = sum(1 for d in dependencies if not d.resolved)
-            if unresolved:
-                parts.append(
-                    f"{unresolved} of {len(dependencies)} imports point outside the "
-                    "index -- packages, stdlib, or aliases we cannot follow -- and "
-                    "are listed with rel_path null."
-                )
-            coverage = self._manifest.resolution_coverage().get(language)
-            if coverage and coverage[1]:
-                got, total = coverage
-                parts.append(
-                    f"Workspace-wide, {got} of {total} {language} import edges resolve "
-                    "to an indexed file."
-                )
+            parts.extend(_unresolved_notes(dependencies))
+            parts.extend(_workspace_notes(language, self._manifest))
         if callers:
             parts.append(
                 f"{len(callers)} file(s) reach this one over HTTP rather than by import. "
@@ -184,6 +174,186 @@ class ImpactService:
                 duration_ms=(time.monotonic() - started) * 1000,
             )
         )
+
+
+def origins_without_note_wording() -> frozenset[str | None]:
+    """Origins an unresolved edge can carry that the note cannot speak for.
+
+    Empty is the invariant, and the only property of this module worth
+    asserting from outside -- which is why this is public rather than the
+    mapping behind it. An origin with no bucket is an unresolved edge that
+    disappears from the note, which is how 493 edges once went unmentioned
+    across a real workspace with nothing logged and nothing red.
+
+    Returns the offenders rather than a boolean so a failure names them.
+    """
+    reachable: set[str | None] = {origin.value for origin in ImportOrigin}
+    reachable.add(None)  # a row starts NULL until classification stamps it
+    return frozenset(
+        origin for origin in reachable if _BUCKET_OF.get(origin) not in _BUCKET_WORDING
+    )
+
+
+def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
+    """What this file imports that we did not reach, split by why.
+
+    One sentence used to cover all of it, saying every unresolved edge pointed
+    "outside the index -- packages, stdlib, or aliases". That is true of a
+    framework or declared-dependency edge and false of a first-party one, which
+    names something indexed that the resolver could not follow. Reporting the
+    second as the first sends an agent off to read a package that does not
+    exist.
+
+    Driven by `_BUCKET_OF` rather than a comprehension per bucket, because the
+    property that matters is exhaustiveness and a set of comprehensions cannot
+    express it. An earlier version dropped `unclassified` -- it matched none of
+    the three branches and vanished from the note, measured at 493 edges across
+    a real workspace -- and nothing noticed, because "the branches I thought of"
+    and "every origin an edge can carry" were only the same set by accident.
+    `test_every_origin_has_note_wording` holds them together now: a new
+    `ImportOrigin` member fails it until it has a bucket here.
+    """
+    unresolved = [d for d in dependencies if not d.resolved]
+    if not unresolved:
+        return []
+
+    grouped: Counter[str] = Counter()
+    for dependency in unresolved:
+        # Falls back to the "cannot say" bucket rather than dropping the edge.
+        # Unreachable while the guard test passes, and if a corrupt row ever
+        # got here, erring toward "we do not know" is the safe direction.
+        grouped[_BUCKET_OF.get(dependency.origin, _UNRULED)] += 1
+
+    notes: list[str] = []
+    for bucket, sentence in _BUCKET_WORDING.items():
+        count = grouped.get(bucket)
+        if count:
+            notes.append(sentence.format(count=count, total=len(dependencies)))
+    return notes
+
+
+def _workspace_notes(language: str, manifest: Manifest) -> list[str]:
+    """The workspace-wide rate, against the denominator that means something.
+
+    First-party edges rather than every edge. The all-edges figure is dominated
+    by however many packages a project happens to import, so it reads as a
+    broken graph when the resolver is working: python resolves every first-party
+    edge it has and scored 60% on the old denominator.
+
+    The counts here always sum to the total, deliberately. An agent that cannot
+    reconcile them has to guess whether the difference is unreachable code or a
+    number we withheld.
+    """
+    coverage = manifest.origin_coverage().get(language)
+    if coverage is None or not coverage.total:
+        return []
+
+    # Nothing was classified at all. Said plainly rather than described as
+    # buckets that were never filled in: "we never looked" must not read as
+    # "we looked and found nothing", which is the conflation OriginCoverage
+    # exists to keep apart.
+    if coverage.unrecorded == coverage.total:
+        return [
+            f"Workspace-wide, none of the {coverage.total:,} {language} import edges "
+            "has an origin recorded, so there is no resolution rate to report -- this "
+            "index predates origin classification rather than having failed it. "
+            "Re-run `index` to populate it."
+        ]
+
+    percent = coverage.first_party_resolution_percent
+    if percent is None:
+        parts = [
+            f"Workspace-wide, no {language} import edge has been identified as "
+            "first-party, so there is no resolution rate to report for it yet."
+        ]
+    else:
+        parts = [
+            f"Workspace-wide, {coverage.first_party_resolved:,} of "
+            f"{coverage.first_party:,} first-party {language} import edges resolve to "
+            f"an indexed file ({percent}%). First-party is the only denominator where "
+            "an unresolved edge is a defect."
+        ]
+
+    external = coverage.framework + coverage.declared_dependency
+    if external:
+        parts.append(
+            f"A further {external:,} edge(s) name the standard library or a declared "
+            "dependency and can never resolve to a file here."
+        )
+    if coverage.unclassified:
+        parts.append(
+            f"{coverage.unclassified:,} more have no origin rule yet, so they are "
+            "neither counted as reachable nor written off."
+        )
+    if coverage.unrecorded:
+        # "Added since", not "predate". Classification re-decides every edge
+        # each run -- `imports_for_origin` selects the whole table, not just
+        # the NULL rows -- so a completed run leaves none behind. A NULL here
+        # can only be a row written after the last one: an interrupted run, or
+        # a reindex that recorded imports without reaching classification. The
+        # direction is the diagnosis. "Predate" would say the classifier
+        # skipped old edges, which is a bug to chase; the truth is that new
+        # edges are not classified yet, which the next `index` fixes.
+        #
+        # The all-unrecorded branch above says "predates" and is right to: it
+        # is talking about an index older than the feature, not older than a
+        # run.
+        parts.append(
+            f"{coverage.unrecorded:,} were added since the last classification run and "
+            "have no origin recorded yet."
+        )
+    return [" ".join(parts)]
+
+
+# Bucket names. Two origins share `_OUTSIDE` -- framework and a declared
+# dependency are both outside this workspace by nature and read the same to an
+# agent -- so origins map to buckets rather than to sentences directly.
+_OUTSIDE = "outside"
+_INSIDE = "inside"
+_UNRULED = "unruled"
+_UNLOOKED = "unlooked"
+
+# Every origin an edge can carry. The invariant is coverage, not size: this
+# has one key per ImportOrigin member *plus* None, so it is deliberately one
+# larger than the enum. None is not a spare entry -- a row's origin is NULL
+# until classification stamps it, so dropping that key to make a count match
+# would remove never-classified edges from the note, which is the defect class
+# this whole mapping exists to close.
+#
+# `origins_without_note_wording()` is what holds it: every enum value and None
+# must reach a bucket that has wording, and it returns whatever does not.
+_BUCKET_OF: dict[str | None, str] = {
+    ImportOrigin.FRAMEWORK.value: _OUTSIDE,
+    ImportOrigin.DECLARED_DEPENDENCY.value: _OUTSIDE,
+    ImportOrigin.FIRST_PARTY.value: _INSIDE,
+    ImportOrigin.UNCLASSIFIED.value: _UNRULED,
+    None: _UNLOOKED,
+}
+
+# Ordered by how badly each misleads if an agent ignores it, which is why this
+# is a dict rather than four ifs: the order is data, not control flow.
+_BUCKET_WORDING: dict[str, str] = {
+    _OUTSIDE: (
+        "{count} of {total} imports name the standard library or a declared "
+        "dependency. Those are outside this workspace by nature, are listed "
+        "with rel_path null, and are not missing."
+    ),
+    _INSIDE: (
+        "{count} import(s) are first-party but unresolved -- they name code in "
+        "this workspace the resolver could not follow, so the file at the "
+        "other end does exist and is indexed. Gaps in the graph, not external "
+        "dependencies."
+    ),
+    _UNRULED: (
+        "{count} unresolved import(s) match no origin rule yet, so we cannot "
+        "say whether they name something in this workspace or outside it. Do "
+        "not read these as external."
+    ),
+    _UNLOOKED: (
+        "{count} unresolved import(s) have no origin recorded at all, so "
+        "nothing has looked at them."
+    ),
+}
 
 
 def _pick(path: str, matches: list[tuple[str, str]]) -> tuple[str, str] | None:

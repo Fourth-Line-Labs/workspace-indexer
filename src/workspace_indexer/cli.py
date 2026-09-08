@@ -30,6 +30,7 @@ from workspace_indexer.evaluation import (
 )
 from workspace_indexer.evaluation.search_retriever import Fusion
 from workspace_indexer.graph import SUPPORTED as IMPORT_LANGUAGES
+from workspace_indexer.graph.origin_coverage import OriginCoverage
 from workspace_indexer.grounding import CoverageService, SourceStrength, UnitCoverage
 from workspace_indexer.mcp import QueryService, TaxonomyService
 from workspace_indexer.models import EmbeddingSpace, FileKind, RunStats, SearchFilters
@@ -868,21 +869,54 @@ def _print_import_coverage(ctx: AppContext) -> None:
         table.add_row(language, f"{files:,}", f"{with_edges:,} ({with_edges / files:.0%})")
     console.print(table)
 
-    resolution = ctx.manifest.resolution_coverage()
-    if resolution:
-        resolved_table = Table(title="import resolution")
-        for column in ("language", "edges", "resolved to a file"):
+    origins = ctx.manifest.origin_coverage()
+    if origins:
+        resolved_table = Table(title="import resolution by origin")
+        for column in (
+            "language",
+            "all edges",
+            "non-framework",
+            "first-party",
+            "first-party resolved",
+            "unclassified",
+        ):
             resolved_table.add_column(column)
-        for language in sorted(resolution):
-            done, total = resolution[language]
-            if total:
-                resolved_table.add_row(language, f"{total:,}", f"{done:,} ({done / total:.0%})")
+        for language in sorted(origins):
+            # Not `coverage`: that name holds the import_coverage() dict this
+            # function still needs after the loop.
+            by_origin = origins[language]
+            if not by_origin.total:
+                continue
+            resolved_table.add_row(
+                language,
+                f"{by_origin.total:,}",
+                f"{by_origin.non_framework:,}",
+                f"{by_origin.first_party:,}",
+                _gate_cell(by_origin),
+                f"{by_origin.unclassified:,}",
+            )
         console.print(resolved_table)
         console.print(
-            "[dim]Unresolved edges are packages, tsconfig aliases and C# "
-            "namespaces — they need more than the file list, and are not "
-            "missing dependencies.[/dim]"
+            "[dim]Three nested denominators. Only first-party edges can resolve "
+            "to a file here, so that column is the one that says whether the "
+            "resolver works — the target is 100%. Framework and declared "
+            "dependencies are correctly unresolved and are not missing "
+            "dependencies.[/dim]"
         )
+        unclassified = sum(c.unclassified for c in origins.values())
+        if unclassified:
+            console.print(
+                f"[dim]{unclassified:,} edges matched no origin rule. Not an "
+                "error \u2014 it is the queue for the next rule, and counting it "
+                "is what keeps it from being guessed at.[/dim]"
+            )
+        unrecorded = sum(c.unrecorded for c in origins.values())
+        if unrecorded:
+            console.print(
+                f"[yellow]{unrecorded:,} edges have no origin recorded[/yellow] "
+                "[dim]\u2014 this index predates origin classification. Re-run "
+                "`index` to populate it.[/dim]"
+            )
 
     unsupported = sorted(set(coverage) - IMPORT_LANGUAGES)
     if unsupported:
@@ -891,6 +925,25 @@ def _print_import_coverage(ctx: AppContext) -> None:
             "The graph has no edges for these, which is not the same as "
             "their having none.[/dim]"
         )
+
+
+def _gate_cell(coverage: OriginCoverage) -> str:
+    """The first-party resolution rate, or why there is not one.
+
+    Below 100% is coloured because it is the one number here that means
+    something is broken rather than merely unresolvable: a first-party edge
+    names a file that is indexed, so failing to reach it is a defect. An em
+    dash means there are no first-party edges to rate, which is neither a pass
+    nor a failure.
+    """
+    percent = coverage.first_party_resolution_percent
+    if percent is None:
+        return "[dim]\u2014[/dim]"
+    # One number for the digits and the colour, floored on the value object so
+    # neither can disagree with the other. Formatting the raw rate with `.0%`
+    # rounded 0.995 up and printed a coloured "100%".
+    cell = f"{coverage.first_party_resolved:,} ({percent}%)"
+    return cell if percent >= 100 else f"[yellow]{cell}[/yellow]"
 
 
 def _cost_cell(stats: RunStats) -> str:

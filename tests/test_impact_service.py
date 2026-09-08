@@ -19,7 +19,8 @@ import pytest
 from tests.conftest import make_source
 from workspace_indexer.classification import Classification
 from workspace_indexer.graph import ImportEdge
-from workspace_indexer.mcp.impact_service import ImpactService
+from workspace_indexer.graph.import_origin import ImportOrigin
+from workspace_indexer.mcp.impact_service import ImpactService, origins_without_note_wording
 from workspace_indexer.models import DocumentType, FileKind
 from workspace_indexer.state import Manifest
 
@@ -98,9 +99,25 @@ def graph(manifest: Manifest) -> Manifest:
         line=7,
         resolved="app/src/helper.py",
     )
-    # An edge we cannot follow: names a package, not a file in the index.
+    # Two edges we cannot follow, for opposite reasons. `httpx` is a declared
+    # package with no file in this workspace, so leaving it unresolved is
+    # correct. `app.src.missing` is first-party and unresolved, which is a gap
+    # in the graph -- the distinction the note has to keep.
     add_import(manifest, "app/src/helper.py", "httpx", line=1)
     add_import(manifest, "app/src/helper.py", "./service", line=2, resolved="app/src/service.py")
+
+    # Origins last, in one call: record_imports replaces every row for a file,
+    # so anything set between add_import calls would be wiped by the next one.
+    first = ImportOrigin.FIRST_PARTY.value
+    manifest.record_origins(
+        [
+            (ROOT, "app/src/service.py", "./helper", first),
+            (ROOT, "app/tests/test_helper.py", "app.src.helper", first),
+            (ROOT, "app/tests/test_service.py", "app.src.helper", first),
+            (ROOT, "app/src/helper.py", "./service", first),
+            (ROOT, "app/src/helper.py", "httpx", ImportOrigin.DECLARED_DEPENDENCY.value),
+        ]
+    )
     return manifest
 
 
@@ -144,7 +161,13 @@ def test_an_unfollowable_import_is_listed_not_dropped(graph: Manifest) -> None:
     assert modules["httpx"].rel_path is None
     assert modules["./service"].resolved is True
     assert modules["./service"].rel_path == "app/src/service.py"
-    assert report.note is not None and "outside the index" in report.note
+    # The note has to say *why* it could not be followed. A declared package
+    # is outside this workspace by nature; calling that the same thing as an
+    # unresolved first-party edge would send an agent to read a package that
+    # does not exist.
+    assert report.note is not None
+    assert "outside this workspace by nature" in report.note
+    assert "first-party but unresolved" not in report.note
 
 
 def test_an_ambiguous_path_is_not_guessed(graph: Manifest) -> None:
@@ -334,3 +357,188 @@ def test_the_calling_side_lists_what_it_reaches(manifest: Manifest) -> None:
     assert report.calls_total == 1
     # Unresolved, and saying so rather than implying the endpoint is missing.
     assert report.calls[0].resolved is False
+
+
+def test_the_note_reports_the_first_party_rate_not_the_all_edges_rate(graph: Manifest) -> None:
+    """The number an agent sees has to be the one that means something.
+
+    Against every edge this workspace reads 4 of 5 (80%), because one edge is a
+    declared package that was never reachable. Against first-party edges it is
+    4 of 4 -- and that is the figure worth acting on, because first-party is
+    the only origin where an unresolved edge is a defect.
+    """
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+
+    assert report.note is not None
+    assert "4 of 4 first-party python import edges resolve" in report.note
+    assert "(100%)" in report.note
+    # The remainder is accounted for rather than quietly dropped from view.
+    assert "1 edge(s) name the standard library or a declared dependency" in report.note
+    # And the old, misleading denominator is gone.
+    assert "4 of 5" not in report.note
+
+
+def test_an_unresolved_first_party_edge_is_called_a_gap_not_a_package(
+    graph: Manifest,
+) -> None:
+    """A first-party edge names a file that is indexed, so failing to reach it
+    is a hole in the graph. Reporting it as an external dependency sends an
+    agent off to read a package that does not exist."""
+    # On the decoy, not on helper.py. `record_imports` replaces every row for
+    # a file, so adding an edge to helper.py here would delete and re-insert
+    # its others -- losing `./service`'s resolution and `httpx`'s origin, and
+    # quietly testing against a graph the fixture did not intend. legacy/
+    # helper.py has no imports of its own, so there is nothing to wipe.
+    add_import(graph, "legacy/helper.py", "app.src.absent", line=1)
+    graph.record_origins(
+        [(ROOT, "legacy/helper.py", "app.src.absent", ImportOrigin.FIRST_PARTY.value)]
+    )
+
+    report = ImpactService(graph).impact_of("legacy/helper.py")
+
+    assert report.note is not None
+    assert "first-party but unresolved" in report.note
+    assert "does exist and is indexed" in report.note
+
+
+def test_a_language_with_no_first_party_edges_reports_no_rate(manifest: Manifest) -> None:
+    """The C# position today: edges extracted, none identified as first-party
+    because that needs the namespace declarations table. No rate is not the
+    same as a rate of zero, and must not read as one."""
+    add_file(manifest, "app/Thing.cs", language="csharp")
+    add_import(manifest, "app/Thing.cs", "System.Text", line=1)
+    manifest.record_origins([(ROOT, "app/Thing.cs", "System.Text", ImportOrigin.FRAMEWORK.value)])
+
+    report = ImpactService(manifest).impact_of("app/Thing.cs")
+
+    assert report.note is not None
+    assert "no csharp import edge has been identified as first-party" in report.note
+    assert "%" not in report.note
+
+
+def test_adding_an_edge_to_the_decoy_leaves_the_fixture_intact(graph: Manifest) -> None:
+    """Guards the trap the previous test walks around.
+
+    `record_imports` deletes and re-inserts every row for a file, so an
+    `add_import` against an already-classified file silently strips the
+    resolutions and origins the fixture set. Pinned here so a future test that
+    reaches for the convenient file finds out from a failure rather than from a
+    passing assertion over a degraded graph.
+    """
+    add_import(graph, "legacy/helper.py", "app.src.absent", line=1)
+
+    helper = {d.module: d for d in graph.dependencies_of(ROOT, "app/src/helper.py")}
+    assert helper["./service"].rel_path == "app/src/service.py"
+    assert helper["httpx"].origin == ImportOrigin.DECLARED_DEPENDENCY.value
+
+
+def test_an_unclassified_index_is_not_described_as_a_classified_one(
+    manifest: Manifest,
+) -> None:
+    """ "We never looked" must not read as "we looked and found nothing".
+
+    An index predating the origin column has every edge unrecorded. Reporting
+    that as "all N edges are framework, declared dependencies or unclassified"
+    asserts a classification result that never happened.
+    """
+    add_file(manifest, "app/src/thing.py")
+    add_import(manifest, "app/src/thing.py", "httpx", line=1)
+
+    report = ImpactService(manifest).impact_of("app/src/thing.py")
+
+    assert report.note is not None
+    assert "has an origin recorded" in report.note
+    assert "predates origin classification" in report.note
+    assert "are framework, declared dependencies or unclassified" not in report.note
+
+
+def test_the_workspace_note_accounts_for_every_edge(graph: Manifest) -> None:
+    """The listed counts have to sum to the total, or an agent cannot tell a
+    withheld number from unreachable code."""
+    add_import(graph, "legacy/helper.py", "some.unruled.thing", line=1)
+
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+    coverage = graph.origin_coverage()["python"]
+
+    assert (
+        coverage.first_party
+        + coverage.framework
+        + coverage.declared_dependency
+        + coverage.unclassified
+        + coverage.unrecorded
+        == coverage.total
+    )
+    assert report.note is not None
+    # The unrecorded edge just added must be spoken for, not dropped.
+    assert coverage.unrecorded
+    assert "added since the last classification run" in report.note
+
+
+def test_every_origin_has_note_wording() -> None:
+    """The guard the previous version of this only claimed to be.
+
+    An earlier attempt asserted the origins observed in a fixture were a
+    subset of a hardcoded set of the four enum values plus None -- which is
+    exactly the universe `record_origins` can write, so it could never fail. A
+    fifth `ImportOrigin` member would have been dropped by `_unresolved_notes`
+    with that assertion still green: the same defect recurring behind a green
+    guard.
+
+    This compares the bucket mapping the note is actually built from against
+    the enum, so adding a member fails here until it has wording.
+    """
+    assert origins_without_note_wording() == frozenset()
+
+
+def test_the_unresolved_note_accounts_for_every_unresolved_edge(graph: Manifest) -> None:
+    """No unresolved edge may go unmentioned.
+
+    An earlier version bucketed on framework/declared, first-party and null
+    origin, so an edge classified `unclassified` matched nothing and vanished.
+    Measured on a real workspace that dropped 493 edges, and the worst file
+    produced no unresolved note at all -- an agent seeing eleven null
+    rel_paths with nothing said about them.
+    """
+    add_import(graph, "legacy/helper.py", "some.unruled.thing", line=1)
+    graph.record_origins(
+        [(ROOT, "legacy/helper.py", "some.unruled.thing", ImportOrigin.UNCLASSIFIED.value)]
+    )
+
+    report = ImpactService(graph).impact_of("legacy/helper.py")
+    assert [d for d in report.depends_on if not d.resolved], "fixture must produce one"
+    assert report.note is not None
+    assert "match no origin rule yet" in report.note
+    # And it must not be called external, which dropping it into the outside
+    # bucket would have done.
+    assert "outside this workspace by nature" not in report.note
+
+
+def test_no_rule_yet_and_never_looked_at_read_differently(graph: Manifest) -> None:
+    """Both mean "we cannot say", but the fixes differ: write a rule, or run
+    the classifier. Folding them together is the conflation OriginCoverage
+    exists to prevent."""
+    add_import(graph, "legacy/helper.py", "unruled.thing", line=1)
+    add_import(graph, "legacy/helper.py", "never.looked", line=2)
+    graph.record_origins(
+        [(ROOT, "legacy/helper.py", "unruled.thing", ImportOrigin.UNCLASSIFIED.value)]
+    )
+
+    report = ImpactService(graph).impact_of("legacy/helper.py")
+
+    assert report.note is not None
+    assert "match no origin rule yet" in report.note
+    assert "nothing has looked at them" in report.note
+
+
+def test_unrecorded_edges_are_described_as_newer_not_older(graph: Manifest) -> None:
+    """Classification re-decides every edge each run, so a NULL origin in a
+    partially classified index is a row added *since* the last run -- never one
+    the classifier skipped. The direction is the diagnosis an agent acts on.
+    """
+    add_import(graph, "legacy/helper.py", "written.after.the.run", line=1)
+
+    report = ImpactService(graph).impact_of("app/src/helper.py")
+
+    assert report.note is not None
+    assert "added since the last classification run" in report.note
+    assert "predate the last classification run" not in report.note
