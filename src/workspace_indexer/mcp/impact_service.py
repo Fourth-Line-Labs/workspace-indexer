@@ -15,6 +15,7 @@ result carries a note saying which one it is.
 from __future__ import annotations
 
 import time
+from collections import Counter
 
 from workspace_indexer.graph.dependency import Dependency
 from workspace_indexer.graph.dependent import Dependent
@@ -175,6 +176,24 @@ class ImpactService:
         )
 
 
+def origins_without_note_wording() -> frozenset[str | None]:
+    """Origins an unresolved edge can carry that the note cannot speak for.
+
+    Empty is the invariant, and the only property of this module worth
+    asserting from outside -- which is why this is public rather than the
+    mapping behind it. An origin with no bucket is an unresolved edge that
+    disappears from the note, which is how 493 edges once went unmentioned
+    across a real workspace with nothing logged and nothing red.
+
+    Returns the offenders rather than a boolean so a failure names them.
+    """
+    reachable: set[str | None] = {origin.value for origin in ImportOrigin}
+    reachable.add(None)  # a row starts NULL until classification stamps it
+    return frozenset(
+        origin for origin in reachable if _BUCKET_OF.get(origin) not in _BUCKET_WORDING
+    )
+
+
 def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
     """What this file imports that we did not reach, split by why.
 
@@ -185,48 +204,31 @@ def _unresolved_notes(dependencies: list[Dependency]) -> list[str]:
     second as the first sends an agent off to read a package that does not
     exist.
 
-    Four buckets, not three. `unclassified` and a null origin both mean "we
-    cannot say", but for different reasons and with different fixes: the first
-    is an edge no rule has claimed, which needs a rule; the second has never
-    been looked at, which needs a run. Folding them together is the conflation
-    OriginCoverage exists to prevent, and dropping `unclassified` entirely --
-    as an earlier version of this did -- left the counts unable to account for
-    the unresolved edges listed in `depends_on`.
+    Driven by `_BUCKET_OF` rather than a comprehension per bucket, because the
+    property that matters is exhaustiveness and a set of comprehensions cannot
+    express it. An earlier version dropped `unclassified` -- it matched none of
+    the three branches and vanished from the note, measured at 493 edges across
+    a real workspace -- and nothing noticed, because "the branches I thought of"
+    and "every origin an edge can carry" were only the same set by accident.
+    `test_every_origin_has_note_wording` holds them together now: a new
+    `ImportOrigin` member fails it until it has a bucket here.
     """
     unresolved = [d for d in dependencies if not d.resolved]
     if not unresolved:
         return []
 
-    outside = [d for d in unresolved if d.origin in _OUTSIDE_ORIGINS]
-    inside = [d for d in unresolved if d.origin == _FIRST_PARTY]
-    unruled = [d for d in unresolved if d.origin == _UNCLASSIFIED]
-    unknown = [d for d in unresolved if d.origin is None]
+    grouped: Counter[str] = Counter()
+    for dependency in unresolved:
+        # Falls back to the "cannot say" bucket rather than dropping the edge.
+        # Unreachable while the guard test passes, and if a corrupt row ever
+        # got here, erring toward "we do not know" is the safe direction.
+        grouped[_BUCKET_OF.get(dependency.origin, _UNRULED)] += 1
 
     notes: list[str] = []
-    if outside:
-        notes.append(
-            f"{len(outside)} of {len(dependencies)} imports name the standard library "
-            "or a declared dependency. Those are outside this workspace by nature, "
-            "are listed with rel_path null, and are not missing."
-        )
-    if inside:
-        notes.append(
-            f"{len(inside)} import(s) are first-party but unresolved -- they name code "
-            "in this workspace the resolver could not follow, so the file at the other "
-            "end does exist and is indexed. Gaps in the graph, not external "
-            "dependencies."
-        )
-    if unruled:
-        notes.append(
-            f"{len(unruled)} unresolved import(s) match no origin rule yet, so we "
-            "cannot say whether they name something in this workspace or outside it. "
-            "Do not read these as external."
-        )
-    if unknown:
-        notes.append(
-            f"{len(unknown)} unresolved import(s) have no origin recorded at all, so "
-            "nothing has looked at them."
-        )
+    for bucket, sentence in _BUCKET_WORDING.items():
+        count = grouped.get(bucket)
+        if count:
+            notes.append(sentence.format(count=count, total=len(dependencies)))
     return notes
 
 
@@ -303,9 +305,50 @@ def _workspace_notes(language: str, manifest: Manifest) -> list[str]:
     return [" ".join(parts)]
 
 
-_FIRST_PARTY = ImportOrigin.FIRST_PARTY.value
-_UNCLASSIFIED = ImportOrigin.UNCLASSIFIED.value
-_OUTSIDE_ORIGINS = frozenset({ImportOrigin.FRAMEWORK.value, ImportOrigin.DECLARED_DEPENDENCY.value})
+# Bucket names. Two origins share `_OUTSIDE` -- framework and a declared
+# dependency are both outside this workspace by nature and read the same to an
+# agent -- so origins map to buckets rather than to sentences directly.
+_OUTSIDE = "outside"
+_INSIDE = "inside"
+_UNRULED = "unruled"
+_UNLOOKED = "unlooked"
+
+# Every origin an edge can carry, including None for "never classified".
+# Guarded against ImportOrigin by test_every_origin_has_note_wording: this
+# mapping and the enum have to stay the same size, or an origin exists that
+# the note cannot speak for.
+_BUCKET_OF: dict[str | None, str] = {
+    ImportOrigin.FRAMEWORK.value: _OUTSIDE,
+    ImportOrigin.DECLARED_DEPENDENCY.value: _OUTSIDE,
+    ImportOrigin.FIRST_PARTY.value: _INSIDE,
+    ImportOrigin.UNCLASSIFIED.value: _UNRULED,
+    None: _UNLOOKED,
+}
+
+# Ordered by how badly each misleads if an agent ignores it, which is why this
+# is a dict rather than four ifs: the order is data, not control flow.
+_BUCKET_WORDING: dict[str, str] = {
+    _OUTSIDE: (
+        "{count} of {total} imports name the standard library or a declared "
+        "dependency. Those are outside this workspace by nature, are listed "
+        "with rel_path null, and are not missing."
+    ),
+    _INSIDE: (
+        "{count} import(s) are first-party but unresolved -- they name code in "
+        "this workspace the resolver could not follow, so the file at the "
+        "other end does exist and is indexed. Gaps in the graph, not external "
+        "dependencies."
+    ),
+    _UNRULED: (
+        "{count} unresolved import(s) match no origin rule yet, so we cannot "
+        "say whether they name something in this workspace or outside it. Do "
+        "not read these as external."
+    ),
+    _UNLOOKED: (
+        "{count} unresolved import(s) have no origin recorded at all, so "
+        "nothing has looked at them."
+    ),
+}
 
 
 def _pick(path: str, matches: list[tuple[str, str]]) -> tuple[str, str] | None:

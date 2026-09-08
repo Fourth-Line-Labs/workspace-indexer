@@ -20,7 +20,7 @@ from tests.conftest import make_source
 from workspace_indexer.classification import Classification
 from workspace_indexer.graph import ImportEdge
 from workspace_indexer.graph.import_origin import ImportOrigin
-from workspace_indexer.mcp.impact_service import ImpactService
+from workspace_indexer.mcp.impact_service import ImpactService, origins_without_note_wording
 from workspace_indexer.models import DocumentType, FileKind
 from workspace_indexer.state import Manifest
 
@@ -474,6 +474,22 @@ def test_the_workspace_note_accounts_for_every_edge(graph: Manifest) -> None:
     assert "added since the last classification run" in report.note
 
 
+def test_every_origin_has_note_wording() -> None:
+    """The guard the previous version of this only claimed to be.
+
+    An earlier attempt asserted the origins observed in a fixture were a
+    subset of a hardcoded set of the four enum values plus None -- which is
+    exactly the universe `record_origins` can write, so it could never fail. A
+    fifth `ImportOrigin` member would have been dropped by `_unresolved_notes`
+    with that assertion still green: the same defect recurring behind a green
+    guard.
+
+    This compares the bucket mapping the note is actually built from against
+    the enum, so adding a member fails here until it has wording.
+    """
+    assert origins_without_note_wording() == frozenset()
+
+
 def test_the_unresolved_note_accounts_for_every_unresolved_edge(graph: Manifest) -> None:
     """No unresolved edge may go unmentioned.
 
@@ -482,10 +498,6 @@ def test_the_unresolved_note_accounts_for_every_unresolved_edge(graph: Manifest)
     Measured on a real workspace that dropped 493 edges, and the worst file
     produced no unresolved note at all -- an agent seeing eleven null
     rel_paths with nothing said about them.
-
-    Asserted through the report rather than the bucketing helper: what matters
-    is what an agent is told, and every origin an edge can carry has to be
-    reachable from that text.
     """
     add_import(graph, "legacy/helper.py", "some.unruled.thing", line=1)
     graph.record_origins(
@@ -493,18 +505,7 @@ def test_the_unresolved_note_accounts_for_every_unresolved_edge(graph: Manifest)
     )
 
     report = ImpactService(graph).impact_of("legacy/helper.py")
-    unresolved = [d for d in report.depends_on if not d.resolved]
-    assert unresolved, "fixture must produce an unresolved edge"
-    # Every origin present is one the note has wording for. A value outside
-    # this set is an edge that would fall through silently.
-    assert {d.origin for d in unresolved} <= {
-        ImportOrigin.FIRST_PARTY.value,
-        ImportOrigin.DECLARED_DEPENDENCY.value,
-        ImportOrigin.FRAMEWORK.value,
-        ImportOrigin.UNCLASSIFIED.value,
-        None,
-    }
-
+    assert [d for d in report.depends_on if not d.resolved], "fixture must produce one"
     assert report.note is not None
     assert "match no origin rule yet" in report.note
     # And it must not be called external, which dropping it into the outside
