@@ -313,10 +313,15 @@ _INSIDE = "inside"
 _UNRULED = "unruled"
 _UNLOOKED = "unlooked"
 
-# Every origin an edge can carry, including None for "never classified".
-# Guarded against ImportOrigin by test_every_origin_has_note_wording: this
-# mapping and the enum have to stay the same size, or an origin exists that
-# the note cannot speak for.
+# Every origin an edge can carry. The invariant is coverage, not size: this
+# has one key per ImportOrigin member *plus* None, so it is deliberately one
+# larger than the enum. None is not a spare entry -- a row's origin is NULL
+# until classification stamps it, so dropping that key to make a count match
+# would remove never-classified edges from the note, which is the defect class
+# this whole mapping exists to close.
+#
+# `origins_without_note_wording()` is what holds it: every enum value and None
+# must reach a bucket that has wording, and it returns whatever does not.
 _BUCKET_OF: dict[str | None, str] = {
     ImportOrigin.FRAMEWORK.value: _OUTSIDE,
     ImportOrigin.DECLARED_DEPENDENCY.value: _OUTSIDE,
