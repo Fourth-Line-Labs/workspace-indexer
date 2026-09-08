@@ -128,3 +128,40 @@ def test_an_empty_dependency_set_is_not_an_error(bare: OriginClassifier) -> None
     classifier = OriginClassifier({("src", "repo"): frozenset()})
     assert _classify(classifier, "Vendor.Thing") is ImportOrigin.UNCLASSIFIED
     assert _classify(bare, "Vendor.Thing") is ImportOrigin.UNCLASSIFIED
+
+
+def test_a_dotted_npm_name_is_not_a_subpath_of_its_prefix() -> None:
+    """`lodash.merge` is its own package on npm, not part of `lodash`.
+
+    Claiming it would hide an undeclared dependency inside
+    DECLARED_DEPENDENCY, and the unclassified bucket is the one that has to
+    stay honest -- over-claiming there is worse than under-claiming.
+    """
+    classifier = OriginClassifier({("src", "repo"): frozenset({"lodash"})})
+    assert (
+        _classify(classifier, "lodash.merge", language="typescript", from_path="repo/a.ts")
+        is ImportOrigin.UNCLASSIFIED
+    )
+
+
+def test_a_dotted_name_is_a_subpath_outside_the_js_family() -> None:
+    """The same spelling means the opposite in .NET and Python, where a dotted
+    name really is inside its parent."""
+    classifier = OriginClassifier({("src", "repo"): frozenset({"Azure.Messaging"})})
+    assert (
+        _classify(classifier, "Azure.Messaging.ServiceBus", language="csharp")
+        is ImportOrigin.DECLARED_DEPENDENCY
+    )
+    python = OriginClassifier({("src", "repo"): frozenset({"google"})})
+    assert (
+        _classify(python, "google.protobuf", language="python", from_path="repo/a.py")
+        is ImportOrigin.DECLARED_DEPENDENCY
+    )
+
+
+def test_a_slash_subpath_is_claimed_in_every_language() -> None:
+    classifier = OriginClassifier({("src", "repo"): frozenset({"lodash"})})
+    assert (
+        _classify(classifier, "lodash/debounce", language="tsx", from_path="repo/a.tsx")
+        is ImportOrigin.DECLARED_DEPENDENCY
+    )

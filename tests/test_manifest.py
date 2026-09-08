@@ -950,4 +950,26 @@ def test_origins_are_dropped_with_their_file(manifest: Manifest) -> None:
 
     manifest.forget_file(source.root_label, source.rel_path)
 
+    # Both halves. origin_coverage() JOINs `files`, so on its own it proves
+    # only that the file row is gone -- an orphaned import row carrying a
+    # stale origin would pass it.
+    assert manifest.imports_for_origin() == []
     assert manifest.origin_coverage() == {}
+
+
+def test_one_module_on_several_lines_is_classified_once(manifest: Manifest) -> None:
+    """`line` is not selected, so duplicates would be identical tuples -- and
+    `record_origins` keys without `line`, so each one would re-stamp every row
+    the first already did."""
+    source = _lang_source("repo/a.py", "python")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(
+        source.root_label,
+        source.rel_path,
+        [_edge("os"), _edge("os", line=2), _edge("os", line=3)],
+    )
+
+    edges = manifest.imports_for_origin()
+    assert [module for _, _, module, _, _, _ in edges] == ["os"]
+    # All three rows still exist; it is the classification that collapses.
+    assert len(manifest.imports_of(source.root_label, source.rel_path)) == 3

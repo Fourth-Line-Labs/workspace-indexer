@@ -85,3 +85,26 @@ def test_an_unknown_language_claims_nothing() -> None:
 
 def test_an_empty_module_claims_nothing() -> None:
     assert not is_framework_module("", "python")
+
+
+def test_prefix_only_builtins_count_only_with_the_prefix() -> None:
+    """`node:test` is a builtin; bare `test` is an npm package.
+
+    Verified against `module.builtinModules`, which lists `node:test` and not
+    `test`. Claiming the bare form would misclassify a real dependency as
+    framework -- the false positive this module's conservatism exists to
+    avoid.
+    """
+    for name in ("test", "sqlite", "sea"):
+        assert is_framework_module(f"node:{name}", "typescript"), name
+        assert not is_framework_module(name, "typescript"), name
+
+
+def test_a_prefix_only_builtin_subpath_is_still_framework() -> None:
+    assert is_framework_module("node:test/reporters", "typescript")
+
+
+def test_an_ordinary_builtin_still_matches_both_spellings() -> None:
+    # `fs` predates the scheme, so both forms are real.
+    assert is_framework_module("fs", "typescript")
+    assert is_framework_module("node:fs", "typescript")

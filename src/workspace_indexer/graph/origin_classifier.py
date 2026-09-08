@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from workspace_indexer.graph.framework_modules import is_framework_module
+from workspace_indexer.graph.framework_modules import JS_LANGUAGES, is_framework_module
 from workspace_indexer.graph.import_origin import ImportOrigin
 from workspace_indexer.graph.unit import unit_of
 
@@ -52,26 +52,31 @@ class OriginClassifier:
     ) -> ImportOrigin:
         if resolved is not None or is_relative:
             return ImportOrigin.FIRST_PARTY
-        if self._is_declared(module, root_label, unit_of(from_path)):
+        if self._is_declared(module, root_label, unit_of(from_path), language):
             return ImportOrigin.DECLARED_DEPENDENCY
         if is_framework_module(module, language):
             return ImportOrigin.FRAMEWORK
         return ImportOrigin.UNCLASSIFIED
 
-    def _is_declared(self, module: str, root_label: str, unit: str) -> bool:
-        """Exact id, or the id followed by a separator.
+    def _is_declared(self, module: str, root_label: str, unit: str, language: str) -> bool:
+        """Exact id, or the id followed by a separator that means "inside it".
 
-        Both separators, because the two ecosystems spell subpaths
-        differently: `MyPackage.Sub` in .NET, `lodash/debounce` in Node. The
-        separator is required rather than a bare prefix so `lodash` does not
-        claim `lodashy`.
+        The separator is required rather than a bare prefix, or `lodash` would
+        claim `lodashy`. Which separators count is language-dependent, because
+        a dot does not mean the same thing in every registry:
+
+        - `/` everywhere. `lodash/debounce` and `@scope/pkg/sub` are subpaths.
+        - `.` only outside the JS family. `MyPackage.Sub` is inside
+          `MyPackage` in .NET and Python, but on npm `lodash.merge` is an
+          independently published package, so claiming it for a unit that
+          declared `lodash` would hide an undeclared dependency from the
+          unclassified queue -- the one bucket that has to stay honest.
         """
         declared = self._dependencies.get((root_label, unit))
         if not declared:
             return False
+        separators = ("/",) if language in JS_LANGUAGES else (".", "/")
         return any(
-            module == package
-            or module.startswith(f"{package}.")
-            or module.startswith(f"{package}/")
+            module == package or any(module.startswith(f"{package}{sep}") for sep in separators)
             for package in declared
         )

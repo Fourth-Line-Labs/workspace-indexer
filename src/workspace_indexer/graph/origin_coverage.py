@@ -48,6 +48,26 @@ class OriginCoverage(BaseModel):
         return self.total - self.framework
 
     @property
+    def first_party_resolution_percent(self) -> int | None:
+        """The gate in whole percentage points, or None when there is no gate.
+
+        Floored, never rounded, and derived from the counts rather than the
+        float: 1,234 of 1,240 edges is 99%, not 100%. This is the one column
+        where "100%" has to mean *complete*, so it is returned only when every
+        first-party edge resolved -- reached by comparing the counts, so no
+        rounding rule can produce it by accident.
+
+        Returned as a number rather than formatted so a caller cannot round a
+        second time and end up disagreeing with itself, which is exactly how a
+        `.0%` format came to print a coloured "100%".
+        """
+        if not self.first_party:
+            return None
+        if self.first_party_resolved >= self.first_party:
+            return 100
+        return min(99, self.first_party_resolved * 100 // self.first_party)
+
+    @property
     def first_party_resolution(self) -> float | None:
         """The gate, or None when there is nothing to gate on.
 

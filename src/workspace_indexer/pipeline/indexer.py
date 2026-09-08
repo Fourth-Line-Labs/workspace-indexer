@@ -584,7 +584,19 @@ class Indexer:
             )
             for root_label, rel_path, module, language, is_relative, resolved in edges
         ]
-        self._manifest.record_origins(origins)
+        # One transaction for the batch. The connection is in autocommit, so
+        # without this each UPDATE fsyncs on its own -- the cost `begin()`'s
+        # docstring exists to warn about -- and a failure part-way leaves some
+        # edges classified against this run and some against the last. Wrapped
+        # at the caller rather than inside `record_origins`, matching how
+        # `_flush` owns its transaction boundary.
+        self._manifest.begin()
+        try:
+            self._manifest.record_origins(origins)
+            self._manifest.commit()
+        except Exception:
+            self._manifest.rollback()
+            raise
 
         counts = Counter(origin for *_, origin in origins)
         log.info(

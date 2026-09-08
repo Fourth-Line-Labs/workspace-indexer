@@ -936,11 +936,14 @@ def _gate_cell(coverage: OriginCoverage) -> str:
     dash means there are no first-party edges to rate, which is neither a pass
     nor a failure.
     """
-    rate = coverage.first_party_resolution
-    if rate is None:
+    percent = coverage.first_party_resolution_percent
+    if percent is None:
         return "[dim]\u2014[/dim]"
-    cell = f"{coverage.first_party_resolved:,} ({rate:.0%})"
-    return cell if rate >= 1.0 else f"[yellow]{cell}[/yellow]"
+    # One number for the digits and the colour, floored on the value object so
+    # neither can disagree with the other. Formatting the raw rate with `.0%`
+    # rounded 0.995 up and printed a coloured "100%".
+    cell = f"{coverage.first_party_resolved:,} ({percent}%)"
+    return cell if percent >= 100 else f"[yellow]{cell}[/yellow]"
 
 
 def _cost_cell(stats: RunStats) -> str:

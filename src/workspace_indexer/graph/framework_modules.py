@@ -32,7 +32,16 @@ _NODE_BUILTINS = frozenset(
     }
 )  # fmt: skip
 
-_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+# Builtins that exist only as `node:x`. `module.builtinModules` lists
+# `node:test` and not `test`, and `require("test")` resolves to the npm
+# package of that name -- so matching these bare would claim a real
+# dependency as framework, which is the false positive this module's
+# conservatism exists to avoid.
+_NODE_PREFIX_ONLY = frozenset({"test", "sqlite", "sea"})
+
+# Public because the origin classifier needs the same set, and a second copy
+# would drift the moment one of them learns about a new dialect.
+JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
 
 
 def is_framework_module(module: str, language: str) -> bool:
@@ -65,9 +74,13 @@ def is_framework_module(module: str, language: str) -> bool:
         # declared-dependency rule to claim where a manifest names it, and
         # otherwise counted as unclassified rather than guessed at.
         return module == "System" or module.startswith("System.")
-    if language in _JS_LANGUAGES:
+    if language in JS_LANGUAGES:
         # `node:fs` is the explicit spelling of `fs`; `fs/promises` is a
         # subpath of a builtin.
-        bare = module.removeprefix("node:")
-        return bare.split("/", 1)[0] in _NODE_BUILTINS
+        prefixed = module.startswith("node:")
+        head = module.removeprefix("node:").split("/", 1)[0]
+        if head in _NODE_BUILTINS:
+            return True
+        # Prefix-only builtins are framework *only* when written that way.
+        return prefixed and head in _NODE_PREFIX_ONLY
     return False

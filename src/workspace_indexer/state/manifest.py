@@ -389,9 +389,14 @@ class Manifest:
         changes an origin decided last run. Re-deciding all of them is one
         SELECT and one executemany, which is cheaper than tracking which rows
         a resolution pass invalidated.
+
+        DISTINCT because `line` is not selected: a module imported on three
+        lines of one file is three rows and one classification, and
+        `record_origins` keys without `line` too, so each duplicate would
+        re-stamp every row the first one already did.
         """
         rows = self._db.execute(
-            "SELECT i.root_label, i.rel_path, i.module, i.is_relative, "
+            "SELECT DISTINCT i.root_label, i.rel_path, i.module, i.is_relative, "
             "i.resolved_path, f.language "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path"
