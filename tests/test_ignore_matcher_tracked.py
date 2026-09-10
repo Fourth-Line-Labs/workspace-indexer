@@ -14,7 +14,7 @@ import pytest
 
 from tests.conftest import git_init, write
 from workspace_indexer.discovery import IgnoreMatcher, SkipReason
-from workspace_indexer.discovery.git_metadata import repo_root, tracked_paths
+from workspace_indexer.discovery.git_metadata import is_repo, repo_root, tracked_paths
 from workspace_indexer.discovery.tracked_paths import TrackedPaths
 
 
@@ -202,12 +202,17 @@ def test_a_root_inside_a_repository_still_gets_the_override(tmp_path: Path) -> N
     assert matcher.reason(root / "src" / "lib" / "scratch.ts") is SkipReason.GITIGNORED
 
 
-# Both names below are legal on POSIX and impossible on Windows: a
-# surrogate-escaped non-UTF-8 name cannot be encoded into a UTF-16 filename,
-# and CR is outright illegal in one. They fail at file creation rather than at
-# the assertion, so the guard has to be on the test, not inside it. CI is
-# ubuntu-only, but the suite is run on Windows too and should stay runnable
-# there.
+# Marks a test whose *setup* cannot exist on Windows, not one that merely
+# behaves differently there. Three ways that happens below: a
+# surrogate-escaped non-UTF-8 filename cannot be encoded into a UTF-16 name,
+# CR is outright illegal in one, and `os.fsdecode` on Windows is
+# utf-8/surrogatepass so it raises on a lone non-UTF-8 byte rather than
+# escaping it. All three fail at file creation or at the decode, before any
+# assertion runs, so the guard belongs on the test rather than inside it.
+#
+# CI is ubuntu-only, so nothing here would ever go red -- the suite is also run
+# on Windows, and that is the reader this guard is for. Apply it to any new
+# test that needs a filename the filesystem cannot spell.
 _posix_filenames_only = pytest.mark.skipif(
     os.name == "nt",
     reason="these filenames cannot exist on Windows, so the test cannot be set up there",
@@ -256,18 +261,25 @@ def test_a_root_inside_a_repository_is_still_known_to_be_one(tmp_path: Path) -> 
     `_repo_root_for` falls back to the matcher root for a root that sits inside
     a repository, and such a root has no local `.git` -- so gating the warning
     on a filesystem check meant it could not fire for exactly the case that
-    fallback introduced. Asserted through `repo_root`, which is what the
-    matcher now asks.
+    fallback introduced.
+
+    Asserted through `is_repo`, which is what `_tracked_for` actually consults.
+    An earlier version of this test asserted `repo_root` instead, which the
+    matcher never calls -- so it pinned a different function and a regression
+    in the gating would not have failed it.
     """
     repo = tmp_path / "mono"
     write(repo / "packages" / "app" / "src" / "thing.ts", "export const t = 1\n")
     git_init(repo)
 
     inside = repo / "packages" / "app"
-    assert not (inside / ".git").exists(), "precondition: no local .git"
-    assert repo_root(inside) == repo
+    # The condition the old gate used, and why it was wrong: no local `.git`.
+    assert not (inside / ".git").exists()
+    # The condition the gate uses now.
+    assert is_repo(inside)
 
 
+@_posix_filenames_only
 def test_a_toplevel_is_decoded_as_a_path_not_as_text(tmp_path: Path) -> None:
     """`repo_root` returns a path that exists, for a repository whose own
     directory name is not valid UTF-8.
@@ -283,4 +295,26 @@ def test_a_toplevel_is_decoded_as_a_path_not_as_text(tmp_path: Path) -> None:
     found = repo_root(odd)
     assert found is not None
     assert found.exists(), f"decoded to a path that does not exist: {found!r}"
+    assert found.samefile(odd)
+
+
+@_posix_filenames_only
+def test_a_toplevel_containing_a_newline_is_not_truncated(tmp_path: Path) -> None:
+    """A directory name may contain a newline, and git's output is newline-
+    terminated, so splitting on newlines cut such a name at its first one and
+    returned a path that does not exist.
+
+    `--show-toplevel` has no `-z` form, so a name *ending* in a newline stays
+    undecidable -- the terminator and the name's last byte are the same byte.
+    Stripping exactly one trailing newline narrows the wrong answers from any
+    embedded newline to that one case, which is as far as git's interface
+    allows.
+    """
+    odd = tmp_path / "rep\nname"
+    write(odd / "app.ts", "export const a = 1\n")
+    git_init(odd)
+
+    found = repo_root(odd)
+    assert found is not None
+    assert found.exists(), f"truncated to a path that does not exist: {found!r}"
     assert found.samefile(odd)

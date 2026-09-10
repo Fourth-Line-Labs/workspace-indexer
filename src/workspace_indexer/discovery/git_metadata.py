@@ -48,13 +48,13 @@ def _git(root: Path, *args: str) -> str | None:
     return None if out is None else out.decode("utf-8", errors="replace").strip()
 
 
-def _paths(root: Path, args: tuple[str, ...], *, separator: bytes) -> list[str] | None:
+def _paths(root: Path, args: tuple[str, ...]) -> list[str] | None:
     """Paths from git, decoded the way the filesystem spells them.
 
-    The separator is passed in rather than sniffed: `-z` output is NUL-
-    separated, `--show-toplevel` is one newline-terminated line, and guessing
-    from the bytes would pick wrong for a filename that legitimately contains
-    a newline -- which is legal here.
+    NUL-separated only, which is what `-z` gives. A single-path command has no
+    separator to speak of and gets `_path` instead: splitting its output on
+    newline truncated a repository whose directory name contains one, which is
+    the same class of silent wrong answer this decoding exists to prevent.
 
     `os.fsdecode` rather than `str`, and bytes rather than `text=True`, because
     a path is not text on this platform -- it is bytes. Two ways that bites:
@@ -73,7 +73,28 @@ def _paths(root: Path, args: tuple[str, ...], *, separator: bytes) -> list[str] 
     out = _run(root, args)
     if out is None:
         return None
-    return [os.fsdecode(entry) for entry in out.split(separator) if entry]
+    return [os.fsdecode(entry) for entry in out.split(b"\0") if entry]
+
+
+def _path(root: Path, args: tuple[str, ...]) -> str | None:
+    """One path from git, for the commands that emit exactly one.
+
+    Strips a single trailing newline rather than splitting on newlines. Git
+    terminates the line with one, and a directory name may itself contain one
+    -- splitting truncated such a name to its prefix and produced a path that
+    does not exist, silently.
+
+    A name that *ends* in a newline is still read wrong, and cannot be read
+    right: `rev-parse --show-toplevel` has no `-z` form, so the terminator and
+    a trailing newline in the name are the same byte. Recorded rather than
+    pretended away -- this narrows the wrong answers from "any embedded
+    newline" to "a name ending in one", which is as far as git's interface
+    allows.
+    """
+    out = _run(root, args)
+    if out is None:
+        return None
+    return os.fsdecode(out.removesuffix(b"\n"))
 
 
 def is_repo(root: Path) -> bool:
@@ -98,7 +119,7 @@ def tracked_paths(root: Path) -> TrackedPaths | None:
     crash the walk, and universal newlines would rewrite a CR inside a name
     and turn a tracked file into an untracked one.
     """
-    paths = _paths(root, ("ls-files", "-z"), separator=b"\0")
+    paths = _paths(root, ("ls-files", "-z"))
     if paths is None:
         # Silent here on purpose. A workspace holds plain folders alongside
         # repositories and both get indexed, so "not a repository" is an
@@ -153,14 +174,8 @@ def repo_root(path: Path) -> Path | None:
     # and `.strip()` would eat a trailing space that is part of the name --
     # both silently, where the old strict decoding at least raised.
     #
-    # One newline-terminated line, so the newline is the separator and the
-    # trailing empty entry is dropped: one line in, one path out.
-    found = _paths(
-        path if path.is_dir() else path.parent,
-        ("rev-parse", "--show-toplevel"),
-        separator=b"\n",
-    )
-    return Path(found[0]) if found else None
+    found = _path(path if path.is_dir() else path.parent, ("rev-parse", "--show-toplevel"))
+    return Path(found) if found else None
 
 
 def read_repo_info(root: Path) -> RepoInfo | None:
