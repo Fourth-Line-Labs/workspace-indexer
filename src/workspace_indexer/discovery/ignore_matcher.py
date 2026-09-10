@@ -7,6 +7,13 @@ workspace-sized tree is the difference between seconds and many minutes.
 GitIgnoreSpec rather than the generic PathSpec: it is the class built for
 .gitignore semantics, where the last matching pattern wins and negation with
 `!` has to override an earlier exclusion.
+
+Patterns are not the whole of gitignore, though. A pattern has no effect on a
+path git already tracks, so the index is consulted too -- once per repository,
+which is what keeps the performance argument above intact. Without that, a
+repository carrying a broad pattern from a language template it does not use
+loses committed source with nothing logged: the files are never read, so no
+skip is recorded against them and the run reports success.
 """
 
 from __future__ import annotations
@@ -15,7 +22,12 @@ from pathlib import Path
 
 import pathspec
 
+from workspace_indexer.discovery.git_metadata import is_repo, tracked_paths
 from workspace_indexer.discovery.skip_reason import SkipReason
+from workspace_indexer.discovery.tracked_paths import TrackedPaths
+from workspace_indexer.obs.logging import get_logger
+
+log = get_logger("workspace_indexer.discovery.ignore")
 
 _GITIGNORE = ".gitignore"
 
@@ -32,6 +44,11 @@ class IgnoreMatcher:
         self._respect_gitignore = respect_gitignore
         self._excludes = pathspec.GitIgnoreSpec.from_lines(excludes)
         self._dir_specs: dict[Path, pathspec.GitIgnoreSpec | None] = {}
+        # Both cached because both are asked per path: one subprocess per
+        # repository and one upward walk per directory, never per file.
+        self._tracked: dict[Path, TrackedPaths | None] = {}
+        self._repo_roots: dict[Path, Path | None] = {}
+        self._is_repo_cache: dict[Path, bool] = {}
 
     def _spec_for_dir(self, directory: Path) -> pathspec.GitIgnoreSpec | None:
         if directory in self._dir_specs:
@@ -70,6 +87,130 @@ class IgnoreMatcher:
             directory = parent
         return False
 
+    def _repo_root_for(self, directory: Path) -> Path | None:
+        """The repository holding `directory`, or None if it is in none.
+
+        A `.git` entry marks the root, tested with `exists()` rather than
+        `is_dir()` on purpose: a linked worktree and a submodule checkout both
+        keep a `.git` *file* there, and both are ordinary states in a
+        checked-out workspace. Walking up finds the nearest one, so a submodule
+        is answered with itself rather than its parent.
+
+        Stops at the matcher's root, and returns the root itself when nothing
+        above it was found. That fallback is not a nicety: a root that is a
+        subdirectory of a repository -- one package of a monorepo, say -- has
+        no `.git` at or below it, so the walk finds nothing, while a
+        `.gitignore` *at* the root still applies. Without the fallback the
+        override switches off for exactly those roots and a tracked file
+        matching such a pattern is dropped, which is the bug this module was
+        changed to fix, reproduced one level up.
+
+        Running `git ls-files` at the root rather than at the true repository
+        top is deliberate: it returns paths relative to where it ran and
+        limited to that subtree, which is the shape `holds` wants, so no
+        rebasing is needed. A root in no repository at all costs one failed
+        subprocess and then answers from cache.
+        """
+        if directory in self._repo_roots:
+            return self._repo_roots[directory]
+        found: Path | None = None
+        current = directory
+        while True:
+            if (current / ".git").exists():
+                found = current
+                break
+            if current == self._root:
+                # Nothing above it inside our reach, so ask at the root. If the
+                # root sits inside a repository, git answers from there.
+                found = self._root
+                break
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        self._repo_roots[directory] = found
+        return found
+
+    def _tracked_for(self, repo: Path) -> TrackedPaths | None:
+        """Cached per repository, and loud when git owed us an answer.
+
+        The distinction matters because losing the override is silent by
+        nature: patterns still apply, files still disappear, and nothing
+        records that the thing meant to prevent that was switched off. A root
+        that is simply not a repository is an ordinary state and says nothing;
+        a directory holding a `.git` that git then declined to describe -- a
+        timeout on a cold index, a broken checkout -- is worth a line in the
+        log, because every tracked file under it is now at risk of being
+        skipped by a pattern.
+        """
+        if repo not in self._tracked:
+            found = tracked_paths(repo)
+            if found is None and self._is_repo(repo):
+                log.warning(
+                    "gitignore.tracked_override_unavailable",
+                    repo=str(repo),
+                    detail="git could not list this repository's index, so "
+                    "gitignore patterns are applied without the tracked-file "
+                    "override and a committed file matching one may be skipped",
+                )
+            self._tracked[repo] = found
+        return self._tracked[repo]
+
+    def _is_repo(self, directory: Path) -> bool:
+        """Whether git calls this a repository, asked once per directory.
+
+        `is_repo` rather than a `.git` stat, because the fallback in
+        `_repo_root_for` hands back the matcher root for a root that sits
+        *inside* a repository -- and such a root has no local `.git`. Stating
+        the condition as a filesystem check meant the warning below could not
+        fire for exactly the case that fallback introduced, which is the one
+        where losing the override is least visible.
+
+        One subprocess per directory at worst, cached, and only reached when
+        `tracked_paths` has already failed -- so the cost falls on the rare
+        path, not the hot one.
+        """
+        if directory not in self._is_repo_cache:
+            self._is_repo_cache[directory] = is_repo(directory)
+        return self._is_repo_cache[directory]
+
+    def _is_tracked(self, path: Path, is_dir: bool) -> bool:
+        """Whether git has this path in its index, or anything beneath it.
+
+        A directory counts as tracked when it holds tracked files, because the
+        walker prunes directories before reading what is inside them -- pruning
+        one that holds committed source is how the files go missing without a
+        single skip being recorded against them.
+        """
+        repo = self._repo_root_for(path if is_dir else path.parent)
+        if repo is None:
+            return False
+        tracked = self._tracked_for(repo)
+        if tracked is None:
+            return False
+        try:
+            relative = path.relative_to(repo).as_posix()
+        except ValueError:  # pragma: no cover - defensive
+            return False
+        if relative == ".":
+            # `path` *is* the repository root -- a submodule or nested checkout
+            # whose own directory matches a pattern in the parent.
+            # `TrackedPaths` derives directories from file paths, so it never
+            # holds ".", and answering False here pruned the entire nested
+            # repository, files and all.
+            #
+            # What this asks is whether the *nested* repository has committed
+            # files, not whether the parent tracks a gitlink for it -- and the
+            # two can disagree. A checkout cloned in after the parent's last
+            # commit has no gitlink, and git really does ignore it when a
+            # parent pattern matches; we keep it anyway. That is deliberate and
+            # deliberately not git-faithful: this index exists to find real
+            # source, and a vendored checkout wrongly indexed costs some noise
+            # while a repository wrongly dropped costs every file in it. When
+            # the two errors are not symmetric, prefer the recoverable one.
+            return bool(tracked.files)
+        return tracked.holds(relative, is_dir=is_dir)
+
     def reason(self, path: Path, is_dir: bool = False) -> SkipReason | None:
         """None means "keep it"."""
         try:
@@ -79,6 +220,16 @@ class IgnoreMatcher:
         probe = relative + "/" if is_dir else relative
         if self._excludes.match_file(probe):
             return SkipReason.EXCLUDED
-        if self._respect_gitignore and self._gitignored(path, is_dir):
+        # Tracked paths override the *gitignore* rule and nothing else.
+        # Deliberately after the configured excludes rather than before: those
+        # are correctness rules about our own state, and a repository that has
+        # committed a log file or an eval artefact is exactly when they matter
+        # most. `_is_tracked` runs only once a pattern has already matched, so
+        # the index is never consulted for a path nothing would have ignored.
+        if (
+            self._respect_gitignore
+            and self._gitignored(path, is_dir)
+            and not self._is_tracked(path, is_dir)
+        ):
             return SkipReason.GITIGNORED
         return None

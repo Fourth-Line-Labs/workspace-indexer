@@ -7,15 +7,18 @@ from workspace_indexer.discovery.git_metadata import (
     is_repo,
     read_repo_info,
     repo_root,
+    tracked_paths,
 )
 from workspace_indexer.discovery.ignore_matcher import IgnoreMatcher
 from workspace_indexer.discovery.skip_reason import SkipReason
+from workspace_indexer.discovery.tracked_paths import TrackedPaths
 from workspace_indexer.discovery.walker import Walker
 
 __all__ = [
     "FileCandidate",
     "IgnoreMatcher",
     "SkipReason",
+    "TrackedPaths",
     "Walker",
     "classify",
     "is_lockfile",
@@ -23,4 +26,5 @@ __all__ = [
     "is_repo",
     "read_repo_info",
     "repo_root",
+    "tracked_paths",
 ]
