@@ -203,12 +203,17 @@ def test_a_root_inside_a_repository_still_gets_the_override(tmp_path: Path) -> N
 
 
 # Marks a test whose *setup* cannot exist on Windows, not one that merely
-# behaves differently there. Three ways that happens below: a
-# surrogate-escaped non-UTF-8 filename cannot be encoded into a UTF-16 name,
-# CR is outright illegal in one, and `os.fsdecode` on Windows is
-# utf-8/surrogatepass so it raises on a lone non-UTF-8 byte rather than
-# escaping it. All three fail at file creation or at the decode, before any
-# assertion runs, so the guard belongs on the test rather than inside it.
+# behaves differently there. Deliberately not a list with a count: this comment
+# has gone stale twice already, once within the commit that wrote it, because a
+# count needs editing every time a case is added. The kinds, not the tally:
+#
+# - a surrogate-escaped non-UTF-8 filename cannot be encoded into a UTF-16 name
+# - control characters such as CR and LF are outright illegal in one
+# - `os.fsdecode` on Windows is utf-8/surrogatepass, so it raises on a lone
+#   non-UTF-8 byte rather than escaping it
+#
+# Each fails at file creation or at the decode, before any assertion runs, so
+# the guard belongs on the test rather than inside it.
 #
 # CI is ubuntu-only, so nothing here would ever go red -- the suite is also run
 # on Windows, and that is the reader this guard is for. Apply it to any new
@@ -304,11 +309,9 @@ def test_a_toplevel_containing_a_newline_is_not_truncated(tmp_path: Path) -> Non
     terminated, so splitting on newlines cut such a name at its first one and
     returned a path that does not exist.
 
-    `--show-toplevel` has no `-z` form, so a name *ending* in a newline stays
-    undecidable -- the terminator and the name's last byte are the same byte.
-    Stripping exactly one trailing newline narrows the wrong answers from any
-    embedded newline to that one case, which is as far as git's interface
-    allows.
+    Stripping one trailing byte rather than splitting handles this and the
+    trailing-newline case below, which is the one that looks ambiguous and is
+    not.
     """
     odd = tmp_path / "rep\nname"
     write(odd / "app.ts", "export const a = 1\n")
@@ -318,3 +321,28 @@ def test_a_toplevel_containing_a_newline_is_not_truncated(tmp_path: Path) -> Non
     assert found is not None
     assert found.exists(), f"truncated to a path that does not exist: {found!r}"
     assert found.samefile(odd)
+
+
+@_posix_filenames_only
+def test_a_toplevel_ending_in_a_newline_is_read_whole(tmp_path: Path) -> None:
+    """The case that looks undecidable and is not.
+
+    An earlier version of this module documented it as unreadable, reasoning
+    that `--show-toplevel` has no `-z` form so the terminator and the name's
+    last byte must be the same byte. They are not: git emits the name and then
+    its own terminator, so the output ends with two newlines and stripping one
+    recovers the name whole.
+
+    Pinned because a limitation recorded but not real is worse than an unknown
+    one -- it invites a workaround for a solved problem, or distrust of a
+    correct answer.
+    """
+    odd = tmp_path / "trailing\n"
+    write(odd / "app.ts", "export const a = 1\n")
+    git_init(odd)
+
+    found = repo_root(odd)
+    assert found is not None
+    assert found.exists()
+    assert found.samefile(odd)
+    assert found.name == "trailing\n", f"lost the trailing newline: {found.name!r}"

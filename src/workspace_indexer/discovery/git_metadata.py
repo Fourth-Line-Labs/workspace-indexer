@@ -84,12 +84,11 @@ def _path(root: Path, args: tuple[str, ...]) -> str | None:
     -- splitting truncated such a name to its prefix and produced a path that
     does not exist, silently.
 
-    A name that *ends* in a newline is still read wrong, and cannot be read
-    right: `rev-parse --show-toplevel` has no `-z` form, so the terminator and
-    a trailing newline in the name are the same byte. Recorded rather than
-    pretended away -- this narrows the wrong answers from "any embedded
-    newline" to "a name ending in one", which is as far as git's interface
-    allows.
+    Removing exactly one suffix byte is right even for a name that *ends* in a
+    newline, which is the case that looks like it should be ambiguous and is
+    not: git emits the name and then its own terminator, so such a path comes
+    back with two trailing newlines and stripping one recovers the name whole.
+    Both cases are tested.
     """
     out = _run(root, args)
     if out is None:
@@ -168,12 +167,11 @@ def repo_root(path: Path) -> Path | None:
     that directory is a *file* in a worktree and absent entirely in a submodule
     checkout -- both of which are ordinary states for a checked-out workspace.
     """
-    # Through `_paths`, not `_git`: a toplevel is a filesystem path, and `_git`
+    # Through `_path`, not `_git`: a toplevel is a filesystem path, and `_git`
     # says so in its own docstring. `errors="replace"` there would turn a
     # non-UTF-8 toplevel into U+FFFD and hand back a Path that does not exist,
     # and `.strip()` would eat a trailing space that is part of the name --
     # both silently, where the old strict decoding at least raised.
-    #
     found = _path(path if path.is_dir() else path.parent, ("rev-parse", "--show-toplevel"))
     return Path(found) if found else None
 
