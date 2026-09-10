@@ -48,8 +48,13 @@ def _git(root: Path, *args: str) -> str | None:
     return None if out is None else out.decode("utf-8", errors="replace").strip()
 
 
-def _paths(root: Path, args: tuple[str, ...]) -> list[str] | None:
-    """NUL-separated paths from git, decoded the way the filesystem spells them.
+def _paths(root: Path, args: tuple[str, ...], *, separator: bytes) -> list[str] | None:
+    """Paths from git, decoded the way the filesystem spells them.
+
+    The separator is passed in rather than sniffed: `-z` output is NUL-
+    separated, `--show-toplevel` is one newline-terminated line, and guessing
+    from the bytes would pick wrong for a filename that legitimately contains
+    a newline -- which is legal here.
 
     `os.fsdecode` rather than `str`, and bytes rather than `text=True`, because
     a path is not text on this platform -- it is bytes. Two ways that bites:
@@ -68,7 +73,7 @@ def _paths(root: Path, args: tuple[str, ...]) -> list[str] | None:
     out = _run(root, args)
     if out is None:
         return None
-    return [os.fsdecode(entry) for entry in out.split(b"\0") if entry]
+    return [os.fsdecode(entry) for entry in out.split(separator) if entry]
 
 
 def is_repo(root: Path) -> bool:
@@ -93,7 +98,7 @@ def tracked_paths(root: Path) -> TrackedPaths | None:
     crash the walk, and universal newlines would rewrite a CR inside a name
     and turn a tracked file into an untracked one.
     """
-    paths = _paths(root, ("ls-files", "-z"))
+    paths = _paths(root, ("ls-files", "-z"), separator=b"\0")
     if paths is None:
         # Silent here on purpose. A workspace holds plain folders alongside
         # repositories and both get indexed, so "not a repository" is an
@@ -142,8 +147,20 @@ def repo_root(path: Path) -> Path | None:
     that directory is a *file* in a worktree and absent entirely in a submodule
     checkout -- both of which are ordinary states for a checked-out workspace.
     """
-    top = _git(path if path.is_dir() else path.parent, "rev-parse", "--show-toplevel")
-    return Path(top) if top else None
+    # Through `_paths`, not `_git`: a toplevel is a filesystem path, and `_git`
+    # says so in its own docstring. `errors="replace"` there would turn a
+    # non-UTF-8 toplevel into U+FFFD and hand back a Path that does not exist,
+    # and `.strip()` would eat a trailing space that is part of the name --
+    # both silently, where the old strict decoding at least raised.
+    #
+    # One newline-terminated line, so the newline is the separator and the
+    # trailing empty entry is dropped: one line in, one path out.
+    found = _paths(
+        path if path.is_dir() else path.parent,
+        ("rev-parse", "--show-toplevel"),
+        separator=b"\n",
+    )
+    return Path(found[0]) if found else None
 
 
 def read_repo_info(root: Path) -> RepoInfo | None:

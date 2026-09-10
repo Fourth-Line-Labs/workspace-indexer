@@ -14,7 +14,7 @@ import pytest
 
 from tests.conftest import git_init, write
 from workspace_indexer.discovery import IgnoreMatcher, SkipReason
-from workspace_indexer.discovery.git_metadata import tracked_paths
+from workspace_indexer.discovery.git_metadata import repo_root, tracked_paths
 from workspace_indexer.discovery.tracked_paths import TrackedPaths
 
 
@@ -202,6 +202,19 @@ def test_a_root_inside_a_repository_still_gets_the_override(tmp_path: Path) -> N
     assert matcher.reason(root / "src" / "lib" / "scratch.ts") is SkipReason.GITIGNORED
 
 
+# Both names below are legal on POSIX and impossible on Windows: a
+# surrogate-escaped non-UTF-8 name cannot be encoded into a UTF-16 filename,
+# and CR is outright illegal in one. They fail at file creation rather than at
+# the assertion, so the guard has to be on the test, not inside it. CI is
+# ubuntu-only, but the suite is run on Windows too and should stay runnable
+# there.
+_posix_filenames_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason="these filenames cannot exist on Windows, so the test cannot be set up there",
+)
+
+
+@_posix_filenames_only
 def test_a_filename_that_is_not_utf8_does_not_crash_the_walk(tmp_path: Path) -> None:
     """Filenames are bytes on this platform, and some are not valid UTF-8.
 
@@ -221,6 +234,7 @@ def test_a_filename_that_is_not_utf8_does_not_crash_the_walk(tmp_path: Path) -> 
     assert "normal.ts" in paths.files
 
 
+@_posix_filenames_only
 def test_a_filename_containing_a_carriage_return_is_not_rewritten(tmp_path: Path) -> None:
     """`text=True` turns on universal newlines, which rewrote a CR inside a
     filename to LF -- so the lookup missed and a tracked file read as
@@ -234,3 +248,39 @@ def test_a_filename_containing_a_carriage_return_is_not_rewritten(tmp_path: Path
     assert paths is not None
     assert "we\rird.ts" in paths.files
     assert "we\nird.ts" not in paths.files
+
+
+def test_a_root_inside_a_repository_is_still_known_to_be_one(tmp_path: Path) -> None:
+    """The condition behind the missing-override warning.
+
+    `_repo_root_for` falls back to the matcher root for a root that sits inside
+    a repository, and such a root has no local `.git` -- so gating the warning
+    on a filesystem check meant it could not fire for exactly the case that
+    fallback introduced. Asserted through `repo_root`, which is what the
+    matcher now asks.
+    """
+    repo = tmp_path / "mono"
+    write(repo / "packages" / "app" / "src" / "thing.ts", "export const t = 1\n")
+    git_init(repo)
+
+    inside = repo / "packages" / "app"
+    assert not (inside / ".git").exists(), "precondition: no local .git"
+    assert repo_root(inside) == repo
+
+
+def test_a_toplevel_is_decoded_as_a_path_not_as_text(tmp_path: Path) -> None:
+    """`repo_root` returns a path that exists, for a repository whose own
+    directory name is not valid UTF-8.
+
+    Decoding it with `errors="replace"` produced U+FFFD and a Path that does
+    not exist, silently -- worse than the strict decode it replaced, which at
+    least raised.
+    """
+    odd = tmp_path / os.fsdecode(b"rep\xf8")
+    write(odd / "app.ts", "export const a = 1\n")
+    git_init(odd)
+
+    found = repo_root(odd)
+    assert found is not None
+    assert found.exists(), f"decoded to a path that does not exist: {found!r}"
+    assert found.samefile(odd)
