@@ -9,6 +9,7 @@ until it is documented.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,13 @@ REFERENCE = Path(__file__).resolve().parents[1] / "docs" / "reference.md"
 @pytest.fixture(scope="module")
 def text() -> str:
     return REFERENCE.read_text(encoding="utf-8")
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Line breaks are not meaningful on either side of this comparison: the
+    source concatenates the string to stay inside line length, and the doc
+    wraps it to fit a code block."""
+    return " ".join(text.split())
 
 
 def _leaf_fields(model: type[BaseModel], prefix: str = "") -> list[str]:
@@ -93,3 +101,45 @@ def test_the_testing_guide_is_linked_from_the_readme() -> None:
     reference is held to."""
     readme = (REFERENCE.parents[1] / "README.md").read_text(encoding="utf-8")
     assert "docs/testing.md" in readme
+
+
+def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
+    """The reference quotes a log line verbatim, so it has to stay verbatim.
+
+    Someone reaches that section *because* they saw the message, and the first
+    thing they do is search for the sentence. An abridged quote finds nothing,
+    which is worse than no example — and the abridgement that prompted this
+    test dropped the half carrying the remedy.
+
+    Whitespace-normalised on both sides: the source concatenates the string
+    across lines and the doc wraps it to fit, so neither's line breaks are
+    meaningful. Everything else must match.
+    """
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "workspace_indexer"
+        / "pipeline"
+        / "indexer.py"
+    ).read_text(encoding="utf-8")
+
+    emitted = re.search(r'detail="(this would remove most of a root.*?)",\n', source, re.S)
+    assert emitted is not None, "the mass-deletion log call moved; update this guard"
+    # Undo the implicit concatenation the source uses to stay inside line length.
+    actual = re.sub(r'"\s*\n\s*"', "", emitted.group(1))
+
+    quoted = re.search(r"detail='(.*?)'", text, re.S)
+    assert quoted is not None, "docs/reference.md no longer quotes the detail string"
+
+    assert _collapse_whitespace(quoted.group(1)) == _collapse_whitespace(actual)
+
+
+def test_the_quoted_log_line_shows_every_field_the_event_carries(text: str) -> None:
+    """A field omitted from the example is a field the reader does not know to
+    look for. `recorded` is the one that says what the share was computed
+    against, which is the difference between "most of a root" and "most of what
+    we had recorded for a root"."""
+    block = re.search(r"orphans\.mass_deletion_withheld[^`]*", text)
+    assert block is not None
+    for field in ("root=", "files=", "recorded=", "share="):
+        assert field in block.group(0), f"the quoted log line omits {field}"

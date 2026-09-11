@@ -515,12 +515,18 @@ Nothing fails at the time. What happens is that the *next* run of either config
 sees the other workspace's roots as files that have vanished, and stops:
 
 ```
-orphans.mass_deletion_withheld  root=src  files=1121  share=1.0
-'this would remove most of a root at once. Nothing was deleted.'
+[error] orphans.mass_deletion_withheld  root=src  files=1121  recorded=1121  share=1.0
+        detail='this would remove most of a root at once, which is what an empty or
+        half-finished checkout looks like. Nothing was deleted. Re-run with
+        --allow-deletes if the files really are gone.'
 ```
 
-The brake is doing its job — that is what it is for — but the cause is two
-workspaces sharing a manifest, not a half-finished checkout. Set it per run:
+The brake is doing its job — that is what it is for. But read the last sentence
+against your situation before taking it: the files are not gone, and
+`--allow-deletes` would delete the other workspace's index. The cause is two
+workspaces sharing a manifest, which looks identical to a half-finished
+checkout from inside a single run. Give the second workspace its own database
+instead:
 
 ```bash
 STATE_DB=./data/corpus-manifest.sqlite3 \
