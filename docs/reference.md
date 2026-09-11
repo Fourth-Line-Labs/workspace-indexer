@@ -74,6 +74,34 @@ to hundreds of thousands. Note that `.env`'s `LOG_LEVEL` overrides
 `logging.level`, so a `LOG_LEVEL=WARNING` keeps this out of the console — it is
 always in the JSONL, which is always DEBUG.
 
+#### Import resolution, and why there are three numbers
+
+Resolution coverage is reported against three nested denominators rather than
+one percentage, because one percentage cannot separate a resolver defect from a
+package reference. Every edge carries an **origin**:
+
+| origin | meaning | can it resolve to a file here? |
+|---|---|---|
+| `first_party` | code in this workspace | **yes** — a failure here is a defect |
+| `declared_dependency` | a package the project declares | no |
+| `framework` | the language's own standard library | no |
+| `unclassified` | no rule has claimed it yet | unknown |
+
+The columns narrow left to right: **all edges**, **non-framework**, then
+**first-party**. The last is the one worth acting on, and its rate is coloured
+when it falls below 100% — the only number in that table where something is
+broken rather than merely unreachable. It is floored rather than rounded, so
+`100%` means every first-party edge resolved and not "99.6% rounded up".
+
+A language with no first-party edges reports an em dash, not `0%`. No data is
+not a failure, and the two call for opposite next moves.
+
+`unclassified` being large is honest rather than broken — nothing populates the
+declared-dependency set until a manifest reader lands, so third-party imports
+land there. It is a work queue with a count, not a silent gap. An origin that
+no rule claims is never folded into `framework`: guessing there is how a
+resolver comes to report coverage it has not earned.
+
 ### `grounding`
 
 Per repository, whether the index can answer **why** the code is the way it is.
@@ -471,10 +499,33 @@ which is what makes the `.mcp.json` `env` block work.
 | `MONGODB_CONNECTION_STRING` | none | Atlas: Connect → Drivers. Carries the password inline, so it belongs here and never in `workspace.yaml`. Needs `poetry install --extras mongo`. |
 | `MONGODB_DATABASE` | `workspace_indexer` | Collections inside it are named exactly as Qdrant's are. |
 | `MONGODB_VECTOR_DTYPE` | `float32` | `float32` or `int8`, both stored as BSON `binData`. See §7. |
-| `STATE_DB` | `data/manifest.sqlite3` | Give a second workspace its own, or both share one and the divergence check misfires. |
+| `STATE_DB` | `data/manifest.sqlite3` | Give a second workspace its own. See below — this one has teeth. |
 | `LOG_LEVEL` | from yaml | |
 | `LOGFIRE_ENABLED` / `LOGFIRE_SEND_TO_CLOUD` | none | Override the `logging.logfire` block in `workspace.yaml`. |
 | `LOGFIRE_TOKEN` | none | Read from the environment by the logfire SDK itself, not by this code. Declared here so it is documented and so an unknown key is not rejected. |
+
+### `STATE_DB` is an environment variable, so `--config` cannot redirect it
+
+Indexing a second workspace means passing `--config`, and it is natural to
+assume the second config brings its own manifest. It does not. `STATE_DB` is
+read from the environment, so a `.env` that pins it wins over every config
+file, and both workspaces write into one database.
+
+Nothing fails at the time. What happens is that the *next* run of either config
+sees the other workspace's roots as files that have vanished, and stops:
+
+```
+orphans.mass_deletion_withheld  root=src  files=1121  share=1.0
+'this would remove most of a root at once. Nothing was deleted.'
+```
+
+The brake is doing its job — that is what it is for — but the cause is two
+workspaces sharing a manifest, not a half-finished checkout. Set it per run:
+
+```bash
+STATE_DB=./data/corpus-manifest.sqlite3 \
+  poetry run workspace-indexer index --config config/workspace-corpus.yaml
+```
 
 ---
 
