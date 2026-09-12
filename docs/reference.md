@@ -511,11 +511,12 @@ assume the second config brings its own manifest. It does not. `STATE_DB` is
 read from the environment, so a `.env` that pins it wins over every config
 file, and both workspaces write into one database.
 
-The first run writes its files in happily. It is the same run's *end* that
-stops: every non-dry run finishes by comparing the whole manifest against what
-it just walked, so this run sees the other workspace's roots as files that have
-vanished. Look for the failure in the run you just started, not the one after
-it:
+The second config's first run writes its files in happily. It is *that* run's
+*end* that stops: an unscoped non-dry run finishes by comparing the whole
+manifest against what it just walked, so it sees the first workspace's roots as
+files that have vanished. (A run passing `--root` is spared — it only judges
+the root it walked.) Look for the failure in the run you just started, not the
+one after it:
 
 ```
 … [error    ] orphans.mass_deletion_withheld [workspace_indexer.pipeline] detail='this

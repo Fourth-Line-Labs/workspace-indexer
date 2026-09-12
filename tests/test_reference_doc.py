@@ -120,9 +120,13 @@ def _fenced_blocks(text: str) -> list[str]:
     closer with trailing whitespace or extra length are all legal and all
     handled here.
 
-    Stricter than CommonMark in one place: a backtick opener's info string may
-    not contain a backtick (the spec's rule), and an unterminated block is
-    still returned, closed at end of file (also the spec's rule).
+    One known deviation, and it is the indent rule: CommonMark measures a
+    fence's indent from its *container's* content column, so a fence inside a
+    list item is legally four or more spaces from the margin and this scanner
+    reads it as ordinary text. Following that would mean tracking container
+    blocks, which is a markdown parser, not a doc guard. The cost is that
+    moving the example into a list makes `_mass_deletion_example` report zero
+    blocks -- so if it ever does, suspect this line before suspecting the doc.
     """
     blocks: list[str] = []
     marker: str | None = None
@@ -201,6 +205,10 @@ def test_the_renderer_decides_the_quoting_not_this_test() -> None:
     assert _rendered(detail="it isn't gone") == 'detail="it isn\'t gone"'
     assert _rendered(detail="a\tb") == "detail='a\\tb'"
     assert _rendered(detail="plain") == "detail=plain"
+    # Sorted, not in the order passed -- so the slice has to start at the
+    # field the renderer puts first, or the rest silently leaves the
+    # expected text.
+    assert _rendered(root="src", detail="gone") == "detail=gone root=src"
 
 
 def _log_call() -> ast.Call:
@@ -220,10 +228,16 @@ def _log_call() -> ast.Call:
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call) or not node.args:
             continue
+        # The *logging* call, not merely a call carrying the event name. A
+        # metrics emit or a re-log through a helper takes the same first
+        # argument, and deriving the doc's expected text from one of those
+        # would be wrong without being visibly wrong.
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "error":
+            continue
         first = node.args[0]
         if isinstance(first, ast.Constant) and first.value == _EVENT:
             return node
-    raise AssertionError(f"no call passing {_EVENT} remains in indexer.py; update this guard")
+    raise AssertionError(f"no log.error call for {_EVENT} remains in indexer.py; update this guard")
 
 
 def _emitted_detail() -> str:
@@ -232,7 +246,15 @@ def _emitted_detail() -> str:
     disagree with the moment the sentence contains a `\\n` or a `\\"`."""
     for keyword in _log_call().keywords:
         if keyword.arg == "detail":
-            detail = ast.literal_eval(keyword.value)
+            try:
+                detail = ast.literal_eval(keyword.value)
+            except ValueError:
+                # An f-string or a named constant is a plausible next shape for
+                # this sentence, and `literal_eval` answers that with a
+                # traceback into its own internals. Say what happened instead.
+                raise AssertionError(
+                    f"the detail on {_EVENT} is no longer a plain string literal; update this guard"
+                ) from None
             assert isinstance(detail, str)
             return detail
     raise AssertionError("that log call no longer passes a detail string")
@@ -258,9 +280,15 @@ def _rendered(**fields: str) -> str:
     and any escape renders escaped. Every one of those decisions used to be
     hardcoded here as a single-quoted string, which made a faithful doc fail.
     """
+    assert fields, "nothing to render"
     line = structlog.dev.ConsoleRenderer(colors=False)(None, "", {"event": _EVENT, **fields})
     assert isinstance(line, str)
-    return line[line.index(next(iter(fields)) + "=") :]
+    # Sliced from the alphabetically first field, not the first one passed:
+    # the renderer sorts keys, which is the very fact the reference cites to
+    # explain why `detail` leads that log line. Slicing from the first keyword
+    # would drop every field sorting ahead of it out of the expected text --
+    # an assertion that still passes while checking less than it reads as.
+    return line[line.index(min(fields) + "=") :]
 
 
 def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
