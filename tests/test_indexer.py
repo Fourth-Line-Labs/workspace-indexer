@@ -916,3 +916,116 @@ async def test_a_call_naming_an_endpoint_outside_the_workspace_stays_unresolved(
         assert total >= 1
         assert resolved == 0
     await client.close()
+
+
+async def test_a_csharp_using_resolves_to_every_file_declaring_the_namespace(
+    harness: Harness, workspace: Path
+) -> None:
+    """Rung 2 for C#. `using MyApp.Data` names no path at all, so it is matched
+    against the namespaces declared in the same repository -- and a namespace
+    is declared across several files, so the edge reaches all of them."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text(
+        "namespace MyApp.Data;\n\npublic class Repo {}\n", encoding="utf-8"
+    )
+    (src / "Context.cs").write_text(
+        "namespace MyApp.Data;\n\npublic class Context {}\n", encoding="utf-8"
+    )
+    (src / "Startup.cs").write_text(
+        "using System;\nusing MyApp.Data;\n\npublic class Startup {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    reached = {(d.module, d.rel_path, d.resolved_by) for d in found}
+    assert reached == {
+        ("MyApp.Data", "repo_one/src/Context.cs", "namespace"),
+        ("MyApp.Data", "repo_one/src/Repo.cs", "namespace"),
+        # The framework edge resolves to nothing, and that is the right answer.
+        ("System", None, None),
+    }
+
+    importers = harness.manifest.dependents_of("workspace", "repo_one/src/Repo.cs")
+    assert [d.rel_path for d in importers] == ["repo_one/src/Startup.cs"]
+
+
+async def test_every_first_party_csharp_edge_resolves(harness: Harness, workspace: Path) -> None:
+    """The gate the origin columns exist for: only a first-party edge can
+    reach a file here, so that is the one number where less than 100% is a
+    defect rather than a package reference."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text(
+        "using System;\nusing System.Text.Json;\nusing MyApp.Data;\n\npublic class S {}\n",
+        encoding="utf-8",
+    )
+    await harness.indexer().run()
+
+    coverage = harness.manifest.origin_coverage()["csharp"]
+    assert coverage.first_party == 1
+    assert coverage.first_party_resolution_percent == 100
+    # The framework edges are not a failure and must not be in the denominator.
+    assert coverage.framework == 2
+
+
+async def test_a_namespace_declared_in_another_repository_is_not_reached(
+    harness: Harness, workspace: Path
+) -> None:
+    """Cross-unit isolation, end to end. Two repositories in one workspace
+    declaring the same namespace is ordinary -- a service and the library it
+    was copied from -- and resolving across them would invent a dependency."""
+    (workspace / "repo_one" / "src" / "Repo.cs").write_text(
+        "namespace Shared.Models;\npublic class Repo {}\n", encoding="utf-8"
+    )
+    (workspace / "repo_two" / "app" / "Startup.cs").write_text(
+        "using Shared.Models;\n\npublic class Startup {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_two/app/Startup.cs")
+    assert [(d.module, d.rel_path) for d in found] == [("Shared.Models", None)]
+    assert harness.manifest.dependents_of("workspace", "repo_one/src/Repo.cs") == []
+
+
+async def test_deleting_the_declaring_file_retires_the_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """The reason targets are derived rather than written down: no
+    invalidation pass, and no edge left pointing at a file that has gone."""
+    src = workspace / "repo_one" / "src"
+    repo = src / "Repo.cs"
+    repo.write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+    assert harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")[0].resolved
+
+    repo.unlink()
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    assert [(d.module, d.resolved) for d in found] == [("MyApp.Data", False)]
+
+
+async def test_coverage_stops_claiming_a_retired_namespace_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """A path edge is retired by the cascade that removes its target. A
+    namespace edge stores no target, so nothing cascades -- and the flag
+    coverage reads would go on claiming a resolution the join cannot produce.
+    """
+    src = workspace / "repo_one" / "src"
+    repo = src / "Repo.cs"
+    repo.write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+    assert harness.manifest.origin_coverage()["csharp"].first_party_resolved == 1
+
+    repo.unlink()
+    await harness.indexer().run()
+
+    coverage = harness.manifest.origin_coverage()["csharp"]
+    assert coverage.first_party_resolved == 0
+    # And it is no longer claimed as ours at all: nothing in this workspace
+    # declares that namespace any more, so it reads like any other unknown.
+    assert coverage.first_party == 0
+    assert coverage.unclassified == 1

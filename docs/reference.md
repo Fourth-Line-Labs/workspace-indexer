@@ -773,11 +773,44 @@ Resolved within a repository only. Python relative and absolute imports,
 and JS/TS relative specifiers — including TypeScript's ESM convention where
 `import './x.js'` names a file that is actually `x.ts`.
 
-**Not** resolved, deliberately: packages (`react`, `pydantic`), tsconfig path
-aliases (`@/lib/utils`), and C# namespaces, which name no path at all. Those
-need a build system or a workspace-wide symbol table; until then they resolve
-to nothing rather than to something plausible. An unresolved edge is not a
-missing dependency.
+**C# resolves differently, and the difference is visible.** A `using` names no
+path, so it is matched against the `namespace` declarations extracted from the
+same repository — the namespace is read from the declaration rather than
+inferred from the directory, because namespace-to-directory correspondence is a
+convention that holds most of the time and a graph built on it is confidently
+wrong about the rest. A namespace is declared across several files, so the edge
+reaches all of them, and each target is recorded as `resolved_by: namespace`
+rather than as a path:
+
+| `resolved_by` | what it means |
+|---|---|
+| `path` | the specifier named one file, and this is it |
+| `namespace` | the using names a module declared across these files — the importer depends on something in it, not necessarily on this file |
+| absent | the edge reached nothing |
+
+That distinction is not decoration. Reporting a namespace candidate as a path
+edge would claim a file-level precision the join does not have, which is the
+error `route_edges.exact` exists to prevent on the other side of the graph.
+
+The targets are derived on every ask rather than written against the using
+site: `imports` holds one `resolved_path` per site and a namespace has N
+targets, so there is physically nowhere to put them. Deriving them also means
+deleting a declaring file retires the edge with no invalidation pass.
+
+One honest caveat about the numbers: for C#, first-party membership is
+*decided* by resolution — a using is known to be ours because a namespace
+declared here matched it — so the first-party column reads 100% by
+construction and cannot fail. The figure that carries information for C# is the
+share of all using-edges that resolve, which is bounded by how much of the
+repository's own code it references: measured at 42% and 54% on the two C#
+corpora, the rest being the framework and NuGet packages. Python and the JS
+family do not share this property: there a first-party edge is identified by
+its shape, so an unresolved one is a visible defect.
+
+**Not** resolved, deliberately: packages (`react`, `pydantic`, `Azure.Identity`)
+and tsconfig path aliases (`@/lib/utils`). Those need a build system or a
+manifest reader; until then they resolve to nothing rather than to something
+plausible. An unresolved edge is not a missing dependency.
 
 The reverse edge — *which files import this one* — spans every repository in
 the workspace, which is what a per-project language server cannot answer.

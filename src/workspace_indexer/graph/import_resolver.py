@@ -17,8 +17,11 @@ What it deliberately does not do:
   its `paths` applied relative to `baseUrl`. Real work, and until it exists an
   alias resolves to nothing rather than to something plausible.
 - **node_modules.** `react` is a package, not a file in this workspace.
-- **C# namespaces.** `using MyApp.Data` names no path at all; it needs every
-  `namespace` declaration collected first.
+
+C# is resolved elsewhere, by `NamespaceResolver`: a `using` names a namespace
+rather than a path, and a namespace is declared across several files, so the
+answer is a list and cannot be returned from here -- this returns the one file
+a specifier named.
 """
 
 from __future__ import annotations

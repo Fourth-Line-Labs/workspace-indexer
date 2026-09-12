@@ -20,6 +20,7 @@ def _classify(
     language: str = "csharp",
     is_relative: bool = False,
     resolved: str | None = None,
+    resolved_by: str | None = None,
     root_label: str = "src",
     from_path: str = "repo/lib/thing.cs",
 ) -> ImportOrigin:
@@ -28,6 +29,7 @@ def _classify(
         language=language,
         is_relative=is_relative,
         resolved=resolved,
+        resolved_by=resolved_by,
         root_label=root_label,
         from_path=from_path,
     )
@@ -165,3 +167,24 @@ def test_a_slash_subpath_is_claimed_in_every_language() -> None:
         _classify(classifier, "lodash/debounce", language="tsx", from_path="repo/a.tsx")
         is ImportOrigin.DECLARED_DEPENDENCY
     )
+
+
+def test_a_using_resolved_by_namespace_is_first_party() -> None:
+    """It carries no `resolved_path` -- a namespace is declared across several
+    files, and there is one column -- so without reading the provenance a
+    C# using matched against our own code would classify as unclassified and
+    never enter the denominator it belongs in."""
+    classifier = OriginClassifier()
+    assert (
+        _classify(classifier, "MyApp.Data", language="csharp", resolved_by="namespace")
+        is ImportOrigin.FIRST_PARTY
+    )
+
+
+def test_an_unresolved_using_is_still_judged_on_its_name() -> None:
+    """Provenance only ever adds a way to be first-party. `System.Text`
+    resolves to nothing and is the framework, whatever the C# resolver
+    managed elsewhere in the file."""
+    classifier = OriginClassifier()
+    assert _classify(classifier, "System.Text", language="csharp") is ImportOrigin.FRAMEWORK
+    assert _classify(classifier, "MyApp.Data", language="csharp") is ImportOrigin.UNCLASSIFIED

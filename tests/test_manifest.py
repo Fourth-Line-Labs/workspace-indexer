@@ -18,7 +18,7 @@ from tests.conftest import make_source
 from workspace_indexer.chunking.chunk_factory import build_chunk
 from workspace_indexer.classification import Classification
 from workspace_indexer.discovery.file_candidate import FileCandidate
-from workspace_indexer.graph import ImportEdge
+from workspace_indexer.graph import ImportEdge, NamespaceDeclaration
 from workspace_indexer.models import Chunk, DocumentType, FileKind, RunStats, SourceFile
 from workspace_indexer.state.index_decision import IndexDecision
 from workspace_indexer.state.manifest import Manifest
@@ -913,7 +913,9 @@ def test_imports_for_origin_reports_the_resolution_state(manifest: Manifest) -> 
     manifest.record_imports(source.root_label, source.rel_path, [_edge("os"), _edge(".sib", 2)])
     manifest.set_resolved_path(source.root_label, source.rel_path, ".sib", "repo/sib.py")
 
-    by_module = {module: resolved for _, _, module, _, _, resolved in manifest.imports_for_origin()}
+    by_module = {
+        module: resolved for _, _, module, _, _, resolved, _ in manifest.imports_for_origin()
+    }
     assert by_module == {"os": None, ".sib": "repo/sib.py"}
 
 
@@ -970,6 +972,193 @@ def test_one_module_on_several_lines_is_classified_once(manifest: Manifest) -> N
     )
 
     edges = manifest.imports_for_origin()
-    assert [module for _, _, module, _, _, _ in edges] == ["os"]
+    assert [module for _, _, module, _, _, _, _ in edges] == ["os"]
     # All three rows still exist; it is the classification that collapses.
     assert len(manifest.imports_of(source.root_label, source.rel_path)) == 3
+
+
+# ---- namespace declarations, and resolving a C# using against them --------
+
+
+def _declare(manifest: Manifest, rel_path: str, *symbols: str) -> SourceFile:
+    source = _lang_source(rel_path, "csharp")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_namespaces(
+        source.root_label,
+        source.rel_path,
+        [NamespaceDeclaration(symbol=s, line=1) for s in symbols],
+    )
+    return source
+
+
+def _use(manifest: Manifest, rel_path: str, *modules: str) -> SourceFile:
+    source = _lang_source(rel_path, "csharp")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_imports(
+        source.root_label,
+        source.rel_path,
+        [
+            ImportEdge(module=m, kind="using", is_relative=False, line=i + 1)
+            for i, m in enumerate(modules)
+        ],
+    )
+    return source
+
+
+def test_namespace_declarations_round_trip(manifest: Manifest) -> None:
+    source = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    found = manifest.namespaces_of(source.root_label, source.rel_path)
+    assert [(d.symbol, d.kind) for d in found] == [("MyApp.Data", "namespace")]
+
+
+def test_recording_replaces_rather_than_merges(manifest: Manifest) -> None:
+    """A namespace renamed in the source has to stop being declared here, or a
+    using resolves to a file that no longer declares it."""
+    source = _declare(manifest, "service/Data/Repo.cs", "MyApp.Old")
+    manifest.record_namespaces(
+        source.root_label, source.rel_path, [NamespaceDeclaration(symbol="MyApp.New", line=1)]
+    )
+    assert [d.symbol for d in manifest.namespaces_of(source.root_label, source.rel_path)] == [
+        "MyApp.New"
+    ]
+
+
+def test_a_using_reaches_every_file_declaring_the_namespace(manifest: Manifest) -> None:
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "service/Data/Context.cs", "MyApp.Data")
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == [
+        "service/Data/Context.cs",
+        "service/Data/Repo.cs",
+    ]
+
+
+def test_two_repositories_declaring_one_namespace_do_not_cross_resolve(
+    manifest: Manifest,
+) -> None:
+    """The isolation the whole scoping exists for: a service and the library
+    it was copied from routinely declare the same namespace."""
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "library/Data/Repo.cs", "MyApp.Data")
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == [
+        "service/Data/Repo.cs"
+    ]
+
+
+def test_a_unit_name_is_matched_whole_not_as_a_prefix(manifest: Manifest) -> None:
+    """`service` must not claim `service_tests`. Matched by the segment
+    boundary rather than by `LIKE`, whose `_` is a single-character wildcard --
+    a leading-underscore directory is ordinary and would otherwise match its
+    neighbours."""
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "service_tests/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "serviceX/Data/Repo.cs", "MyApp.Data")
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == [
+        "service/Data/Repo.cs"
+    ]
+
+
+def test_deleting_a_declaring_file_removes_its_declarations(manifest: Manifest) -> None:
+    """Cascade, which is why the targets are derived rather than stored: no
+    separate invalidation step, and no edge left pointing at a deleted file."""
+    source = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "service/Data/Context.cs", "MyApp.Data")
+    manifest.forget_file(source.root_label, source.rel_path)
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == [
+        "service/Data/Context.cs"
+    ]
+
+
+def test_a_namespace_resolved_using_is_not_offered_for_resolution_again(
+    manifest: Manifest,
+) -> None:
+    """It carries no `resolved_path` -- a namespace is declared across several
+    files -- so without the provenance column every run would re-resolve it."""
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+
+    pending = [module for _, _, module, _, _ in manifest.unresolved_imports()]
+    assert "MyApp.Data" not in pending
+
+
+def test_a_namespace_edge_counts_as_resolved_in_coverage(manifest: Manifest) -> None:
+    """Reporting it unresolved would say the C# resolver does nothing, which
+    is the opposite of the truth."""
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data", "System.Text")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+
+    # Two using edges from the one file that has any; the declaring file
+    # imports nothing.
+    resolved, total = manifest.resolution_coverage()["csharp"]
+    assert (resolved, total) == (1, 2)
+
+
+def test_a_namespace_edge_expands_to_one_dependency_per_declaring_file(
+    manifest: Manifest,
+) -> None:
+    """Several rows for one statement is the honest shape: the using does
+    reach all of them, and collapsing to the first would name a file the
+    source never wrote."""
+    _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    _declare(manifest, "service/Data/Context.cs", "MyApp.Data")
+    user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+
+    found = manifest.dependencies_of(user.root_label, user.rel_path)
+    assert [(d.rel_path, d.resolved_by, d.resolved) for d in found] == [
+        ("service/Data/Context.cs", "namespace", True),
+        ("service/Data/Repo.cs", "namespace", True),
+    ]
+    # One statement, so one line, however many files it reaches.
+    assert {d.line for d in found} == {1}
+
+
+def test_a_path_edge_says_so_too(manifest: Manifest) -> None:
+    """`resolved_by` has to distinguish the two, or a namespace candidate
+    reads as a file-level certainty."""
+    target = _lang_source("service/helper.py", "python")
+    manifest.record_file(target, chunker="code", chunker_version=1)
+    user = _lang_source("service/app.py", "python")
+    manifest.record_file(user, chunker="code", chunker_version=1)
+    manifest.record_imports(user.root_label, user.rel_path, [_edge(".helper")])
+    manifest.set_resolved_path(user.root_label, user.rel_path, ".helper", target.rel_path)
+
+    found = manifest.dependencies_of(user.root_label, user.rel_path)
+    assert [(d.rel_path, d.resolved_by) for d in found] == [("service/helper.py", "path")]
+
+
+def test_a_using_whose_declaring_files_are_all_gone_reads_as_unresolved(
+    manifest: Manifest,
+) -> None:
+    """Derived targets self-correct. The edge stops claiming a file rather
+    than pointing at one that no longer declares the namespace."""
+    declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.forget_file(declaring.root_label, declaring.rel_path)
+
+    found = manifest.dependencies_of(user.root_label, user.rel_path)
+    assert [(d.rel_path, d.resolved) for d in found] == [(None, False)]
+
+
+def test_the_reverse_edge_finds_users_of_a_declared_namespace(manifest: Manifest) -> None:
+    """ "Who depends on this file" is the half a per-project language server
+    cannot answer, and for C# it has to go through the declarations table --
+    there is no `resolved_path` to match on."""
+    declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+
+    importers = manifest.dependents_of(declaring.root_label, declaring.rel_path)
+    assert [(d.rel_path, d.module) for d in importers] == [("service/Web/Startup.cs", "MyApp.Data")]
+
+
+def test_the_reverse_edge_stays_inside_the_unit(manifest: Manifest) -> None:
+    """A using in another repository names that repository's namespace, and
+    the resolver never claimed otherwise."""
+    declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
+    outsider = _use(manifest, "library/Web/Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(outsider.root_label, outsider.rel_path, "MyApp.Data")
+
+    assert manifest.dependents_of(declaring.root_label, declaring.rel_path) == []

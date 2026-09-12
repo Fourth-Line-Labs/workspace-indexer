@@ -35,6 +35,17 @@ class Dependency(BaseModel):
     # is a defect worth chasing; a framework edge was never reachable and
     # nothing is wrong. Same null rel_path, opposite next move.
     origin: str | None = None
+    # How the target was reached: "path" for a specifier that named one file,
+    # "namespace" for a C# `using` matched against a namespace declared here.
+    # None when the edge resolved to nothing.
+    #
+    # The two differ in precision and an agent has to be able to tell. A path
+    # edge names the file it depends on. A namespace edge names a module
+    # declared across several files, so each target is a candidate: the
+    # importer depends on something in that namespace, not necessarily on this
+    # file. Presenting them identically would report a precision the join does
+    # not have.
+    resolved_by: str | None = None
 
     @computed_field
     @property

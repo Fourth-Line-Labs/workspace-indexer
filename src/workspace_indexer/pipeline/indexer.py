@@ -16,7 +16,12 @@ from workspace_indexer.discovery import Walker
 from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.embedding.embedding_service import EmbeddingService
 from workspace_indexer.embedding.sparse_backend import SparseBackend
-from workspace_indexer.graph import ImportEdge, ImportScanner
+from workspace_indexer.graph import (
+    ImportEdge,
+    ImportScanner,
+    NamespaceResolver,
+    NamespaceScanner,
+)
 from workspace_indexer.graph.import_resolver import ImportResolver
 from workspace_indexer.graph.origin_classifier import OriginClassifier
 from workspace_indexer.graph.route_resolver import RouteResolver
@@ -73,6 +78,7 @@ class Indexer:
         self._classifier = classifier
         self._flush_chunks = max(1, flush_chunks)
         self._imports = ImportScanner()
+        self._namespaces = NamespaceScanner()
         # Client function names come from config: measured on a real workspace,
         # a project wrapper was called 66 times against `fetch`'s 27, so a
         # fixed list would report a tenth of the call sites as full coverage.
@@ -347,6 +353,7 @@ class Indexer:
             delta=delta,
             classification=classification,
             imports=self._imports.scan(source.text or "", source.language or ""),
+            namespaces=self._namespaces.scan(source.text or "", source.language or ""),
             routes=self._routes.declarations(
                 source.text or "", source.language or "", source.rel_path
             ),
@@ -421,6 +428,7 @@ class Indexer:
         self._manifest.forget_chunks(file.delta.to_delete, self._space.slug())
         self._manifest.record_chunks(file.chunks, self._space.slug())
         self._manifest.record_imports(source.root_label, source.rel_path, file.imports)
+        self._manifest.record_namespaces(source.root_label, source.rel_path, file.namespaces)
         self._manifest.record_routes(source.root_label, source.rel_path, file.routes, file.calls)
         self._manifest.record_space(
             source.root_label, source.rel_path, self._space.slug(), len(file.chunks)
@@ -532,8 +540,20 @@ class Indexer:
             return
 
         resolver = ImportResolver(self._manifest.files_by_unit())
+        namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
         resolved = 0
+        by_namespace = 0
         for root_label, rel_path, module, language, is_relative in pending:
+            if language == "csharp":
+                # A `using` names a namespace, which is declared across N
+                # files. Nothing is written into `resolved_path` -- the targets
+                # are derived by join when something asks, because there is one
+                # column and N answers.
+                if namespaces.targets(module, root_label=root_label, from_path=rel_path):
+                    self._manifest.mark_namespace_resolved(root_label, rel_path, module)
+                    resolved += 1
+                    by_namespace += 1
+                continue
             edge = ImportEdge(module=module, kind="import", is_relative=is_relative, line=0)
             target = resolver.resolve(
                 edge, from_path=rel_path, root_label=root_label, language=language
@@ -542,14 +562,35 @@ class Indexer:
                 self._manifest.set_resolved_path(root_label, rel_path, module, target)
                 resolved += 1
 
+        retired = self._retire_stale_namespace_edges(namespaces)
+
         stats.imports_resolved = resolved
         log.info(
             "graph.resolved",
             attempted=len(pending),
             resolved=resolved,
-            detail="unresolved edges are packages, tsconfig aliases or C# "
-            "namespaces, which need more than the file list",
+            by_namespace=by_namespace,
+            namespace_edges_retired=retired,
+            detail="unresolved edges are packages or tsconfig aliases, which need "
+            "more than the file list; a C# using resolves against the namespaces "
+            "declared in its own repository and names every file declaring one",
         )
+
+    def _retire_stale_namespace_edges(self, namespaces: NamespaceResolver) -> int:
+        """Unmark usings whose declaring files have all been deleted.
+
+        A path edge needs no equivalent: deleting its target cascades the row
+        away. A namespace edge stores no target -- that is the point -- so
+        nothing cascades, and the flag would go on claiming a resolution the
+        join can no longer produce. Coverage reads the flag, so the stale one
+        would report the C# resolver as working on edges that reach nothing.
+        """
+        retired = 0
+        for root_label, rel_path, module in self._manifest.namespace_resolved_imports():
+            if not namespaces.targets(module, root_label=root_label, from_path=rel_path):
+                self._manifest.clear_namespace_resolution(root_label, rel_path, module)
+                retired += 1
+        return retired
 
     def _classify_origins(self) -> None:
         """Record where each import points, so coverage has a denominator.
@@ -578,11 +619,12 @@ class Indexer:
                     language=language,
                     is_relative=is_relative,
                     resolved=resolved,
+                    resolved_by=resolved_by,
                     root_label=root_label,
                     from_path=rel_path,
                 ).value,
             )
-            for root_label, rel_path, module, language, is_relative, resolved in edges
+            for root_label, rel_path, module, language, is_relative, resolved, resolved_by in edges
         ]
         # One transaction for the batch. The connection is in autocommit, so
         # without this each UPDATE fsyncs on its own -- the cost `begin()`'s

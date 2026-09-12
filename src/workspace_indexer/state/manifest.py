@@ -24,6 +24,7 @@ from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.graph.dependency import Dependency
 from workspace_indexer.graph.dependent import Dependent
 from workspace_indexer.graph.import_edge import ImportEdge
+from workspace_indexer.graph.namespace_declaration import NamespaceDeclaration
 from workspace_indexer.graph.origin_coverage import OriginCoverage
 from workspace_indexer.graph.route_call import RouteCall
 from workspace_indexer.graph.route_declaration import RouteDeclaration
@@ -78,7 +79,13 @@ class Manifest:
             # Nullable on purpose: NULL means classification has never run
             # over this row, which must stay distinguishable from "it ran
             # and no rule claimed this edge".
-            "imports": {"resolved_path": "TEXT", "origin": "TEXT"},
+            # `resolved_by` records *how* an edge was resolved, because the
+            # two ways differ in precision. A path edge names one file; a
+            # namespace edge names a module declared across several, so the
+            # file it reaches is a candidate rather than a certainty. Reporting
+            # them as the same thing would claim a precision the join does not
+            # have -- the error `route_edges.exact` exists to prevent.
+            "imports": {"resolved_path": "TEXT", "origin": "TEXT", "resolved_by": "TEXT"},
             "route_edges": {"resolved_root": "TEXT"},
         }
         for table, columns in additions.items():
@@ -367,7 +374,7 @@ class Manifest:
             "SELECT i.root_label, i.rel_path, i.module, i.is_relative, f.language "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
-            "WHERE i.resolved_path IS NULL"
+            "WHERE i.resolved_path IS NULL AND i.resolved_by IS NULL"
         )
         return [
             (
@@ -380,9 +387,11 @@ class Manifest:
             for r in rows
         ]
 
-    def imports_for_origin(self) -> list[tuple[str, str, str, str, bool, str | None]]:
+    def imports_for_origin(
+        self,
+    ) -> list[tuple[str, str, str, str, bool, str | None, str | None]]:
         """Every edge as (root_label, rel_path, module, language, is_relative,
-        resolved_path), for classification.
+        resolved_path, resolved_by), for classification.
 
         All of them, not just the unclassified ones: an edge that resolves is
         first-party by construction, so a resolution that lands this run
@@ -397,7 +406,7 @@ class Manifest:
         """
         rows = self._db.execute(
             "SELECT DISTINCT i.root_label, i.rel_path, i.module, i.is_relative, "
-            "i.resolved_path, f.language "
+            "i.resolved_path, i.resolved_by, f.language "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path"
         )
@@ -409,9 +418,81 @@ class Manifest:
                 str(r["language"] or ""),
                 bool(r["is_relative"]),
                 None if r["resolved_path"] is None else str(r["resolved_path"]),
+                None if r["resolved_by"] is None else str(r["resolved_by"]),
             )
             for r in rows
         ]
+
+    def record_namespaces(
+        self, root_label: str, rel_path: str, declarations: Iterable[NamespaceDeclaration]
+    ) -> None:
+        """Replace the namespaces this file declares.
+
+        Replace rather than merge, for the same reason `record_imports` does:
+        a namespace renamed in the source has to stop being declared here, and
+        an edge resolving to a file that no longer declares the namespace is
+        worse than one that resolves to nothing.
+        """
+        self._db.execute(
+            "DELETE FROM namespace_declarations WHERE root_label = ? AND rel_path = ?",
+            (root_label, rel_path),
+        )
+        self._db.executemany(
+            "INSERT OR REPLACE INTO namespace_declarations "
+            "(root_label, rel_path, symbol, kind, line) VALUES (?, ?, ?, ?, ?)",
+            [(root_label, rel_path, d.symbol, d.kind, d.line) for d in declarations],
+        )
+
+    def namespaces_of(self, root_label: str, rel_path: str) -> list[NamespaceDeclaration]:
+        rows = self._db.execute(
+            "SELECT symbol, kind, line FROM namespace_declarations "
+            "WHERE root_label = ? AND rel_path = ? ORDER BY line, symbol",
+            (root_label, rel_path),
+        )
+        return [
+            NamespaceDeclaration(symbol=str(r["symbol"]), kind=str(r["kind"]), line=int(r["line"]))
+            for r in rows
+        ]
+
+    def namespaces_by_unit(self) -> dict[tuple[str, str], dict[str, list[str]]]:
+        """Declaring paths per (root_label, unit), keyed by symbol.
+
+        The resolver's search space, shaped the same way `files_by_unit` is and
+        for the same reason: a unit is a repository, and two repositories
+        declaring the same namespace must not resolve into each other.
+        """
+        grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
+        for row in self._db.execute(
+            "SELECT root_label, rel_path, symbol FROM namespace_declarations"
+        ):
+            rel = str(row["rel_path"])
+            key = (str(row["root_label"]), unit_of(rel))
+            grouped.setdefault(key, {}).setdefault(str(row["symbol"]), []).append(rel)
+        return grouped
+
+    def namespace_targets(self, root_label: str, unit: str, symbol: str) -> list[str]:
+        """The join itself: which files in this unit declare this namespace.
+
+        Derived on every ask rather than stored against the using site, because
+        `imports` is keyed per using *site* and holds one `resolved_path` --
+        there is nowhere to put N targets. Deriving also means a declaring file
+        added or deleted after resolution ran is reflected immediately, with no
+        re-resolve pass and no dependence on walk order.
+
+        The unit is matched as the leading path segment, the same derivation
+        `files_by_unit` uses. Compared with `substr` rather than `LIKE` because
+        a repository directory containing `%` or `_` would otherwise match
+        neighbours it has nothing to do with -- `_` is LIKE's single-character
+        wildcard, and a leading-underscore directory name is ordinary.
+        """
+        rows = self._db.execute(
+            "SELECT rel_path FROM namespace_declarations "
+            "WHERE root_label = ? AND symbol = ? "
+            "AND (rel_path = ? OR substr(rel_path, 1, ?) = ?) "
+            "ORDER BY rel_path",
+            (root_label, symbol, unit, len(unit) + 1, f"{unit}/"),
+        )
+        return sorted({str(r["rel_path"]) for r in rows})
 
     def record_origins(self, origins: Iterable[tuple[str, str, str, str]]) -> None:
         """Set the origin for each (root_label, rel_path, module, origin).
@@ -426,9 +507,51 @@ class Manifest:
 
     def set_resolved_path(self, root_label: str, rel_path: str, module: str, resolved: str) -> None:
         self._db.execute(
-            "UPDATE imports SET resolved_path = ? "
+            "UPDATE imports SET resolved_path = ?, resolved_by = 'path' "
             "WHERE root_label = ? AND rel_path = ? AND module = ?",
             (resolved, root_label, rel_path, module),
+        )
+
+    def mark_namespace_resolved(self, root_label: str, rel_path: str, module: str) -> None:
+        """Record that this using reaches declared files, without naming one.
+
+        `resolved_path` stays NULL deliberately. Writing one of the N declaring
+        files there would make a namespace edge indistinguishable from a path
+        edge, which claims a file-level precision the join does not have; the
+        targets are derived by `namespace_targets` when something asks.
+        """
+        self._db.execute(
+            "UPDATE imports SET resolved_by = 'namespace' "
+            "WHERE root_label = ? AND rel_path = ? AND module = ?",
+            (root_label, rel_path, module),
+        )
+
+    def namespace_resolved_imports(self) -> list[tuple[str, str, str]]:
+        """Edges previously matched against a namespace, as (root, path, module).
+
+        Re-offered every run rather than left alone, because their targets are
+        derived: the declaring files can all be deleted after the edge was
+        marked, and the flag would then say "resolved" while the join returns
+        nothing. Coverage reads the flag, so leaving it stale is how a number
+        comes to disagree with the graph it summarises.
+        """
+        rows = self._db.execute(
+            "SELECT DISTINCT root_label, rel_path, module FROM imports "
+            "WHERE resolved_by = 'namespace'"
+        )
+        return [(str(r["root_label"]), str(r["rel_path"]), str(r["module"])) for r in rows]
+
+    def clear_namespace_resolution(self, root_label: str, rel_path: str, module: str) -> None:
+        """Retire an edge whose declaring files have all gone.
+
+        Only namespace edges: a path edge is cleared by the cascade that
+        removes the file it pointed at, which this has no equivalent of
+        precisely because the target is not stored.
+        """
+        self._db.execute(
+            "UPDATE imports SET resolved_by = NULL "
+            "WHERE root_label = ? AND rel_path = ? AND module = ? AND resolved_by = 'namespace'",
+            (root_label, rel_path, module),
         )
 
     def dependents_of(self, root_label: str, rel_path: str) -> list[Dependent]:
@@ -442,6 +565,13 @@ class Manifest:
         each importer's doc_type in the same query. That join is what turns a
         list of paths into "three tests and one route exercise this", which is
         the answer an agent can act on.
+
+        Two ways in, unioned: an edge whose `resolved_path` is this file, and a
+        C# `using` naming a namespace this file declares. The second has no
+        `resolved_path` to match on -- a namespace is declared across several
+        files -- so it is found through `namespace_declarations` instead, and
+        scoped to the subject's own unit, which is the only scope the resolver
+        ever claimed.
         """
         rows = self._db.execute(
             "SELECT i.rel_path AS rel_path, i.line AS line, i.module AS module, "
@@ -449,8 +579,30 @@ class Manifest:
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
             "WHERE i.root_label = ? AND i.resolved_path = ? "
-            "ORDER BY i.rel_path, i.line",
-            (root_label, rel_path),
+            "UNION "
+            "SELECT i.rel_path AS rel_path, i.line AS line, i.module AS module, "
+            "f.doc_type AS doc_type, f.language AS language "
+            "FROM imports i JOIN files f "
+            "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
+            "JOIN namespace_declarations n "
+            "ON n.root_label = i.root_label AND n.symbol = i.module "
+            "WHERE i.root_label = ? AND i.resolved_by = 'namespace' "
+            "AND n.rel_path = ? "
+            # Same unit as the subject, because that is the only scope the
+            # resolver ever claimed. Without it, a second repository in this
+            # root declaring the same namespace would import our file
+            # according to this query and according to nothing else.
+            "AND (i.rel_path = ? OR substr(i.rel_path, 1, ?) = ?) "
+            "ORDER BY rel_path, line",
+            (
+                root_label,
+                rel_path,
+                root_label,
+                rel_path,
+                unit_of(rel_path),
+                len(unit_of(rel_path)) + 1,
+                f"{unit_of(rel_path)}/",
+            ),
         )
         return [
             Dependent(
@@ -470,27 +622,76 @@ class Manifest:
         module has no row in `files` and must still come back. Dropping it
         would report a file as importing less than it does, which is a worse
         lie than admitting we cannot follow the edge.
+
+        A C# `using` resolved by namespace expands to one entry per declaring
+        file, all sharing the import's module and line. Several rows for one
+        statement is the honest shape: the using does reach all of them, and
+        collapsing to the first would pick a file the source never named.
         """
         rows = self._db.execute(
             "SELECT i.module AS module, i.line AS line, i.resolved_path AS resolved_path, "
-            "i.origin AS origin, f.doc_type AS doc_type, f.language AS language "
+            "i.origin AS origin, i.resolved_by AS resolved_by, "
+            "f.doc_type AS doc_type, f.language AS language "
             "FROM imports i LEFT JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.resolved_path "
             "WHERE i.root_label = ? AND i.rel_path = ? "
             "ORDER BY i.line",
             (root_label, rel_path),
         )
-        return [
-            Dependency(
-                module=str(r["module"]),
-                line=int(r["line"]),
-                rel_path=str(r["resolved_path"]) if r["resolved_path"] else None,
-                origin=str(r["origin"]) if r["origin"] else None,
-                doc_type=str(r["doc_type"]) if r["doc_type"] else None,
-                language=str(r["language"]) if r["language"] else None,
+        found: list[Dependency] = []
+        for r in rows:
+            module, line = str(r["module"]), int(r["line"])
+            origin = str(r["origin"]) if r["origin"] else None
+            resolved_by = str(r["resolved_by"]) if r["resolved_by"] else None
+            if resolved_by == "namespace":
+                found.extend(
+                    self._namespace_dependencies(root_label, rel_path, module, line, origin)
+                )
+                continue
+            found.append(
+                Dependency(
+                    module=module,
+                    line=line,
+                    rel_path=str(r["resolved_path"]) if r["resolved_path"] else None,
+                    origin=origin,
+                    resolved_by=resolved_by,
+                    doc_type=str(r["doc_type"]) if r["doc_type"] else None,
+                    language=str(r["language"]) if r["language"] else None,
+                )
             )
-            for r in rows
-        ]
+        return found
+
+    def _namespace_dependencies(
+        self, root_label: str, rel_path: str, module: str, line: int, origin: str | None
+    ) -> list[Dependency]:
+        """One entry per file declaring the namespace this using names.
+
+        Empty when every declaring file has since been deleted -- the edge then
+        reports as unresolved, which is what it is. That self-correction is the
+        reason the targets are derived rather than written down at resolve
+        time.
+        """
+        targets = self.namespace_targets(root_label, unit_of(rel_path), module)
+        if not targets:
+            return [Dependency(module=module, line=line, origin=origin)]
+        found: list[Dependency] = []
+        for target in targets:
+            row = self._db.execute(
+                "SELECT doc_type, language FROM files WHERE root_label = ? AND rel_path = ?",
+                (root_label, target),
+            ).fetchone()
+            found.append(
+                Dependency(
+                    module=module,
+                    line=line,
+                    rel_path=target,
+                    origin=origin,
+                    resolved_by="namespace",
+                    doc_type=str(row["doc_type"]) if row else None,
+                    language=str(row["language"]) if row and row["language"] else None,
+                )
+            )
+        return found
 
     def record_routes(
         self,
@@ -680,10 +881,16 @@ class Manifest:
         Both halves, for the same reason coverage is reported at all: an
         unresolved edge is not a missing dependency, it is one we cannot follow
         yet, and those call for opposite conclusions.
+
+        An edge resolved by namespace counts here even though it carries no
+        `resolved_path`. It reaches files -- several of them -- and reporting
+        it as unresolved would say the C# resolver does nothing, which is the
+        opposite of the truth.
         """
         rows = self._db.execute(
             "SELECT f.language AS language, COUNT(*) AS total, "
-            "SUM(CASE WHEN i.resolved_path IS NOT NULL THEN 1 ELSE 0 END) AS resolved "
+            "SUM(CASE WHEN i.resolved_path IS NOT NULL OR i.resolved_by IS NOT NULL "
+            "THEN 1 ELSE 0 END) AS resolved "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
             "WHERE f.language IS NOT NULL GROUP BY f.language"
@@ -703,7 +910,8 @@ class Manifest:
                    COUNT(*) AS total,
                    SUM(i.origin = 'first_party') AS first_party,
                    SUM(i.origin = 'first_party'
-                       AND i.resolved_path IS NOT NULL) AS first_party_resolved,
+                       AND (i.resolved_path IS NOT NULL
+                            OR i.resolved_by IS NOT NULL)) AS first_party_resolved,
                    SUM(i.origin = 'declared_dependency') AS declared_dependency,
                    SUM(i.origin = 'framework') AS framework,
                    SUM(i.origin = 'unclassified') AS unclassified,

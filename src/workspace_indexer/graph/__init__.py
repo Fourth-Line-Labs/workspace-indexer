@@ -8,6 +8,9 @@ from workspace_indexer.graph.framework_modules import is_framework_module
 from workspace_indexer.graph.import_edge import ImportEdge
 from workspace_indexer.graph.import_origin import ImportOrigin
 from workspace_indexer.graph.import_scanner import SUPPORTED, ImportScanner
+from workspace_indexer.graph.namespace_declaration import NamespaceDeclaration
+from workspace_indexer.graph.namespace_resolver import NamespaceResolver
+from workspace_indexer.graph.namespace_scanner import NamespaceScanner
 from workspace_indexer.graph.origin_classifier import OriginClassifier
 from workspace_indexer.graph.unit import unit_of
 
@@ -18,6 +21,9 @@ __all__ = [
     "ImportEdge",
     "ImportOrigin",
     "ImportScanner",
+    "NamespaceDeclaration",
+    "NamespaceResolver",
+    "NamespaceScanner",
     "OriginClassifier",
     "is_framework_module",
     "unit_of",
