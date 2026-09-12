@@ -85,7 +85,9 @@ _ASSIGNMENT = re.compile(
            connection[_-]?string|conn[_-]?str|sas|pwd)
         [A-Za-z0-9_.-]*)
     ["']?              # a quoted key: "password": "..."
-    \s* (?: [:=] | \?\? ) \s*   # `??` assigns a default in C#, the same way
+    # `??` assigns a default in C# and `??=` assigns one in place; both give
+    # the key the value that follows whenever it is currently null.
+    \s* (?: [:=] | \?\?=? ) \s*
     ["']?
     (?P<value>[^\s"'`,;)\]}]{16,})
     """
@@ -134,6 +136,10 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 # out here, the word after it becomes the host and the rule fires on its own
 # explanation.
 #
+# And a host begins with a letter or a digit. Accepting any non-delimiter let
+# punctuation satisfy the requirement -- the comma in prose, the closing paren
+# of a markdown link -- which is the same false positive wearing a hat.
+#
 # The password may contain `:`; only the user may not. RFC 3986 allows colons
 # after the first one in userinfo, so a generated password containing one was
 # invisible to this rule. The trailing `@` still anchors the match, so widening
@@ -141,7 +147,7 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 _URL_CREDENTIAL = re.compile(
     r"(?i)\b[a-z][a-z0-9+.\-]*://"
     r"(?P<user>[^\s:/?#@\[\]]+):(?P<password>[^\s/?#@\[\]]+)@"
-    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[^\s/?#@\[\]]+)"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][^\s/?#@\[\]]*)"
 )
 
 # Passwords that name the *idea* of a password rather than being one.
@@ -245,9 +251,15 @@ _CONVENTIONAL_NAME = re.compile(r"\A(?:[a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*|[a-zA-Z
 _EXPRESSION = re.compile(r"[()\[\]{}<>]|::|\?[?.]|\A[A-Za-z_][A-Za-z0-9_]*\.")
 
 
-# `%NAME%` -- a Windows environment variable, not a password that happens to
-# begin with a percent-encoded character.
-_WINDOWS_VARIABLE = re.compile(r"%[A-Za-z0-9_]+%")
+# A value standing in for one that is not written down: `<password>`,
+# `${DB_PASSWORD}`, `{password}`, `%DB_PW%`.
+#
+# Matched whole, never as a prefix. A prefix test reads a password that merely
+# *starts* with the opening character as a placeholder -- which is how
+# `%40dmin12345%21`, an ordinary percent-encoded password, came to be treated
+# as a Windows variable and shipped to the provider. The same hole was open
+# for `<` and `{`.
+_TEMPLATE = re.compile(r"<[^<>]*>|\$\{[^{}]*\}|\{[^{}]*\}|%[A-Za-z0-9_]+%")
 
 # Shortest run of one repeated character that reads as masking rather than as
 # a value. Four is short enough to catch `xxxx` and long enough that a
@@ -280,13 +292,7 @@ def _first_parameter(value: str) -> str:
 
 def _is_placeholder_password(password: str) -> bool:
     """A sample, not a secret: `<password>`, `${PASSWORD}`, `%PW%`, `xxxxxxxx`."""
-    if password.startswith(("<", "${", "{")):
-        return True
-    # `%NAME%`, both ends. A bare `%` prefix would have classified every
-    # percent-encoded password as a placeholder, and percent-encoding is the
-    # standard way (RFC 3986) to put a special character into userinfo -- so
-    # `%40dmin12345%21` would have shipped to the provider as a sample.
-    if _WINDOWS_VARIABLE.fullmatch(password):
+    if _TEMPLATE.fullmatch(password):
         return True
     lowered = password.lower()
     # Both spellings, because the two sets are written differently: the URL set
@@ -304,7 +310,9 @@ def _is_placeholder_password(password: str) -> bool:
 
 def _looks_generated(value: str) -> bool:
     lowered = value.strip().lower()
-    if lowered in _PLACEHOLDERS or lowered.startswith("<") or lowered.startswith("${"):
+    # The same whole-shape test the URL rule uses, for the same reason: a
+    # prefix check would clear any value that merely begins with `<` or `${`.
+    if lowered in _PLACEHOLDERS or _TEMPLATE.fullmatch(value.strip()):
         return False
     # A path, a URL or a dotted module name is structured, not random.
     if "/" in value or value.count(".") > 2:
@@ -351,13 +359,22 @@ def _assignment(line: str, number: int) -> SecretFinding | None:
     # Every assignment on the line, not the first: one line can hold a
     # reference and a literal, and rejecting the reference must not end the
     # search before the literal is judged.
-    for match in _ASSIGNMENT.finditer(line):
-        if _looks_generated(_first_parameter(match.group("value"))):
+    # Resumed where the judged *parameter* ended, not where the match ended.
+    # The value class admits `&` and `=` so a password may contain them, which
+    # means one match can swallow the rest of a query string -- and with
+    # `finditer` the scan would then re-anchor past a credential in a later
+    # parameter. `?authSource=admin&api_key=<generated>` is the shape: the
+    # first parameter clears, and the second was never looked at.
+    position = 0
+    while (match := _ASSIGNMENT.search(line, position)) is not None:
+        value = _first_parameter(match.group("value"))
+        if _looks_generated(value):
             return SecretFinding(
                 rule="high_entropy_assignment",
                 line=number,
                 description=f"high-entropy value assigned to {match.group('key')}",
             )
+        position = match.start("value") + len(value)
     for match in _FALLBACK.finditer(line):
         if _looks_generated(match.group("value")):
             return SecretFinding(

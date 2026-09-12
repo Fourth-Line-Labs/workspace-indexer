@@ -468,6 +468,70 @@ def test_an_alphanumeric_mask_is_a_mask() -> None:
     assert scan("postgres://user:ab@host")
 
 
+def test_a_credential_in_a_later_query_parameter_is_judged_too() -> None:
+    """A regression the `&` fix introduced and the previous test missed.
+
+    Admitting `&` into the value class means one match can swallow the whole
+    query string, so scanning had to resume where the judged *parameter* ended
+    rather than where the match ended -- otherwise the first parameter clears
+    and the scan re-anchors past the credential in the second. The earlier test
+    only covered a credential in the first parameter, which is why this was not
+    caught by it.
+    """
+    findings = scan(f"https://api.example.com/v1?authSource=admin&api_key={_HIGH_ENTROPY}")
+    assert findings
+    # And named for the parameter that carries it, not the one that cleared.
+    assert "api_key" in findings[0].description
+
+
+def test_a_null_coalescing_assignment_is_an_assignment() -> None:
+    """`??=` sets the key to the literal when it is null -- the same semantics
+    as `??`, and it was seen by neither rule: the fallback pattern wants `[:=]`
+    straight after the key and finds `?`, while the assignment pattern matched
+    `??` and left `=` as the whole value."""
+    assert scan(f'    ApiKey ??= "{_HIGH_ENTROPY}";')
+    assert scan(f'    _token ??= "{_WITH_TILDE}";')
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "connect with scheme://user:sample123@, and your own host",
+        "see [the format](scheme://user:sample123@) for the shape",
+        "scheme://user:sample123@. Then add your host.",
+    ],
+)
+def test_punctuation_is_not_a_host(line: str) -> None:
+    """Requiring *a* host was not enough: any non-delimiter satisfied it, so
+    the comma in prose and the closing paren of a markdown link both passed as
+    hostnames -- the same false positive the host group was added to prevent."""
+    assert not scan(line)
+
+
+def test_a_template_is_matched_whole_rather_than_by_its_first_character() -> None:
+    """The defect fixed for `%` was still open for `<` and `{`: a value that
+    merely *begins* with one read as a placeholder, so a generated password
+    starting with a brace shipped to the provider."""
+    assert scan(f"postgres://user:{{{_HIGH_ENTROPY}@host")
+    assert scan(f"postgres://user:<{_HIGH_ENTROPY}@host")
+    # The real templates still read as templates.
+    for password in ("<password>", "${DB_PASSWORD}", "{password}", "%DB_PW%"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+
+
+def test_an_assignment_whose_value_opens_a_template_it_never_closes() -> None:
+    """The assignment rule carried the same prefix check, and it turned out
+    not to be a hole: `<` and `{` are also in `_EXPRESSION`, which rejects the
+    value a step later for being a generic or an initializer. So this stays
+    unflagged either way -- recorded because the shared whole-shape test now
+    used there changes the *reason* and not the answer, and a reader comparing
+    the two rules should not conclude one of them started catching this.
+    """
+    assert scan(f'API_KEY = "<{_HIGH_ENTROPY}"') == []
+    assert scan('API_KEY = "<YOUR_TOKEN>"') == []
+    assert scan('API_KEY = "${API_KEY}"') == []
+
+
 def test_this_project_does_not_withhold_its_own_source() -> None:
     """Nothing under `src/` may trip the scanner.
 
