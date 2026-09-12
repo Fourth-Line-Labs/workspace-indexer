@@ -116,13 +116,15 @@ def _mass_deletion_example(text: str) -> str:
     the file. Either fails against text that was never the example, pointing
     the reader at the wrong block.
     """
-    # Line-anchored and tag-aware. A bare ```\n opener is not enough: this file
-    # has ```bash and ```sql blocks, and a pattern that only recognises bare
-    # openers skips those while still consuming their closing fences, so the
-    # pairing desynchronises and later blocks are mis-cut. The first version of
-    # this helper saw three blocks where there are four, and found the right
-    # one only by where the desync happened to land.
-    blocks = re.findall(r"^```[a-zA-Z0-9]*\n(.*?)^```$", text, re.M | re.S)
+    # Line-anchored, and the opener accepts the *whole* info string. A bare
+    # ```\n opener is not enough -- this file has ```bash and ```sql blocks --
+    # but neither is an alphanumeric-only tag: CommonMark allows anything but a
+    # backtick there, so `c++` or a ```bash title=x``` fence would be rejected
+    # as an opener while its closing fence still matched as one, shifting every
+    # later pairing. Measured: with such a fence added above the example, an
+    # alphanumeric-only opener sees four blocks and *none* of them contains the
+    # event, because the example block is mis-cut.
+    blocks = re.findall(r"^```[^\n`]*\n(.*?)^```$", text, re.M | re.S)
     matching = [b for b in blocks if _EVENT in b]
     assert len(matching) == 1, (
         f"expected exactly one fenced block quoting {_EVENT}, found {len(matching)}"
@@ -185,10 +187,18 @@ def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
     across lines and the doc wraps it to fit, so neither's line breaks are
     meaningful. Everything else must match.
     """
+    # Built from the source and looked for in the doc, rather than extracted
+    # from the doc and compared. Extraction needs a pattern that knows where
+    # the quote ends, and every such pattern has been wrong: a lazy one stops
+    # at an apostrophe in the prose, a greedy one runs to the block's last
+    # quote -- which is the detail's closing quote only while no later field
+    # happens to be quoted, and `ConsoleRenderer` quotes any value containing a
+    # space. Constructing the expected text depends on none of that.
     block = _mass_deletion_example(text)
-    quoted = re.search(r"detail='(.*)'", block, re.S)
-    assert quoted is not None, "the example no longer quotes a detail string"
-    assert _collapse_whitespace(quoted.group(1)) == _collapse_whitespace(_emitted_detail())
+    expected = _collapse_whitespace(f"detail='{_emitted_detail()}'")
+    assert expected in _collapse_whitespace(block), (
+        "the example's detail string no longer matches what indexer.py emits"
+    )
 
 
 def test_the_quoted_log_line_shows_every_field_the_event_carries(text: str) -> None:
