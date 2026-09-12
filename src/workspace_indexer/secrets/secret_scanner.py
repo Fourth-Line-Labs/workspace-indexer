@@ -59,11 +59,25 @@ _SIGNATURES: list[tuple[str, re.Pattern[str], str]] = [
 # literal after the `??`. Teaching it to see the expression would otherwise have
 # quietly uncovered that case.
 #
-# `&` ends a value because a query string is a run of assignments, not one:
+# That only reaches the fallback when the token before the `??` is itself
+# credential-shaped. `ApiKey = configured ?? "literal"` is the same line with
+# the name on the other side of the `=`, and `_FALLBACK` below is what carries
+# the key across.
+#
+# A query string is a run of assignments rather than one value:
 # `?authSource=admin&directConnection=true&...` was reading everything after
 # `authSource=` as that parameter's value, which cleared the entropy bar and
 # withheld a file over a parameter naming a database. The credential in that
 # same URL sits in the authority and is caught by `_URL_CREDENTIAL` below.
+#
+# The value is cut at `&` by `_first_parameter` rather than by excluding `&`
+# from the class. Excluding it looks equivalent and is not: `&` is a legal
+# password character, so a generated value with one in it truncates at the
+# ampersand, falls under the sixteen-character floor, and is then missed
+# *entirely* rather than judged and cleared -- a false positive traded for a
+# false negative, which is the worse of the two. The test named for that shape
+# holds the example; writing it out here made this file's own rule fire on the
+# file, which is the ordinary way a comment becomes a credential.
 _ASSIGNMENT = re.compile(
     r"""(?ix)
     (?P<key>[A-Za-z0-9_.-]*
@@ -73,7 +87,26 @@ _ASSIGNMENT = re.compile(
     ["']?              # a quoted key: "password": "..."
     \s* (?: [:=] | \?\? ) \s*   # `??` assigns a default in C#, the same way
     ["']?
-    (?P<value>[^\s"'`,;&)\]}]{16,})
+    (?P<value>[^\s"'`,;)\]}]{16,})
+    """
+)
+
+# A default that follows a name this rule already cares about:
+# `ApiKey = configured ?? "<literal>"`. `_ASSIGNMENT` matches key-then-value,
+# so it reads `configured` here and stops; the literal that actually becomes
+# `ApiKey` sits one operator further along.
+#
+# The key is required to be credential-shaped and the fallback is required to
+# be quoted, which is what keeps this from claiming every `??` on a line. The
+# value is judged by the same entropy rules as any other.
+_FALLBACK = re.compile(
+    r"""(?ix)
+    (?P<key>[A-Za-z0-9_.-]*
+        (?:api[_-]?key|secret|token|password|passwd|credential|auth|
+           connection[_-]?string|conn[_-]?str|sas|pwd)
+        [A-Za-z0-9_.-]*)
+    ["']? \s* [:=] [^\n]*? \?\? \s*
+    ["'] (?P<value>[^"'\n]{16,}) ["']
     """
 )
 
@@ -94,15 +127,35 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 # Entropy is deliberately *not* consulted here. A weak password is still a
 # password, and unlike a bare assignment the shape itself is the evidence:
 # nobody writes `user:value@host` for anything but a credential.
+#
+# A host is required after the `@`, not just the `@`, or an unfinished
+# documentation example with the host elided reads as a live credential and
+# takes the whole page out of the index. The tests hold the example: written
+# out here, the word after it becomes the host and the rule fires on its own
+# explanation.
+#
+# The password may contain `:`; only the user may not. RFC 3986 allows colons
+# after the first one in userinfo, so a generated password containing one was
+# invisible to this rule. The trailing `@` still anchors the match, so widening
+# the class cannot make it run away.
 _URL_CREDENTIAL = re.compile(
-    r"(?i)\b[a-z][a-z0-9+.\-]*://(?P<user>[^\s:/?#@\[\]]+):(?P<password>[^\s:/?#@\[\]]+)@"
+    r"(?i)\b[a-z][a-z0-9+.\-]*://"
+    r"(?P<user>[^\s:/?#@\[\]]+):(?P<password>[^\s/?#@\[\]]+)@"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[^\s/?#@\[\]]+)"
 )
 
-# Passwords that are obviously the *shape* of a credential rather than one.
+# Passwords that name the *idea* of a password rather than being one.
 # Documentation showing connection-string syntax is exactly the content this
 # index exists to retrieve, so withholding a page over `user:password@host`
-# would be the destructive error. Compared after stripping separators and
-# lowercasing, so `Your_Password` and `your-password` are both covered.
+# would be the destructive error. Compared both as written and with separators
+# stripped, so `Your_Password` and `your-password` are both covered.
+#
+# `admin` and `root` are deliberately *not* here, and neither is `user`. They
+# read like placeholders and are not: they are the most commonly deployed
+# default credentials there are, so a root-as-password connection string
+# against an internal address is a real finding. The rule this set serves is
+# that a weak password is still a password, and an entry that is also a
+# plausible literal value breaks it.
 _URL_PLACEHOLDER_PASSWORDS = frozenset(
     {
         "password",
@@ -115,10 +168,6 @@ _URL_PLACEHOLDER_PASSWORDS = frozenset(
         "key",
         "credential",
         "credentials",
-        "user",
-        "username",
-        "admin",
-        "root",
         "mypassword",
         "yourpassword",
         "example",
@@ -196,15 +245,61 @@ _CONVENTIONAL_NAME = re.compile(r"\A(?:[a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*|[a-zA-Z
 _EXPRESSION = re.compile(r"[()\[\]{}<>]|::|\?[?.]|\A[A-Za-z_][A-Za-z0-9_]*\.")
 
 
+# `%NAME%` -- a Windows environment variable, not a password that happens to
+# begin with a percent-encoded character.
+_WINDOWS_VARIABLE = re.compile(r"%[A-Za-z0-9_]+%")
+
+# Shortest run of one repeated character that reads as masking rather than as
+# a value. Four is short enough to catch `xxxx` and long enough that a
+# two-character password is judged on its merits.
+_MASK_LENGTH = 4
+
+
+# The start of the *next* query parameter: an `&` with a `key=` behind it.
+# What separates a query string from a password containing `&` is what follows
+# the ampersand, so that is what this looks at.
+_NEXT_PARAMETER = re.compile(r"&(?=[A-Za-z0-9_.\[\]-]+=)")
+
+
+def _first_parameter(value: str) -> str:
+    """One parameter's value, where the value ran on into the next one.
+
+    `authSource=admin&directConnection=true&serverSelectionTimeoutMS=10000`
+    is three assignments, and reading it as one gave `authSource` a value with
+    enough entropy to withhold the file -- over a parameter naming a database.
+
+    Cut here rather than by excluding `&` from the value class, because `&` is
+    a legal password character: excluding it truncated such a value at the
+    ampersand, leaving a remainder under the length floor that was never judged
+    at all. `test_a_password_containing_an_ampersand_is_still_seen_whole` holds
+    the example -- spelled out here, it would withhold this file.
+    """
+    parameter = _NEXT_PARAMETER.split(value, maxsplit=1)
+    return parameter[0]
+
+
 def _is_placeholder_password(password: str) -> bool:
-    """A sample, not a secret: `<password>`, `${PASSWORD}`, `%PW%`, `****`."""
-    if password.startswith(("<", "${", "%", "{")):
+    """A sample, not a secret: `<password>`, `${PASSWORD}`, `%PW%`, `xxxxxxxx`."""
+    if password.startswith(("<", "${", "{")):
         return True
-    bare = password.translate(_WORD_SEPARATORS).lower()
-    if bare in _URL_PLACEHOLDER_PASSWORDS or bare in _PLACEHOLDERS:
+    # `%NAME%`, both ends. A bare `%` prefix would have classified every
+    # percent-encoded password as a placeholder, and percent-encoding is the
+    # standard way (RFC 3986) to put a special character into userinfo -- so
+    # `%40dmin12345%21` would have shipped to the provider as a sample.
+    if _WINDOWS_VARIABLE.fullmatch(password):
         return True
-    # A run of one masking character, as a page redacting its own example.
-    return len(set(password)) == 1 and not password.isalnum()
+    lowered = password.lower()
+    # Both spellings, because the two sets are written differently: the URL set
+    # holds bare words and `_PLACEHOLDERS` holds hyphenated ones like
+    # `replace-me`. Comparing only the stripped form left every hyphenated
+    # entry unreachable from here, so a docs URL using one was flagged.
+    bare = lowered.translate(_WORD_SEPARATORS)
+    if {lowered, bare} & (_URL_PLACEHOLDER_PASSWORDS | _PLACEHOLDERS):
+        return True
+    # A masking run, as a page redacting its own example. Length rather than
+    # punctuation: `xxxxxxxx` and `aaaaaaaa` mask exactly as `********` does,
+    # and treating them as credentials withholds the page they document.
+    return len(password) >= _MASK_LENGTH and len(set(password)) == 1
 
 
 def _looks_generated(value: str) -> bool:
@@ -235,16 +330,21 @@ def _signature(line: str, number: int) -> SecretFinding | None:
 
 
 def _url_credential(line: str, number: int) -> SecretFinding | None:
-    match = _URL_CREDENTIAL.search(line)
-    if match is None or _is_placeholder_password(match.group("password")):
-        return None
-    return SecretFinding(
-        rule="url_credential",
-        line=number,
-        # Names neither the password nor the user, both of which are part of
-        # the credential.
-        description="credential embedded in a URL",
-    )
+    # Every URL on the line, for the same reason `_assignment` judges every
+    # assignment: a documentation example written in front of a real
+    # connection string would otherwise be the only thing looked at, and
+    # nothing else sees a credential in an authority.
+    for match in _URL_CREDENTIAL.finditer(line):
+        if _is_placeholder_password(match.group("password")):
+            continue
+        return SecretFinding(
+            rule="url_credential",
+            line=number,
+            # Names neither the password nor the user, both of which are part
+            # of the credential.
+            description="credential embedded in a URL",
+        )
+    return None
 
 
 def _assignment(line: str, number: int) -> SecretFinding | None:
@@ -252,6 +352,13 @@ def _assignment(line: str, number: int) -> SecretFinding | None:
     # reference and a literal, and rejecting the reference must not end the
     # search before the literal is judged.
     for match in _ASSIGNMENT.finditer(line):
+        if _looks_generated(_first_parameter(match.group("value"))):
+            return SecretFinding(
+                rule="high_entropy_assignment",
+                line=number,
+                description=f"high-entropy value assigned to {match.group('key')}",
+            )
+    for match in _FALLBACK.finditer(line):
         if _looks_generated(match.group("value")):
             return SecretFinding(
                 rule="high_entropy_assignment",

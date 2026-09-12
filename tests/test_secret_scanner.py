@@ -9,6 +9,8 @@ is called, and the value never leaves the scanner.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from workspace_indexer.secrets import SecretFinding, scan, shannon_entropy
@@ -299,10 +301,22 @@ def test_a_real_literal_beside_a_null_conditional_is_still_caught() -> None:
     """
     assert scan(f'    ApiKey = options?.ApiKey ?? "{_WITH_TILDE}",')
 
-    # Known gap, stated rather than asserted: the key is read from the token
-    # immediately before the operator, so a fallback whose left side is not
-    # credential-shaped -- `ApiKey = configured ?? "<literal>"` -- is not seen
-    # by this rule. A provider-issued key there still trips `_SIGNATURES`.
+
+def test_a_fallback_literal_is_judged_against_the_key_on_the_other_side() -> None:
+    """`ApiKey = configured ?? "<literal>"` is the same hard-coded credential
+    with the name on the far side of the `=`. The assignment rule reads
+    `configured` and stops, so the key has to be carried across the operator --
+    otherwise the one shape a C# default is usually written in is the one shape
+    that escapes."""
+    assert scan(f'    ApiKey = configured ?? "{_HIGH_ENTROPY}";')
+    assert scan(f'    private readonly string _token = opts.Token ?? "{_WITH_TILDE}";')
+
+
+def test_a_fallback_naming_a_variable_is_not_a_credential() -> None:
+    """Carrying the key across must not turn every `??` into a finding: the
+    fallback has to be a literal, and an identifier is not one."""
+    assert not scan("    ApiKey = configured ?? _fallbackApiKeyValue;")
+    assert not scan("    ApiKey = options?.ApiKey ?? DefaultApiKeySettingsValue,")
 
 
 def test_a_reference_earlier_on_the_line_does_not_end_the_search() -> None:
@@ -376,3 +390,98 @@ def test_a_credential_in_a_query_parameter_is_still_caught() -> None:
     """Ending the value at `&` must not stop the parameter's own value from
     being judged."""
     assert scan(f"https://api.example.com/v1/items?api_key={_HIGH_ENTROPY}&page=2")
+
+
+# --- what the first round of review found -----------------------------------
+#
+# Nine findings, all of them holes in the rules this PR added. Each test below
+# fails on the commit that introduced the rule it covers.
+
+
+def test_a_password_containing_an_ampersand_is_still_seen_whole() -> None:
+    """`&` is a legal password character. Excluding it from the value class
+    split this to `Xk9`, which falls under the length floor -- so the value was
+    not judged at all, rather than judged and cleared. A false positive traded
+    for a false negative."""
+    assert scan("password=Xk9&bQ2mZrT7pLqW3nBc")
+    assert scan(f'PASSWORD="{_WITH_TILDE}&{_HIGH_ENTROPY}"')
+
+
+def test_a_query_string_still_splits_into_parameters() -> None:
+    """The cut is made where the *next parameter* begins, which is what
+    separates a query string from a password containing `&`."""
+    assert scan("?authSource=admin&directConnection=true&serverSelectionTimeoutMS=10000") == []
+    assert scan(f"https://api.example.com/v1?api_key={_HIGH_ENTROPY}&page=2")
+
+
+def test_a_url_with_no_host_is_an_unfinished_example() -> None:
+    """`scheme://user:sample123@` with the host elided is how documentation
+    shows the shape. Requiring only the `@` withheld the page."""
+    assert scan("connect with scheme://user:sample123@ and your own host") == []
+    assert scan("mongodb://svc:R3alSecret9xQ2@[2001:db8::1]:27017/db")
+
+
+def test_a_default_credential_is_a_credential() -> None:
+    """`admin` and `root` read like placeholders and are not -- they are the
+    most commonly deployed defaults there are. Excluding them by name broke
+    this module's own rule that a weak password is still a password."""
+    assert scan("mongodb://root:root@10.0.0.5/db")
+    assert scan("postgres://admin:admin@prod.internal:5432/app")
+
+
+def test_a_percent_encoded_password_is_not_a_windows_variable() -> None:
+    """Percent-encoding is the standard way (RFC 3986) to put a special
+    character into userinfo, so a real password very plausibly starts with `%`.
+    A bare prefix check shipped `%40dmin12345%21` to the provider as a
+    sample."""
+    assert scan("mongodb://user:%40dmin12345%21@host")
+    assert scan("postgres://user:%DB_PASSWORD%@host") == []
+
+
+def test_a_placeholder_url_does_not_hide_a_real_one_behind_it() -> None:
+    """Only the first URL on the line was judged, and nothing else looks at a
+    credential in an authority -- so a syntax example written in front of a
+    connection string made it invisible."""
+    assert scan("postgres://user:password@host or mongodb://svc:R3alSecret9xQ2@db")
+
+
+def test_a_password_containing_a_colon_is_visible() -> None:
+    """RFC 3986 allows colons in userinfo after the first. The trailing `@`
+    anchors the match, so the password class does not need the restriction."""
+    assert scan("mongodb://svc:pa:ssR3alSecret9x@host")
+
+
+def test_the_hyphenated_placeholders_are_reachable() -> None:
+    """The comparison stripped `-` and `_` before looking the password up, and
+    the shared placeholder set stores its entries hyphenated -- so every one of
+    them was dead code here, and a docs URL using one was flagged."""
+    for password in ("replace-me", "your-api-key-here", "insert-key-here"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+
+
+def test_an_alphanumeric_mask_is_a_mask() -> None:
+    """`xxxxxxxx` redacts exactly as `********` does. Requiring punctuation
+    meant the commonest written mask withheld the page it appeared on."""
+    for password in ("xxxxxxxx", "aaaa", "XXXXXXXXXXXX"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+    # Not a blanket amnesty for short values: two characters is not a mask.
+    assert scan("postgres://user:ab@host")
+
+
+def test_this_project_does_not_withhold_its_own_source() -> None:
+    """Nothing under `src/` may trip the scanner.
+
+    Source files hold no credentials, so a finding there is a false positive by
+    definition -- and the file it withholds is one this index exists to make
+    searchable. This caught the scanner withholding *itself*: an example value
+    written into a comment as a literal `key=value` fired the rule the comment
+    was explaining. Fixtures live in tests, which are excluded here because
+    they hold deliberate look-alikes.
+    """
+    src = Path(__file__).resolve().parents[1] / "src"
+    withheld = {
+        path.relative_to(src).as_posix(): str(findings[0])
+        for path in sorted(src.rglob("*.py"))
+        if (findings := scan(path.read_text(encoding="utf-8")))
+    }
+    assert not withheld, f"the scanner would withhold our own source: {withheld}"
