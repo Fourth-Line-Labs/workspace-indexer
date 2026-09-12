@@ -539,11 +539,17 @@ checkout from inside a single run.
 
 Read `Nothing was deleted` as being about **that root**, though. The brake is
 judged per root and only above a floor of ten files, so a small root of the
-other workspace — fewer than ten recorded files — is pruned by the same run
-without a word, and it is pruned whether or not some larger root tripped the
-brake. A run that prints nothing at all is therefore the quieter version of
-this problem, not the absence of it: check `status` against both workspaces
-rather than trusting silence. Give the second workspace its own database
+other workspace — fewer than ten recorded files — is pruned by the same run,
+whether or not some larger root tripped the brake.
+
+That prune is not silent, it is merely unalarming: each file logs `file.removed`
+at info, and the run table's `chunks removed` counts them, exactly as an
+ordinary cleanup would. What is missing is the error — and the table's
+`deletions withheld` row, which appears only when something was in fact
+withheld. So the symptom to recognise is a run that *succeeded* with chunks
+removed and no `deletions withheld` row, which is the quieter version of this
+problem rather than the absence of it. Check `status` against both workspaces
+rather than reading a clean run as an all-clear. Give the second workspace its own database
 instead:
 
 ```bash
