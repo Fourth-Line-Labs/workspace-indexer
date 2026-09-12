@@ -9,10 +9,12 @@ until it is documented.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
 import pytest
+import structlog
 from pydantic import BaseModel
 
 from tests.mcp_tool_names import cli_command_names, registered_tool_names
@@ -106,6 +108,47 @@ def test_the_testing_guide_is_linked_from_the_readme() -> None:
     assert "docs/testing.md" in readme
 
 
+def _fenced_blocks(text: str) -> list[str]:
+    """The contents of every fenced code block, CommonMark's pairing rules.
+
+    Written as a scanner rather than a regex because the pairing is what
+    matters: a fence closes only with the *same* character, at least as long as
+    the one that opened it. A pattern that only knows ```` ``` ```` at column 0
+    treats the inner fence of a four-backtick block -- the reason anyone
+    reaches for one -- as a real fence, and every later block boundary shifts.
+    Tilde fences, four or more backticks, up to three leading spaces, and a
+    closer with trailing whitespace or extra length are all legal and all
+    handled here.
+
+    Stricter than CommonMark in one place: a backtick opener's info string may
+    not contain a backtick (the spec's rule), and an unterminated block is
+    still returned, closed at end of file (also the spec's rule).
+    """
+    blocks: list[str] = []
+    marker: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip(" ")
+        if len(line) - len(stripped) > 3:
+            if marker is not None:
+                body.append(line)
+            continue
+        if marker is None:
+            opener = re.match(r"(`{3,}|~{3,})(.*)$", stripped)
+            if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
+                marker, body = opener.group(1), []
+            continue
+        closer = re.match(r"(`{3,}|~{3,})[ \t]*$", stripped)
+        if closer and closer.group(1)[0] == marker[0] and len(closer.group(1)) >= len(marker):
+            blocks.append("\n".join(body))
+            marker = None
+        else:
+            body.append(line)
+    if marker is not None:
+        blocks.append("\n".join(body))
+    return blocks
+
+
 def _mass_deletion_example(text: str) -> str:
     """The fenced block quoting the mass-deletion log line.
 
@@ -116,24 +159,57 @@ def _mass_deletion_example(text: str) -> str:
     the file. Either fails against text that was never the example, pointing
     the reader at the wrong block.
     """
-    # Line-anchored, and the opener accepts the *whole* info string. A bare
-    # ```\n opener is not enough -- this file has ```bash and ```sql blocks --
-    # but neither is an alphanumeric-only tag: CommonMark allows anything but a
-    # backtick there, so `c++` or a ```bash title=x``` fence would be rejected
-    # as an opener while its closing fence still matched as one, shifting every
-    # later pairing. Measured: with such a fence added above the example, an
-    # alphanumeric-only opener sees four blocks and *none* of them contains the
-    # event, because the example block is mis-cut.
-    blocks = re.findall(r"^```[^\n`]*\n(.*?)^```$", text, re.M | re.S)
-    matching = [b for b in blocks if _EVENT in b]
+    matching = [b for b in _fenced_blocks(text) if _EVENT in b]
     assert len(matching) == 1, (
         f"expected exactly one fenced block quoting {_EVENT}, found {len(matching)}"
     )
     return matching[0]
 
 
-def _emitted_detail() -> str:
-    """The detail string as `indexer.py` actually passes it."""
+def test_the_fence_scanner_pairs_fences_the_way_commonmark_does() -> None:
+    """The cases that shift every later block boundary when they are missed.
+
+    Measured against the regex this replaced: it saw the inner ``` of the
+    four-backtick block as a real fence, so `two` and `three` were cut from the
+    wrong lines. Each case here is one of those mis-cuts.
+    """
+    doc = "\n".join(
+        [
+            "````markdown",  # a longer fence, opened to show a fence
+            "```",
+            "inner",
+            "```",
+            "````",
+            "~~~",  # a tilde fence
+            "two",
+            "~~~~",  # closing tilde run may be longer than the opener
+            "  ```bash title=x",  # indented up to three spaces, with an info string
+            "three",
+            "  ```   ",  # a closer may carry trailing whitespace
+        ]
+    )
+    assert _fenced_blocks(doc) == ["```\ninner\n```", "two", "three"]
+
+
+def test_the_renderer_decides_the_quoting_not_this_test() -> None:
+    """Why the expected text is rendered rather than built.
+
+    An apostrophe in the detail sentence flips the quote character, and an
+    escape is rendered escaped. Both used to be hardcoded as `detail='...'`,
+    which would have failed against a doc that was faithful.
+    """
+    assert _rendered(detail="it isn't gone") == 'detail="it isn\'t gone"'
+    assert _rendered(detail="a\tb") == "detail='a\\tb'"
+    assert _rendered(detail="plain") == "detail=plain"
+
+
+def _log_call() -> ast.Call:
+    """The `log.error` call that emits the event, from `indexer.py`'s syntax
+    tree.
+
+    Parsed rather than pattern-matched: every regex written for this has been
+    wrong about where the call's arguments end, and the tree knows exactly.
+    """
     source = (
         Path(__file__).resolve().parents[1]
         / "src"
@@ -141,15 +217,25 @@ def _emitted_detail() -> str:
         / "pipeline"
         / "indexer.py"
     ).read_text(encoding="utf-8")
-    call = re.search(rf'log\.error\(\s*"{re.escape(_EVENT)}",(.*?)\n        \)', source, re.S)
-    assert call is not None, f"the {_EVENT} log call moved; update this guard"
-    # Capture the run of adjacent string literals Python concatenates, rather
-    # than anchoring on what follows. An earlier version matched `",\n` and
-    # could not work: `detail` is the last argument, so the captured body ends
-    # at the comma with no newline after it.
-    literals = re.search(r'detail=((?:\s*"(?:[^"\\]|\\.)*")+)', call.group(1), re.S)
-    assert literals is not None, "that log call no longer passes a detail string"
-    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', literals.group(1), re.S))
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and first.value == _EVENT:
+            return node
+    raise AssertionError(f"no call passing {_EVENT} remains in indexer.py; update this guard")
+
+
+def _emitted_detail() -> str:
+    """The detail string as a *value*, adjacent literals joined and escapes
+    decoded -- not the source text of the literals, which is what the doc would
+    disagree with the moment the sentence contains a `\\n` or a `\\"`."""
+    for keyword in _log_call().keywords:
+        if keyword.arg == "detail":
+            detail = ast.literal_eval(keyword.value)
+            assert isinstance(detail, str)
+            return detail
+    raise AssertionError("that log call no longer passes a detail string")
 
 
 def _emitted_fields() -> set[str]:
@@ -160,16 +246,21 @@ def _emitted_fields() -> set[str]:
     is bound through contextvars for the whole run rather than passed here, so
     it is asserted separately.
     """
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "workspace_indexer"
-        / "pipeline"
-        / "indexer.py"
-    ).read_text(encoding="utf-8")
-    call = re.search(rf'log\.error\(\s*"{re.escape(_EVENT)}",(.*?)\n        \)', source, re.S)
-    assert call is not None
-    return {name for name in re.findall(r"^\s{12}(\w+)=", call.group(1), re.M)}
+    return {keyword.arg for keyword in _log_call().keywords if keyword.arg is not None}
+
+
+def _rendered(**fields: str) -> str:
+    """Those fields as the console actually prints them.
+
+    The renderer is asked rather than imitated. It quotes a value only when the
+    value needs it, and picks the quote character the way `repr` does -- so a
+    detail sentence containing an apostrophe renders `detail="...isn't..."`,
+    and any escape renders escaped. Every one of those decisions used to be
+    hardcoded here as a single-quoted string, which made a faithful doc fail.
+    """
+    line = structlog.dev.ConsoleRenderer(colors=False)(None, "", {"event": _EVENT, **fields})
+    assert isinstance(line, str)
+    return line[line.index(next(iter(fields)) + "=") :]
 
 
 def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
@@ -187,15 +278,16 @@ def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
     across lines and the doc wraps it to fit, so neither's line breaks are
     meaningful. Everything else must match.
     """
-    # Built from the source and looked for in the doc, rather than extracted
-    # from the doc and compared. Extraction needs a pattern that knows where
-    # the quote ends, and every such pattern has been wrong: a lazy one stops
-    # at an apostrophe in the prose, a greedy one runs to the block's last
-    # quote -- which is the detail's closing quote only while no later field
-    # happens to be quoted, and `ConsoleRenderer` quotes any value containing a
-    # space. Constructing the expected text depends on none of that.
+    # Rendered by the renderer and looked for in the doc, rather than
+    # extracted from the doc and compared. Extraction needs a pattern that
+    # knows where the quote ends, and every such pattern has been wrong: a lazy
+    # one stops at an apostrophe in the prose, a greedy one runs to the block's
+    # last quote -- which is the detail's closing quote only while no later
+    # field happens to be quoted. Constructing the expected text by hand was no
+    # better: it fixed the quote character and used the literals' source text.
+    # Asking `ConsoleRenderer` assumes nothing about either.
     block = _mass_deletion_example(text)
-    expected = _collapse_whitespace(f"detail='{_emitted_detail()}'")
+    expected = _collapse_whitespace(_rendered(detail=_emitted_detail()))
     assert expected in _collapse_whitespace(block), (
         "the example's detail string no longer matches what indexer.py emits"
     )
