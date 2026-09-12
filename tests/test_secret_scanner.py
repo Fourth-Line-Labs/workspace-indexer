@@ -260,3 +260,119 @@ def test_hyphenated_and_underscored_names_read_as_identifiers() -> None:
     assert not scan('"password": "some-long-kebab-cased-name-here"')
     assert not scan('"password": "some_long_snake_cased_name_here"')
     assert scan('"password": "some-long-kebab-c4sed-name~here"')
+
+
+# --- expressions in C#, and credentials inside URLs ------------------------
+#
+# Both halves of #89. The first is a false positive that purged eight tracked
+# files from a live index; the second is a false negative that would have sent
+# a working credential to the embedding provider. Every value here is
+# synthetic.
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The exact shape that purged the eight files: the key matches on
+        # `token`, and the value is an expression the scanner could not see
+        # through because `?.` puts a `?` where it expected a dot.
+        "    MaxOutputTokens = options?.MaxOutputTokens ?? _maxTokens,",
+        "    ClaudeSecretRef = domain?.ClaudeSecretRef,",
+        "    ApiKey = settings?.ApiKey ?? DefaultApiKeyValue,",
+        "var token = context?.Request?.Headers?.Authorization;",
+        # `??` alone, with no member access at all.
+        "    ConnectionString = configured ?? FallbackConnectionValue,",
+    ],
+)
+def test_csharp_null_conditional_expressions_are_not_secrets(line: str) -> None:
+    assert not scan(line)
+
+
+def test_a_real_literal_beside_a_null_conditional_is_still_caught() -> None:
+    """Teaching the scanner about `?.` must not become a way to smuggle a
+    value past it.
+
+    This line used to be flagged for the wrong reason -- `options?.ApiKey`
+    read as a generated value -- which happened to cover the literal after the
+    `??`. Seeing through the expression would have uncovered it, so `??` is
+    now an assignment operator in its own right: it is one.
+    """
+    assert scan(f'    ApiKey = options?.ApiKey ?? "{_WITH_TILDE}",')
+
+    # Known gap, stated rather than asserted: the key is read from the token
+    # immediately before the operator, so a fallback whose left side is not
+    # credential-shaped -- `ApiKey = configured ?? "<literal>"` -- is not seen
+    # by this rule. A provider-issued key there still trips `_SIGNATURES`.
+
+
+def test_a_reference_earlier_on_the_line_does_not_end_the_search() -> None:
+    """One line can hold both a reference and a literal. Rejecting the first
+    must not stop the second from being judged -- otherwise writing a harmless
+    assignment ahead of a real one hides it."""
+    assert scan(f'client(api_key=settings.voyage_api_key, secret="{_HIGH_ENTROPY}")')
+    assert scan(f'{{"auth": os.environ["X"], "password": "{_WITH_TILDE}"}}')
+
+
+def test_a_credential_in_a_url_authority_is_caught() -> None:
+    """No assignment rule can see this shape -- there is no `key = value`.
+    Before this rule the credential shipped to the embedding provider unless
+    an unrelated query parameter happened to trip the entropy check."""
+    findings = scan("mongodb://admin:devpassword123@localhost:27017/")
+    assert findings and findings[0].rule == "url_credential"
+
+
+def test_the_url_rule_does_not_depend_on_a_query_string() -> None:
+    """The case that prompted this was found *with* a query string and was
+    flagged for the wrong reason -- an unrelated `authSource` parameter. Both
+    forms must be caught by the URL rule itself."""
+    bare = "postgres://svc:Xk29fbQ2wwTmeeQ@db.internal:5432/app"
+    assert [f.rule for f in scan(bare)] == ["url_credential"]
+    assert [f.rule for f in scan(bare + "?sslmode=require&pool=10")] == ["url_credential"]
+
+
+def test_a_weak_password_in_a_url_is_still_a_password() -> None:
+    """Entropy is not consulted for this shape. `user:value@host` is written
+    for one reason, and a weak credential is still a credential."""
+    assert scan("redis://cache:hunter2xyz@10.0.0.4:6379/0")
+
+
+def test_the_finding_names_neither_the_user_nor_the_password() -> None:
+    findings = scan("mongodb://admin:devpassword123@localhost:27017/")
+    rendered = " ".join(str(f) + f.model_dump_json() for f in findings)
+    assert "devpassword123" not in rendered
+    assert "admin" not in rendered
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Documentation showing the syntax is exactly what this index is for.
+        "postgres://user:password@host:5432/dbname",
+        "mongodb://USER:PASSWORD@cluster.example.com/",
+        "postgres://user:<password>@host/db",
+        "postgres://user:${DB_PASSWORD}@host/db",
+        "mongodb://admin:changeme@localhost:27017/",
+        "postgres://user:****@host/db",
+        # No password at all.
+        "https://example.com/oauth/authorize/v2",
+        "redis://localhost:6379/0",
+        "git@github.com:Fourth-Line-Labs/workspace-indexer.git",
+    ],
+)
+def test_url_syntax_examples_are_not_withheld(line: str) -> None:
+    assert not scan(line)
+
+
+def test_a_query_parameter_value_ends_at_the_ampersand() -> None:
+    """`authSource=admin` names a database. It read as a credential because
+    the value ran on through the rest of the query string, which cleared the
+    entropy bar -- so a file was withheld over a parameter, while the real
+    credential in the same URL went unnoticed."""
+    assert scan("?authSource=admin&directConnection=true&serverSelectionTimeoutMS=10000") == []
+    assert scan("connect?authSource=admin&retryWrites=true&w=majority") == []
+
+
+def test_a_credential_in_a_query_parameter_is_still_caught() -> None:
+    """Ending the value at `&` must not stop the parameter's own value from
+    being judged."""
+    assert scan(f"https://api.example.com/v1/items?api_key={_HIGH_ENTROPY}&page=2")
