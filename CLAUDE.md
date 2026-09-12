@@ -13,7 +13,10 @@ do not exist.
   index, secret). Only the former is hot-reloaded.
 - `obs/` — logging. Set up before anything else runs.
 - `models/` — the shared value objects. No behaviour beyond validation.
-- `discovery/` — what files exist and what we know about them. Never opens a file.
+- `discovery/` — what files exist and what we know about them. Never opens a
+  file. Consults git for tracked status, because a `.gitignore` pattern has no
+  effect on a file already in the index and matching patterns alone dropped
+  committed source.
 - `secrets/` — keeps credentials out of the index, and therefore out of API
   requests. Withholding is destructive, so a false positive is silent data loss.
 - `classification/` — what *role* a document plays (spec, design, changelog),
@@ -25,8 +28,12 @@ do not exist.
   collection per embedding space. A cross-backend contract suite keeps them
   honest.
 - `state/` — SQLite manifest driving incremental reindex.
-- `graph/` — what files reference, and what references them: imports, and HTTP
-  route edges that cross repositories.
+- `graph/` — what files reference, what references them, and where each
+  reference points: imports, HTTP route edges that cross repositories, and the
+  origin of an import — first-party, a declared dependency, the language's
+  framework, or unclassified. Origin is what makes coverage mean something:
+  only a first-party edge can resolve to a file here, so only there is a
+  failure a defect.
 - `grounding/` — whether a codebase records *why* it is the way it is, so an
   empty answer can be told from an absent one.
 - `worktrees/` — reporting results as one git checkout sees them.

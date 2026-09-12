@@ -20,6 +20,9 @@ per-case detail lives in `evals/*.json`.
 
 | recorded | config | embedding | dims | fusion | reranker | tool | cases | recall@k | MRR@k | misses |
 |---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-10T07:31:20 | `f7de243f` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | guidance | 0.625 | 0.625 | 3/8 |
+| 2026-09-10T07:31:10 | `f7de243f` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | find_guidance | guidance | 0.938 | 0.830 | 1/8 |
+| 2026-09-10T07:29:43 | `f7de243f` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | all | 0.781 | 0.615 | 4/16 |
 | 2026-08-27T02:50:08 | `b2cdd494` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | all | 0.875 | 0.710 | 3/16 |
 | 2026-08-27T02:48:20 | `b2cdd494` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | find_guidance | guidance | 0.938 | 0.771 | 1/8 |
 | 2026-08-27T02:48:11 | `b2cdd494` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | guidance | 0.688 | 0.688 | 3/8 |
