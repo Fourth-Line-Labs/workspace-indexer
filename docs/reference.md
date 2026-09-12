@@ -512,11 +512,12 @@ read from the environment, so a `.env` that pins it wins over every config
 file, and both workspaces write into one database.
 
 The second config's first run writes its files in happily. It is *that* run's
-*end* that stops: an unscoped non-dry run finishes by comparing the whole
+*end* that stops it, provided a vanished root is big enough to trip the brake
+(see the floor below): an unscoped non-dry run finishes by comparing the whole
 manifest against what it just walked, so it sees the first workspace's roots as
-files that have vanished. (A run passing `--root` is spared — it only judges
-the root it walked.) Look for the failure in the run you just started, not the
-one after it:
+files that have vanished. (A run passing
+`--root` is spared — it only judges the root it walked.) Look for the failure
+in the run you just started, not the one after it:
 
 ```
 … [error    ] orphans.mass_deletion_withheld [workspace_indexer.pipeline] detail='this
@@ -534,7 +535,15 @@ The brake is doing its job — that is what it is for. But read the last sentenc
 against your situation before taking it: the files are not gone, and
 `--allow-deletes` would delete the other workspace's index. The cause is two
 workspaces sharing a manifest, which looks identical to a half-finished
-checkout from inside a single run. Give the second workspace its own database
+checkout from inside a single run.
+
+Read `Nothing was deleted` as being about **that root**, though. The brake is
+judged per root and only above a floor of ten files, so a small root of the
+other workspace — fewer than ten recorded files — is pruned by the same run
+without a word, and it is pruned whether or not some larger root tripped the
+brake. A run that prints nothing at all is therefore the quieter version of
+this problem, not the absence of it: check `status` against both workspaces
+rather than trusting silence. Give the second workspace its own database
 instead:
 
 ```bash
