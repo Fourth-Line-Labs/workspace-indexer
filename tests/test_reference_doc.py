@@ -26,6 +26,9 @@ def text() -> str:
     return REFERENCE.read_text(encoding="utf-8")
 
 
+_EVENT = "orphans.mass_deletion_withheld"
+
+
 def _collapse_whitespace(text: str) -> str:
     """Line breaks are not meaningful on either side of this comparison: the
     source concatenates the string to stay inside line length, and the doc
@@ -103,17 +106,57 @@ def test_the_testing_guide_is_linked_from_the_readme() -> None:
     assert "docs/testing.md" in readme
 
 
-def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
-    """The reference quotes a log line verbatim, so it has to stay verbatim.
+def _mass_deletion_example(text: str) -> str:
+    """The fenced block quoting the mass-deletion log line.
 
-    Someone reaches that section *because* they saw the message, and the first
-    thing they do is search for the sentence. An abridged quote finds nothing,
-    which is worse than no example — and the abridgement that prompted this
-    test dropped the half carrying the remedy.
+    Located by finding the fence that *contains* the event name rather than by
+    searching the whole document, because both earlier versions of these guards
+    took the first match anywhere: one would have latched onto an inline
+    mention of the event name in prose, the other onto the first `detail='` in
+    the file. Either fails against text that was never the example, pointing
+    the reader at the wrong block.
+    """
+    # Line-anchored and tag-aware. A bare ```\n opener is not enough: this file
+    # has ```bash and ```sql blocks, and a pattern that only recognises bare
+    # openers skips those while still consuming their closing fences, so the
+    # pairing desynchronises and later blocks are mis-cut. The first version of
+    # this helper saw three blocks where there are four, and found the right
+    # one only by where the desync happened to land.
+    blocks = re.findall(r"^```[a-zA-Z0-9]*\n(.*?)^```$", text, re.M | re.S)
+    matching = [b for b in blocks if _EVENT in b]
+    assert len(matching) == 1, (
+        f"expected exactly one fenced block quoting {_EVENT}, found {len(matching)}"
+    )
+    return matching[0]
 
-    Whitespace-normalised on both sides: the source concatenates the string
-    across lines and the doc wraps it to fit, so neither's line breaks are
-    meaningful. Everything else must match.
+
+def _emitted_detail() -> str:
+    """The detail string as `indexer.py` actually passes it."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "workspace_indexer"
+        / "pipeline"
+        / "indexer.py"
+    ).read_text(encoding="utf-8")
+    call = re.search(rf'log\.error\(\s*"{re.escape(_EVENT)}",(.*?)\n        \)', source, re.S)
+    assert call is not None, f"the {_EVENT} log call moved; update this guard"
+    # Capture the run of adjacent string literals Python concatenates, rather
+    # than anchoring on what follows. An earlier version matched `",\n` and
+    # could not work: `detail` is the last argument, so the captured body ends
+    # at the comma with no newline after it.
+    literals = re.search(r'detail=((?:\s*"(?:[^"\\]|\\.)*")+)', call.group(1), re.S)
+    assert literals is not None, "that log call no longer passes a detail string"
+    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', literals.group(1), re.S))
+
+
+def _emitted_fields() -> set[str]:
+    """The keyword fields that log call passes, read from the call itself.
+
+    Derived rather than listed, because a hardcoded list is how `run_id` came
+    to be missing from the example without anything noticing. `run_id` itself
+    is bound through contextvars for the whole run rather than passed here, so
+    it is asserted separately.
     """
     source = (
         Path(__file__).resolve().parents[1]
@@ -122,24 +165,39 @@ def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
         / "pipeline"
         / "indexer.py"
     ).read_text(encoding="utf-8")
+    call = re.search(rf'log\.error\(\s*"{re.escape(_EVENT)}",(.*?)\n        \)', source, re.S)
+    assert call is not None
+    return {name for name in re.findall(r"^\s{12}(\w+)=", call.group(1), re.M)}
 
-    emitted = re.search(r'detail="(this would remove most of a root.*?)",\n', source, re.S)
-    assert emitted is not None, "the mass-deletion log call moved; update this guard"
-    # Undo the implicit concatenation the source uses to stay inside line length.
-    actual = re.sub(r'"\s*\n\s*"', "", emitted.group(1))
 
-    quoted = re.search(r"detail='(.*?)'", text, re.S)
-    assert quoted is not None, "docs/reference.md no longer quotes the detail string"
+def test_the_quoted_log_message_matches_what_the_code_emits(text: str) -> None:
+    """The reference quotes the detail sentence exactly as it is emitted.
 
-    assert _collapse_whitespace(quoted.group(1)) == _collapse_whitespace(actual)
+    Someone reaches that section *because* they saw the message, and the first
+    thing they do is search for the sentence. An abridged quote finds nothing,
+    which is worse than no example — and the abridgement that prompted this
+    guard dropped the half carrying the remedy.
+
+    Only the sentence is verbatim. The surrounding line is wrapped and has its
+    timestamp and run id elided, which the prose beside it says.
+
+    Whitespace-normalised on both sides: the source concatenates the string
+    across lines and the doc wraps it to fit, so neither's line breaks are
+    meaningful. Everything else must match.
+    """
+    block = _mass_deletion_example(text)
+    quoted = re.search(r"detail='(.*)'", block, re.S)
+    assert quoted is not None, "the example no longer quotes a detail string"
+    assert _collapse_whitespace(quoted.group(1)) == _collapse_whitespace(_emitted_detail())
 
 
 def test_the_quoted_log_line_shows_every_field_the_event_carries(text: str) -> None:
-    """A field omitted from the example is a field the reader does not know to
-    look for. `recorded` is the one that says what the share was computed
-    against, which is the difference between "most of a root" and "most of what
-    we had recorded for a root"."""
-    block = re.search(r"orphans\.mass_deletion_withheld[^`]*", text)
-    assert block is not None
-    for field in ("root=", "files=", "recorded=", "share="):
-        assert field in block.group(0), f"the quoted log line omits {field}"
+    """A field missing from the example is a field the reader does not know to
+    look for. `recorded` says what the share was computed against, which is the
+    difference between "most of a root" and "most of what we had recorded for a
+    root"; `run_id` is what ties the line to the rest of its run.
+    """
+    block = _mass_deletion_example(text)
+    for field in _emitted_fields():
+        assert f"{field}=" in block, f"the quoted log line omits {field}="
+    assert "run_id=" in block, "contextvars binds run_id on every line of a run"

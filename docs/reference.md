@@ -515,11 +515,16 @@ Nothing fails at the time. What happens is that the *next* run of either config
 sees the other workspace's roots as files that have vanished, and stops:
 
 ```
-[error] orphans.mass_deletion_withheld  root=src  files=1121  recorded=1121  share=1.0
-        detail='this would remove most of a root at once, which is what an empty or
-        half-finished checkout looks like. Nothing was deleted. Re-run with
-        --allow-deletes if the files really are gone.'
+… [error    ] orphans.mass_deletion_withheld [workspace_indexer.pipeline] detail='this
+would remove most of a root at once, which is what an empty or half-finished
+checkout looks like. Nothing was deleted. Re-run with --allow-deletes if the
+files really are gone.' files=1121 recorded=1121 root=src run_id=… share=1.0
 ```
+
+Wrapped here to fit the page; the console prints it as one line. The `…` stand
+in for the ISO timestamp and the run id, which vary. Field order is the
+renderer's, not the call's — `ConsoleRenderer` sorts keys, which is why
+`detail` comes first.
 
 The brake is doing its job — that is what it is for. But read the last sentence
 against your situation before taking it: the files are not gone, and
