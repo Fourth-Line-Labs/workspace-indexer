@@ -532,6 +532,46 @@ def test_an_assignment_whose_value_opens_a_template_it_never_closes() -> None:
     assert scan('API_KEY = "${API_KEY}"') == []
 
 
+@pytest.mark.parametrize(
+    "password",
+    ["{{DB_PASSWORD}}", "${{VAR}}", "{DB_PW}", "${DB_PW}", "<password>", "%DB_PW%"],
+)
+def test_a_template_at_any_nesting_is_a_placeholder(password: str) -> None:
+    """Matching the shape whole fixed a prefix hole and opened a narrowness
+    one in the same edit: a single pair of braces was recognised, so every
+    docs page written in Handlebars, Mustache or Ansible was withheld as
+    carrying a live credential."""
+    assert scan(f"mongodb://user:{password}@host") == [], password
+
+
+def test_an_unclosed_brace_is_not_a_template() -> None:
+    """Each depth is spelled out rather than made optional, so a value that
+    merely opens like a template is still judged -- otherwise the prefix hole
+    comes back one character deeper."""
+    assert scan(f"mongodb://user:{{{{{_HIGH_ENTROPY}@host")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # Internal DNS and NetBIOS names begin with an underscore.
+        "_internal-db:27017",
+        # An IDN host written raw rather than punycoded. The non-ASCII
+        # character has to be *first*: a host merely containing one has an
+        # ordinary letter at the front and would pass either way.
+        "\u00f6stersund.example:27017",
+        "[2001:db8::1]/db",
+        "db.internal",
+    ],
+)
+def test_a_host_is_more_than_letters_and_digits(host: str) -> None:
+    """This rule consults no entropy, so a host it declines to match is a
+    credential nothing else on the line will catch. Narrowing the first
+    character to RFC 1123 fixed the punctuation false positive and silently
+    dropped these."""
+    assert scan(f"mongodb://svc:{_HIGH_ENTROPY}@{host}"), host
+
+
 def test_this_project_does_not_withhold_its_own_source() -> None:
     """Nothing under `src/` may trip the scanner.
 

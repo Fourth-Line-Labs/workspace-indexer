@@ -136,9 +136,15 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 # out here, the word after it becomes the host and the rule fires on its own
 # explanation.
 #
-# And a host begins with a letter or a digit. Accepting any non-delimiter let
-# punctuation satisfy the requirement -- the comma in prose, the closing paren
-# of a markdown link -- which is the same false positive wearing a hat.
+# And a host does not begin with punctuation. Accepting any non-delimiter let
+# the comma in prose and the closing paren of a markdown link satisfy the
+# requirement, which is the same false positive wearing a hat.
+#
+# Letters, digits, `_` and anything non-ASCII, rather than the letters-and-
+# digits of RFC 1123: internal DNS and NetBIOS names begin with an underscore
+# and an IDN host may be written raw. This rule consults no entropy, so a host
+# it declines to match is a credential nothing else on the line will catch --
+# the narrow reading costs more here than the punctuation it would exclude.
 #
 # The password may contain `:`; only the user may not. RFC 3986 allows colons
 # after the first one in userinfo, so a generated password containing one was
@@ -147,7 +153,7 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 _URL_CREDENTIAL = re.compile(
     r"(?i)\b[a-z][a-z0-9+.\-]*://"
     r"(?P<user>[^\s:/?#@\[\]]+):(?P<password>[^\s/?#@\[\]]+)@"
-    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][^\s/?#@\[\]]*)"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_\u0080-\U0010ffff][^\s/?#@\[\]]*)"
 )
 
 # Passwords that name the *idea* of a password rather than being one.
@@ -259,7 +265,21 @@ _EXPRESSION = re.compile(r"[()\[\]{}<>]|::|\?[?.]|\A[A-Za-z_][A-Za-z0-9_]*\.")
 # `%40dmin12345%21`, an ordinary percent-encoded password, came to be treated
 # as a Windows variable and shipped to the provider. The same hole was open
 # for `<` and `{`.
-_TEMPLATE = re.compile(r"<[^<>]*>|\$\{[^{}]*\}|\{[^{}]*\}|%[A-Za-z0-9_]+%")
+#
+# Each nesting depth is spelled out rather than made optional, because the
+# first attempt at whole-shape matching recognised one pair of braces and so
+# withheld every page written in Handlebars, Mustache or Ansible -- the shape
+# set having gone from too wide to too narrow in the same edit. Spelling them
+# out keeps a mismatched `{{X}` judged on its merits, which an optional brace
+# on each side would not.
+_TEMPLATE = re.compile(
+    r"""(?x)
+    < [^<>]* >                  # <password>
+    | \$? \{\{ [^{}]* \}\}       # {{DB_PASSWORD}} and ${{VAR}}
+    | \$? \{ [^{}]* \}            # ${DB_PASSWORD} and {password}
+    | % [A-Za-z0-9_]+ %         # %DB_PW%
+    """
+)
 
 # Shortest run of one repeated character that reads as masking rather than as
 # a value. Four is short enough to catch `xxxx` and long enough that a
