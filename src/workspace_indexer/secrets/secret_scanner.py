@@ -140,11 +140,17 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 # the comma in prose and the closing paren of a markdown link satisfy the
 # requirement, which is the same false positive wearing a hat.
 #
-# Letters, digits, `_` and anything non-ASCII, rather than the letters-and-
-# digits of RFC 1123: internal DNS and NetBIOS names begin with an underscore
-# and an IDN host may be written raw. This rule consults no entropy, so a host
-# it declines to match is a credential nothing else on the line will catch --
-# the narrow reading costs more here than the punctuation it would exclude.
+# Any Unicode word character, rather than the letters-and-digits of RFC 1123:
+# internal DNS and NetBIOS names begin with an underscore and an IDN host may
+# be written raw. This rule consults no entropy, so a host it declines to match
+# is a credential nothing else on the line will catch.
+#
+# `\w` rather than "anything non-ASCII", which was the first attempt and let
+# the false positive back in through the other side of the alphabet: every
+# non-ASCII code point includes fullwidth punctuation and the C1 controls, so
+# a CJK page with the host elided was withheld over a fullwidth comma. `\w` is
+# Unicode-aware, so it keeps the IDN letters and drops the punctuation -- there
+# was no trade-off to make here, which is what made the first version wrong.
 #
 # The password may contain `:`; only the user may not. RFC 3986 allows colons
 # after the first one in userinfo, so a generated password containing one was
@@ -153,7 +159,7 @@ _WORD_SEPARATORS = str.maketrans("", "", "-_")
 _URL_CREDENTIAL = re.compile(
     r"(?i)\b[a-z][a-z0-9+.\-]*://"
     r"(?P<user>[^\s:/?#@\[\]]+):(?P<password>[^\s/?#@\[\]]+)@"
-    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_\u0080-\U0010ffff][^\s/?#@\[\]]*)"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|\w[^\s/?#@\[\]]*)"
 )
 
 # Passwords that name the *idea* of a password rather than being one.
@@ -266,20 +272,42 @@ _EXPRESSION = re.compile(r"[()\[\]{}<>]|::|\?[?.]|\A[A-Za-z_][A-Za-z0-9_]*\.")
 # as a Windows variable and shipped to the provider. The same hole was open
 # for `<` and `{`.
 #
-# Each nesting depth is spelled out rather than made optional, because the
-# first attempt at whole-shape matching recognised one pair of braces and so
-# withheld every page written in Handlebars, Mustache or Ansible -- the shape
-# set having gone from too wide to too narrow in the same edit. Spelling them
-# out keeps a mismatched `{{X}` judged on its merits, which an optional brace
-# on each side would not.
+# Braced templates are counted rather than listed, by `_is_braced_template`
+# below: the first attempt at whole-shape matching recognised one pair of
+# braces and withheld every page written in Handlebars, Mustache or Ansible,
+# and the second recognised two and withheld every page using the triple-stache
+# form. Adding a third alternative would have been the same move a third time.
 _TEMPLATE = re.compile(
     r"""(?x)
-    < [^<>]* >                  # <password>
-    | \$? \{\{ [^{}]* \}\}       # {{DB_PASSWORD}} and ${{VAR}}
-    | \$? \{ [^{}]* \}            # ${DB_PASSWORD} and {password}
-    | % [A-Za-z0-9_]+ %         # %DB_PW%
+    < [^<>]* >              # <password>
+    | % [A-Za-z0-9_]+ %     # %DB_PW%
     """
 )
+
+
+def _is_braced_template(value: str) -> bool:
+    r"""`{password}`, `${DB_PASSWORD}`, `{{VAR}}`, `${{VAR}}`, `{{{VAR}}}`.
+
+    Counted rather than enumerated. Spelling out one depth per alternative was
+    wrong twice in a row in the same way -- a depth was missed, the templating
+    language that uses it had its pages withheld, and the fix added one more
+    alternative and waited for the next report. Mustache alone spans three
+    depths, and nothing stops a generator from nesting further.
+
+    The braces must balance, so a value that merely *opens* like a template --
+    `{{Xk9...` -- is still judged on its merits. That is the hole an
+    optional-brace pattern would reopen, and the reason this is not simply
+    `\{+[^{}]*\}+`.
+    """
+    body = value[1:] if value.startswith("$") else value
+    opening = len(body) - len(body.lstrip("{"))
+    closing = len(body) - len(body.rstrip("}"))
+    if not opening or opening != closing:
+        return False
+    # Nothing but the name inside: `{a}{b}` is two templates, not one, and is
+    # not a shape anything writes in a password position.
+    return not set("{}") & set(body[opening:-closing])
+
 
 # Shortest run of one repeated character that reads as masking rather than as
 # a value. Four is short enough to catch `xxxx` and long enough that a
@@ -312,7 +340,7 @@ def _first_parameter(value: str) -> str:
 
 def _is_placeholder_password(password: str) -> bool:
     """A sample, not a secret: `<password>`, `${PASSWORD}`, `%PW%`, `xxxxxxxx`."""
-    if _TEMPLATE.fullmatch(password):
+    if _TEMPLATE.fullmatch(password) or _is_braced_template(password):
         return True
     lowered = password.lower()
     # Both spellings, because the two sets are written differently: the URL set
@@ -332,7 +360,12 @@ def _looks_generated(value: str) -> bool:
     lowered = value.strip().lower()
     # The same whole-shape test the URL rule uses, for the same reason: a
     # prefix check would clear any value that merely begins with `<` or `${`.
-    if lowered in _PLACEHOLDERS or _TEMPLATE.fullmatch(value.strip()):
+    bare_value = value.strip()
+    if (
+        lowered in _PLACEHOLDERS
+        or _TEMPLATE.fullmatch(bare_value)
+        or _is_braced_template(bare_value)
+    ):
         return False
     # A path, a URL or a dotted module name is structured, not random.
     if "/" in value or value.count(".") > 2:

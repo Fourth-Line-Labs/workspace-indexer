@@ -534,7 +534,20 @@ def test_an_assignment_whose_value_opens_a_template_it_never_closes() -> None:
 
 @pytest.mark.parametrize(
     "password",
-    ["{{DB_PASSWORD}}", "${{VAR}}", "{DB_PW}", "${DB_PW}", "<password>", "%DB_PW%"],
+    [
+        "{DB_PW}",
+        "${DB_PW}",
+        "{{DB_PASSWORD}}",
+        "${{VAR}}",
+        # Mustache's unescaped-output form, and one deeper than any templating
+        # language writes -- the point is that depth is counted rather than
+        # enumerated, so there is no next depth to miss.
+        "{{{DB_PASSWORD}}}",
+        "${{{VAR}}}",
+        "{{{{DEEP}}}}",
+        "<password>",
+        "%DB_PW%",
+    ],
 )
 def test_a_template_at_any_nesting_is_a_placeholder(password: str) -> None:
     """Matching the shape whole fixed a prefix hole and opened a narrowness
@@ -544,11 +557,12 @@ def test_a_template_at_any_nesting_is_a_placeholder(password: str) -> None:
     assert scan(f"mongodb://user:{password}@host") == [], password
 
 
-def test_an_unclosed_brace_is_not_a_template() -> None:
-    """Each depth is spelled out rather than made optional, so a value that
-    merely opens like a template is still judged -- otherwise the prefix hole
-    comes back one character deeper."""
+def test_unbalanced_braces_are_not_a_template() -> None:
+    """Counting the braces must not become a way to open one and never close
+    it. The counts have to match, or the prefix hole this replaced comes back
+    wearing braces."""
     assert scan(f"mongodb://user:{{{{{_HIGH_ENTROPY}@host")
+    assert scan(f"mongodb://user:{{{_HIGH_ENTROPY}}}}}@host")
 
 
 @pytest.mark.parametrize(
@@ -560,6 +574,7 @@ def test_an_unclosed_brace_is_not_a_template() -> None:
         # character has to be *first*: a host merely containing one has an
         # ordinary letter at the front and would pass either way.
         "\u00f6stersund.example:27017",
+        "\u6570\u636e\u5e93.example:27017",
         "[2001:db8::1]/db",
         "db.internal",
     ],
@@ -589,3 +604,23 @@ def test_this_project_does_not_withhold_its_own_source() -> None:
         if (findings := scan(path.read_text(encoding="utf-8")))
     }
     assert not withheld, f"the scanner would withhold our own source: {withheld}"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # Fullwidth and ideographic punctuation. Admitting every non-ASCII code
+        # point to catch IDN hosts let these back in, so a CJK page with the
+        # host elided was withheld over its own comma -- the same false
+        # positive the host requirement exists to prevent, entering from the
+        # other side of the alphabet.
+        "\uff0c\u7136\u540e\u91cd\u542f",
+        "\u3002\u7136\u540e\u91cd\u542f",
+        "\u300b",
+        "\u00a1Listo!",
+    ],
+)
+def test_non_ascii_punctuation_is_not_a_host(tail: str) -> None:
+    """`\\w` is Unicode-aware, so there was no trade-off to make between IDN
+    hosts and punctuation: it keeps the letters and drops the marks."""
+    assert not scan(f"mongodb://user:Passw0rdX9q2@{tail}")
