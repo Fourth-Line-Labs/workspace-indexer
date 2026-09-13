@@ -545,6 +545,12 @@ def test_an_assignment_whose_value_opens_a_template_it_never_closes() -> None:
         "{{{DB_PASSWORD}}}",
         "${{{VAR}}}",
         "{{{{DEEP}}}}",
+        # docker-compose doubles the sigil to escape it, so this passes a
+        # literal `${DB_PASSWORD}` through to the container.
+        "$${DB_PASSWORD}",
+        # Composite formats documentation really does write.
+        "{USER}-{PW}",
+        "{PASS}.{DOMAIN}",
         "<password>",
         "%DB_PW%",
     ],
@@ -563,6 +569,15 @@ def test_unbalanced_braces_are_not_a_template() -> None:
     wearing braces."""
     assert scan(f"mongodb://user:{{{{{_HIGH_ENTROPY}@host")
     assert scan(f"mongodb://user:{{{_HIGH_ENTROPY}}}}}@host")
+
+
+def test_a_group_appended_to_a_credential_does_not_launder_it() -> None:
+    """Accepting groups joined by punctuation must not accept a generated
+    value with a group stuck on the end. Only punctuation may sit outside a
+    group -- letters and digits there mean the value is not a template, it is
+    a password wearing one."""
+    assert scan(f"mongodb://user:{_HIGH_ENTROPY}{{a}}@db.internal")
+    assert scan(f"mongodb://user:{{a}}{_HIGH_ENTROPY}@db.internal")
 
 
 @pytest.mark.parametrize(

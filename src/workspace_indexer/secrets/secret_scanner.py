@@ -285,8 +285,17 @@ _TEMPLATE = re.compile(
 )
 
 
+# What may sit between two template groups: punctuation that joins them.
+# `{USER}-{PW}` and `{PASS}.{DOMAIN}` are composite formats documentation
+# really does write. Letters and digits are excluded so that a credential with
+# a group stuck on the end -- `Xk9...{a}` -- is still judged on its merits.
+_TEMPLATE_JOINERS = frozenset("-._:+/,;|@ ")
+
+
 def _is_braced_template(value: str) -> bool:
-    r"""`{password}`, `${DB_PASSWORD}`, `{{VAR}}`, `${{VAR}}`, `{{{VAR}}}`.
+    r"""One or more brace groups, nested to any depth and joined by
+    punctuation: `{password}`, `${DB_PASSWORD}`, `{{VAR}}`, `${{{VAR}}}`,
+    `$${DB_PASSWORD}`, `{USER}-{PW}`.
 
     Counted rather than enumerated. Spelling out one depth per alternative was
     wrong twice in a row in the same way -- a depth was missed, the templating
@@ -294,19 +303,27 @@ def _is_braced_template(value: str) -> bool:
     alternative and waited for the next report. Mustache alone spans three
     depths, and nothing stops a generator from nesting further.
 
-    The braces must balance, so a value that merely *opens* like a template --
-    `{{Xk9...` -- is still judged on its merits. That is the hole an
-    optional-brace pattern would reopen, and the reason this is not simply
-    `\{+[^{}]*\}+`.
+    Two things keep this from becoming a way to hide a credential. The braces
+    must balance, so a value that merely *opens* like a template -- `{{Xk9...`
+    -- is still judged. And only punctuation may sit outside a group, so
+    appending `{x}` to a generated value does not launder it.
     """
-    body = value[1:] if value.startswith("$") else value
-    opening = len(body) - len(body.lstrip("{"))
-    closing = len(body) - len(body.rstrip("}"))
-    if not opening or opening != closing:
-        return False
-    # Nothing but the name inside: `{a}{b}` is two templates, not one, and is
-    # not a shape anything writes in a password position.
-    return not set("{}") & set(body[opening:-closing])
+    seen = False
+    depth = 0
+    for character in value:
+        if character == "{":
+            depth += 1
+            seen = True
+        elif character == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif depth == 0:
+            # `$` is the sigil, doubled in docker-compose to escape itself, so
+            # a compose file's `$${DB_PASSWORD}` reads as the template it is.
+            if character != "$" and character not in _TEMPLATE_JOINERS:
+                return False
+    return seen and depth == 0
 
 
 # Shortest run of one repeated character that reads as masking rather than as
