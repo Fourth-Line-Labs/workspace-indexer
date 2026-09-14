@@ -303,10 +303,18 @@ def _is_braced_template(value: str) -> bool:
     alternative and waited for the next report. Mustache alone spans three
     depths, and nothing stops a generator from nesting further.
 
-    Two things keep this from becoming a way to hide a credential. The braces
+    Three things keep this from becoming a way to hide a credential. The braces
     must balance, so a value that merely *opens* like a template -- `{{Xk9...`
-    -- is still judged. And only punctuation may sit outside a group, so
-    appending `{x}` to a generated value does not launder it.
+    -- is still judged. Only punctuation may sit outside a group, so appending
+    `{x}` to a generated value does not launder it. And the inside of a group
+    is judged like any other value, so wrapping one in braces does not either.
+
+    That last test cannot be a character class: `{DB_PASSWORD}` and a wrapped
+    credential are the same shape. It is the naming-convention and entropy
+    rules the scanner already applies, which clear a template name outright and
+    cannot reach the entropy floor below about thirteen characters -- so a
+    mustache section passes on arithmetic rather than on an exception, while a
+    generated run inside braces does not.
     """
     seen = False
     depth = 0
@@ -323,7 +331,12 @@ def _is_braced_template(value: str) -> bool:
             # a compose file's `$${DB_PASSWORD}` reads as the template it is.
             if character != "$" and character not in _TEMPLATE_JOINERS:
                 return False
-    return seen and depth == 0
+    if not seen or depth:
+        return False
+    # Each group's contents, judged as a value in its own right. The recursion
+    # back through `_looks_generated` stops immediately: these segments contain
+    # no braces, so the first thing it asks of them is answered False.
+    return not any(_looks_generated(segment) for segment in re.split(r"[{}]", value))
 
 
 # Shortest run of one repeated character that reads as masking rather than as

@@ -581,6 +581,39 @@ def test_a_group_appended_to_a_credential_does_not_launder_it() -> None:
 
 
 @pytest.mark.parametrize(
+    "password",
+    [
+        # Wrapped: the shape a template and a credential genuinely share, and
+        # the one that has to be told apart by what is inside rather than by
+        # the braces around it.
+        "{{{high}}}",
+        "{{{high}}}{{a}}",
+        "{{x{{{high}}}}}",
+        "{{USER}}-{{{high}}}",
+    ],
+)
+def test_braces_around_a_credential_do_not_launder_it(password: str) -> None:
+    """Balanced braces and punctuation-only separators are not enough on their
+    own: both are satisfied by a generated value in a template's clothing. The
+    inside of a group is judged like any other value.
+
+    `{DB_PASSWORD}` and a wrapped credential are the same shape, so the test
+    cannot be a character class. It is the entropy and naming rules the scanner
+    already applies -- and the entropy floor is unreachable below about
+    thirteen characters, so a short template name passes on arithmetic.
+    """
+    assert scan(f"mongodb://user:{password.format(high=_HIGH_ENTROPY)}@db.internal"), password
+
+
+def test_a_mustache_section_is_still_a_template() -> None:
+    """Judging group interiors must not start withholding pages over ordinary
+    templating syntax -- the reason the rule is entropy rather than a
+    whitelist of characters."""
+    for password in ("{{#if enabled}}", "{{^unless}}", "{{else}}"):
+        assert scan(f"mongodb://user:{password}@db.internal") == [], password
+
+
+@pytest.mark.parametrize(
     "host",
     [
         # Internal DNS and NetBIOS names begin with an underscore.
