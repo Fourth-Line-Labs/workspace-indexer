@@ -29,6 +29,21 @@ SUPPORTED = frozenset({"python", "typescript", "tsx", "javascript", "csharp"})
 
 _JS = frozenset({"typescript", "tsx", "javascript"})
 
+# The directive forms C# writes, named rather than spelled out at each use.
+# Three modules agree on these strings -- the scanner, the resolver's decline
+# set and the tests -- and a rename in one of them would otherwise stop the
+# others matching without anything failing.
+USING = "using"
+USING_STATIC = "using_static"
+GLOBAL_USING = "global_using"
+GLOBAL_USING_STATIC = "global_using_static"
+
+# Every kind this scanner can emit, so a new one cannot be added without the
+# places that enumerate kinds finding out.
+KINDS = frozenset(
+    {"import", "from", "reexport", USING, USING_STATIC, GLOBAL_USING, GLOBAL_USING_STATIC}
+)
+
 
 class ImportScanner:
     def scan(self, text: str, language: str, tree: Tree | None = None) -> list[ImportEdge]:
@@ -129,12 +144,12 @@ def _csharp_kind(node: Node) -> str:
         # Checking one first would drop the other, and the dropped marker is
         # the one a reader would have to know about: precedence is not a way
         # to record two facts.
-        return "global_using_static"
+        return GLOBAL_USING_STATIC
     if static:
-        return "using_static"
+        return USING_STATIC
     if is_global:
-        return "global_using"
-    return "using"
+        return GLOBAL_USING
+    return USING
 
 
 def _add(out: list[ImportEdge], module: str, kind: str, node: Node) -> None:

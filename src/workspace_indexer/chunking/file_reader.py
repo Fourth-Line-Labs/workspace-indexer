@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from fnmatch import fnmatch
 
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.discovery.pdf_text import extract_pages
 from workspace_indexer.models import FileKind, SourceFile, sha256_text
@@ -77,14 +78,11 @@ def read_source(
             kind = FileKind.OPAQUE
         else:
             try:
-                # utf-8-sig, not utf-8: it strips a leading byte-order mark and
-                # is otherwise identical. Visual Studio writes one on almost
-                # everything -- 376 of 479 .cs files in one real workspace --
-                # and a stray U+FEFF is not whitespace to a regex, so every
-                # line-anchored pattern silently fails on the first line. That
-                # cost the Razor route scanner three quarters of its matches
-                # before anyone noticed the character was there.
-                text = raw.decode("utf-8-sig")
+                # Shared with the graph backfill, which reads the same files by
+                # a different route: see `decode_source` for why it is
+                # `utf-8-sig` and why it decodes bytes rather than opening in
+                # text mode.
+                text = decode_source(raw)
             except UnicodeDecodeError as exc:
                 log.debug("read.binary_downgrade", reason="undecodable", error=str(exc.reason))
                 kind = FileKind.OPAQUE

@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from workspace_indexer.graph import SUPPORTED, ImportScanner
+from workspace_indexer.graph.import_scanner import KINDS
 from workspace_indexer.graph.parse import parse
 from workspace_indexer.obs.logging import get_logger
 
@@ -191,3 +192,29 @@ def test_the_csharp_directive_form_is_kept() -> None:
         ("using", "MyApp.Data"),
         ("using", "MyApp.Other"),
     ]
+
+
+def test_every_kind_the_scanner_emits_is_a_declared_one() -> None:
+    """`kind` is a contract across three modules -- this scanner, the decline
+    set in the pipeline, and `ImportEdge`'s own documentation. A new form added
+    here without the others learning about it would be resolved as though it
+    were a plain import, which is how `using static` came to be resolved as a
+    namespace."""
+    sources = {
+        "python": "import os\nfrom pathlib import Path\n",
+        "typescript": "import { a } from './a';\nexport { b } from './b';\n",
+        "csharp": (
+            "global using System.Linq;\n"
+            "using static MyApp.Helpers;\n"
+            "global using static MyApp.Both;\n"
+            "using MyApp.Data;\n"
+        ),
+    }
+    scanner = ImportScanner()
+    emitted = {
+        edge.kind for language, source in sources.items() for edge in scanner.scan(source, language)
+    }
+    assert emitted <= KINDS, f"undeclared kinds: {sorted(emitted - KINDS)}"
+    # And the declaration is not a superset nobody produces: every C# form is
+    # exercised above, so a stale entry shows up as an unreached one.
+    assert {"using", "using_static", "global_using", "global_using_static"} <= emitted

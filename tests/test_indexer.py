@@ -20,10 +20,13 @@ from tests.conftest import ConfigFactory
 from tests.fake_embedding_backend import FakeEmbeddingBackend
 from tests.fake_sparse_backend import FakeSparseBackend
 from workspace_indexer.chunking import ChunkerRegistry
+from workspace_indexer.chunking.file_reader import read_source
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.classification import RuleClassifier
 from workspace_indexer.config import Settings, WorkspaceConfig
+from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.embedding.embedding_service import EmbeddingService
-from workspace_indexer.models import EmbeddingSpace, SearchFilters
+from workspace_indexer.models import EmbeddingSpace, FileKind, SearchFilters
 from workspace_indexer.pipeline import Indexer
 from workspace_indexer.state import Manifest
 from workspace_indexer.storage.qdrant_store import QdrantStore
@@ -1161,32 +1164,50 @@ async def test_a_static_using_is_declined_rather_than_resolved(
     await harness.indexer().run()
 
     found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
-    assert [(d.module, d.resolved, d.resolved_by) for d in found] == [("MyApp.Util", False, None)]
-
-
-async def test_a_byte_order_mark_does_not_change_what_the_backfill_sees(
-    harness: Harness, workspace: Path
-) -> None:
-    """`read_source` decodes `utf-8-sig` because Visual Studio writes a BOM on
-    almost every .cs file. The backfill reads the same files, so it decodes the
-    same way -- otherwise the two paths hand the same grammar different bytes
-    depending which one reached the file first."""
-    src = workspace / "repo_one" / "src"
-    (src / "Repo.cs").write_text(
-        "namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8-sig"
-    )
-    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8-sig")
-    await harness.indexer().run()
-
-    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
-        older.execute("DELETE FROM namespace_declarations")
-        older.execute("UPDATE files SET graph_version = 0")
-
-    await harness.indexer().run()
-
-    assert harness.manifest.namespace_targets("workspace", "repo_one", "MyApp.Data") == [
-        "repo_one/src/Repo.cs"
+    # `declined`, not absent: "no resolver here can answer this" has to stay
+    # distinguishable from "not resolved yet", or the edge is re-offered every
+    # run and counted in a denominator measuring the resolver's reach.
+    assert [(d.module, d.resolved, d.resolved_by) for d in found] == [
+        ("MyApp.Util", False, "declined")
     ]
+
+
+def test_the_backfill_decodes_a_file_exactly_as_the_pipeline_does(tmp_path: Path) -> None:
+    """Byte-for-byte, not "close enough to parse the same".
+
+    Visual Studio writes both a BOM and CRLF on almost every .cs file, and the
+    two decodings differ on both: `read_text` would keep the mark and translate
+    the line endings. Neither difference changes what this grammar extracts --
+    a BOM'd file still yields its namespace, which is why the obvious
+    end-to-end assertion passes either way and proves nothing. So this compares
+    the decoded text itself, which is the invariant the comment claims.
+    """
+    path = tmp_path / "Repo.cs"
+    path.write_bytes("namespace MyApp.Data;\r\npublic class Repo {}\r\n".encode("utf-8-sig"))
+
+    candidate = FileCandidate(
+        root_label="workspace",
+        unit="workspace",
+        abs_path=path,
+        rel_path="Repo.cs",
+        kind=FileKind.CODE,
+        language="csharp",
+        size=path.stat().st_size,
+        mtime_ns=path.stat().st_mtime_ns,
+    )
+    through_the_pipeline = read_source(candidate, ())
+    assert through_the_pipeline is not None
+
+    # The decoder both paths call, rather than the rule written out twice. A
+    # test comparing two expressions I wrote here would pass whatever the
+    # backfill actually does, which is the weakness this file has been bitten
+    # by three times: it would assert the property and not the code.
+    through_the_backfill = decode_source(path.read_bytes())
+    assert through_the_backfill == through_the_pipeline.text
+    # Both halves of the difference, named so a future edit cannot satisfy the
+    # comparison by weakening one of them.
+    assert "\ufeff" not in through_the_backfill
+    assert "\r\n" in through_the_backfill
 
 
 async def test_the_backfill_re_extracts_imports_not_only_the_new_edge(
@@ -1240,4 +1261,4 @@ async def test_a_file_using_a_module_both_ways_resolves_only_the_resolvable_one(
         if rel_path == "repo_one/src/Startup.cs"
     }
     assert provenance[("MyApp.Data", "using")] == "namespace"
-    assert provenance[("MyApp.Data", "using_static")] is None
+    assert provenance[("MyApp.Data", "using_static")] == "declined"

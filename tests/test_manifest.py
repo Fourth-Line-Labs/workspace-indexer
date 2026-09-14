@@ -1075,7 +1075,7 @@ def test_a_namespace_resolved_using_is_not_offered_for_resolution_again(
     files -- so without the provenance column every run would re-resolve it."""
     _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
 
     pending = [module for _, _, module, _, _, _ in manifest.unresolved_imports()]
     assert "MyApp.Data" not in pending
@@ -1086,7 +1086,7 @@ def test_a_namespace_edge_counts_as_resolved_in_coverage(manifest: Manifest) -> 
     is the opposite of the truth."""
     _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data", "System.Text")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
 
     # Two using edges from the one file that has any; the declaring file
     # imports nothing.
@@ -1103,7 +1103,7 @@ def test_a_namespace_edge_expands_to_one_dependency_per_declaring_file(
     _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     _declare(manifest, "service/Data/Context.cs", "MyApp.Data")
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
 
     found = manifest.dependencies_of(user.root_label, user.rel_path)
     assert [(d.rel_path, d.resolved_by, d.resolved) for d in found] == [
@@ -1135,7 +1135,7 @@ def test_a_using_whose_declaring_files_are_all_gone_reads_as_unresolved(
     than pointing at one that no longer declares the namespace."""
     declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
     manifest.forget_file(declaring.root_label, declaring.rel_path)
 
     found = manifest.dependencies_of(user.root_label, user.rel_path)
@@ -1148,7 +1148,7 @@ def test_the_reverse_edge_finds_users_of_a_declared_namespace(manifest: Manifest
     there is no `resolved_path` to match on."""
     declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
 
     importers = manifest.dependents_of(declaring.root_label, declaring.rel_path)
     assert [(d.rel_path, d.module) for d in importers] == [("service/Web/Startup.cs", "MyApp.Data")]
@@ -1159,7 +1159,9 @@ def test_the_reverse_edge_stays_inside_the_unit(manifest: Manifest) -> None:
     the resolver never claimed otherwise."""
     declaring = _declare(manifest, "service/Data/Repo.cs", "MyApp.Data")
     outsider = _use(manifest, "library/Web/Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(outsider.root_label, outsider.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(
+        outsider.root_label, outsider.rel_path, "MyApp.Data", kind="using"
+    )
 
     assert manifest.dependents_of(declaring.root_label, declaring.rel_path) == []
 
@@ -1173,7 +1175,7 @@ def test_a_root_level_file_resolves_the_same_way_both_views_do(manifest: Manifes
     """
     _declare(manifest, "Repo.cs", "MyApp.Data")
     user = _use(manifest, "Startup.cs", "MyApp.Data")
-    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data", kind="using")
 
     resolver = NamespaceResolver(manifest.namespaces_by_unit())
     assert resolver.targets("MyApp.Data", root_label="repo_one", from_path="Startup.cs") == [
@@ -1246,3 +1248,34 @@ def test_a_path_edge_resolved_before_provenance_existed_is_backfilled(tmp_path: 
     with Manifest(database) as reopened:
         found = reopened.dependencies_of("repo_one", "service/app.py")
         assert [(d.rel_path, d.resolved_by) for d in found] == [("service/helper.py", "path")]
+
+
+def test_a_declined_edge_is_counted_by_neither_coverage_surface(manifest: Manifest) -> None:
+    """`declined` is terminal, not pending.
+
+    Before it existed, a `using static` sat in the resolution denominator and
+    in `unclassified` -- the queue for the next rule -- for ever, so two
+    surfaces reported a resolver as falling short of a reach it was never
+    trying for, and a work queue grew with work no rule at this rung can do.
+    """
+    _declare(manifest, "service/Helpers.cs", "MyApp.Util")
+    user = _lang_source("service/Startup.cs", "csharp")
+    manifest.record_file(user, chunker="code", chunker_version=1)
+    manifest.record_imports(
+        user.root_label,
+        user.rel_path,
+        [
+            ImportEdge(module="MyApp.Util", kind="using_static", is_relative=False, line=1),
+            ImportEdge(module="System.Text", kind="using", is_relative=False, line=2),
+        ],
+    )
+    manifest.mark_declined(user.root_label, user.rel_path, "MyApp.Util", kind="using_static")
+    manifest.record_origins([(user.root_label, user.rel_path, "System.Text", "framework")])
+
+    resolved, total = manifest.resolution_coverage()["csharp"]
+    assert (resolved, total) == (0, 1)
+
+    coverage = manifest.origin_coverage()["csharp"]
+    assert coverage.total == 1
+    assert coverage.unclassified == 0
+    assert coverage.framework == 1

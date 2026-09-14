@@ -28,10 +28,10 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-import tree_sitter_language_pack as tslp
-from tree_sitter import Node
+from tree_sitter import Node, Tree
 
 from workspace_indexer.config.graph_section import DEFAULT_HTTP_CLIENTS
+from workspace_indexer.graph.parse import parse
 from workspace_indexer.graph.route_call import RouteCall
 from workspace_indexer.graph.route_declaration import RouteDeclaration
 from workspace_indexer.obs.logging import get_logger
@@ -85,22 +85,27 @@ class RouteScanner:
         self._clients = frozenset(http_clients)
         self._pages_dir = razor_pages_dir
 
-    def declarations(self, text: str, language: str, rel_path: str) -> list[RouteDeclaration]:
+    def declarations(
+        self, text: str, language: str, rel_path: str, tree: Tree | None = None
+    ) -> list[RouteDeclaration]:
+        """`tree` is the already-parsed source, when the caller has one.
+
+        A C# file is read by three walkers -- imports, namespaces and routes --
+        and parsing is the expensive half of each. Passing the tree in is what
+        makes that one parse rather than three.
+        """
         if rel_path.endswith((".cshtml", ".razor")):
             return self._razor(text, rel_path)
         if language not in DECLARES or not text:
             return []
-        return self._csharp(text)
+        return self._csharp(text, tree)
 
-    def calls(self, text: str, language: str) -> list[RouteCall]:
+    def calls(self, text: str, language: str, tree: Tree | None = None) -> list[RouteCall]:
         if language not in CALLS or not text:
             return []
-        try:
-            tree = tslp.get_parser(language).parse(text.encode())  # pyright: ignore[reportArgumentType]
-        except Exception as exc:
-            # A grammar cache miss with no network must cost the edges, never
-            # the file. Same rule the import scanner follows.
-            log.debug("routes.parse_failed", language=language, error=str(exc))
+        if tree is None:
+            tree = parse(text, language, log=log)
+        if tree is None:
             return []
         found: list[RouteCall] = []
         for node in _walk(tree.root_node):
@@ -189,11 +194,10 @@ class RouteScanner:
         segments = [*tail[:-1], *([] if stem.lower() == "index" else [stem])]
         return "/".join(segments)
 
-    def _csharp(self, text: str) -> list[RouteDeclaration]:
-        try:
-            tree = tslp.get_parser("csharp").parse(text.encode())  # pyright: ignore[reportArgumentType]
-        except Exception as exc:
-            log.debug("routes.parse_failed", language="csharp", error=str(exc))
+    def _csharp(self, text: str, tree: Tree | None = None) -> list[RouteDeclaration]:
+        if tree is None:
+            tree = parse(text, "csharp", log=log)
+        if tree is None:
             return []
         return self._controllers(tree.root_node, text) + self._minimal_apis(tree.root_node, text)
 

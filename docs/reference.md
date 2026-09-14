@@ -801,19 +801,28 @@ One honest caveat about the numbers: for C#, first-party membership is
 *decided* by resolution — a using is known to be ours because a namespace
 declared here matched it — so the first-party column reads 100% by
 construction and cannot fail. The figure that carries information for C# is the
-share of all using-edges that resolve, which is bounded by how much of the
-repository's own code it references: measured at 42% and 54% on the two C#
+share of resolvable using-edges that resolve, which is bounded by how much of
+the repository's own code it references: measured at 42% and 54% on the two C#
 corpora, the rest being the framework and NuGet packages. Python and the JS
 family do not share this property: there a first-party edge is identified by
 its shape, so an unresolved one is a visible defect.
 
-`using static My.Thing` names a **type**, not a namespace, so it is declined
-rather than resolved — answering it from the namespace table would claim an
-edge of a kind this rung does not extract. `global using` applies to every file
-in its compilation unit; it resolves like any other using, but the propagation
-to the rest of the project is not modelled. Both are recorded under their own
-`kind`, so what is and is not handled is visible in the data rather than
-flattened into one label.
+Four directive forms are recorded, each under its own `kind`, so what is and is
+not handled is visible in the data rather than flattened into one label:
+
+| `kind` | resolved? |
+|---|---|
+| `using` | yes, against namespaces declared in the same repository |
+| `global_using` | yes, the same way — but it applies to every file in its compilation unit, and that propagation is not modelled |
+| `using_static` | **no.** It names a *type*, and answering it from the namespace table would claim an edge of a kind this rung does not extract |
+| `global_using_static` | **no**, for the same reason — the global marker does not make a type resolvable |
+
+A declined edge is marked `resolved_by: declined`, a terminal state rather than
+a pending one. That distinction is the point of recording it: an unresolved
+edge may resolve once something else lands, and a declined one never will, so
+it is excluded from the resolution rate and from the origin buckets. Counting
+it as `unclassified` would grow the queue for the next rule with work no rule
+at this rung can do.
 
 **Not** resolved, deliberately: packages (`react`, `pydantic`, `Azure.Identity`)
 and tsconfig path aliases (`@/lib/utils`). Those need a build system or a

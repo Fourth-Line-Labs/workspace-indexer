@@ -110,6 +110,14 @@ class Manifest:
             "imports": {"resolved_path": "TEXT", "origin": "TEXT", "resolved_by": "TEXT"},
             "route_edges": {"resolved_root": "TEXT"},
         }
+        # One transaction for the whole migration. SQLite's DDL is
+        # transactional, and the repair below is only correct as part of the
+        # statement that adds the column: as three autocommits, a crash between
+        # them leaves the column present and unrepaired, `PRAGMA table_info`
+        # then reports it on the next open, and the repair never runs again.
+        # The version this replaced was slow and self-healing; this one has to
+        # be atomic to be neither.
+        self._db.execute("BEGIN")
         added: set[str] = set()
         for table, columns in additions.items():
             existing = {str(row["name"]) for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -140,6 +148,7 @@ class Manifest:
                 "UPDATE imports SET resolved_by = 'path' "
                 "WHERE resolved_path IS NOT NULL AND resolved_by IS NULL"
             )
+        self._db.execute("COMMIT")
 
         # The retirement pass asks for namespace-resolved edges on every run,
         # and `imports` is the largest table here. Partial, because that is the
@@ -462,7 +471,11 @@ class Manifest:
             "SELECT DISTINCT i.root_label, i.rel_path, i.module, i.is_relative, "
             "i.resolved_path, i.resolved_by, f.language "
             "FROM imports i JOIN files f "
-            "ON f.root_label = i.root_label AND f.rel_path = i.rel_path"
+            "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
+            # A declined edge has no origin worth deciding: it is ours or not,
+            # and either way no rule here can follow it. Classifying it would
+            # park it in `unclassified`, which is the queue for the next rule.
+            "WHERE COALESCE(i.resolved_by, '') != 'declined'"
         )
         return [
             (
@@ -610,8 +623,29 @@ class Manifest:
             (resolved, root_label, rel_path, module),
         )
 
+    def mark_declined(self, root_label: str, rel_path: str, module: str, *, kind: str) -> None:
+        """Record that no resolver at this rung can answer this edge.
+
+        A terminal state, not a resolution: `using static My.Thing` names a
+        type, and no amount of namespace data will ever make it resolvable
+        here. Without somewhere to say so, the edge sits in the same bucket as
+        a package reference waiting for a manifest reader -- re-offered every
+        run, and counted in the denominator of a rate that reads as "how much
+        the resolver reaches" while containing edges it cannot reach by
+        construction.
+
+        Distinguished from resolution everywhere it matters: coverage counts
+        `declined` as neither resolved nor outstanding, and the origin
+        classifier is never asked about it.
+        """
+        self._db.execute(
+            "UPDATE imports SET resolved_by = 'declined' "
+            "WHERE root_label = ? AND rel_path = ? AND module = ? AND kind = ?",
+            (root_label, rel_path, module, kind),
+        )
+
     def mark_namespace_resolved(
-        self, root_label: str, rel_path: str, module: str, kind: str = "using"
+        self, root_label: str, rel_path: str, module: str, *, kind: str
     ) -> None:
         """Record that this using reaches declared files, without naming one.
 
@@ -625,6 +659,12 @@ class Manifest:
         in two directive forms, one resolvable and one not -- and keying
         without the form would mark the declined row resolved without it ever
         having been offered.
+
+        Required rather than defaulted, and keyword-only: a default would be
+        exercised only by tests, and a caller who forgot it would under-mark
+        silently -- the edge re-offered every run and coverage undercounting,
+        with nothing failing. This method exists in its current shape because
+        ignoring `kind` was a bug once already.
         """
         self._db.execute(
             "UPDATE imports SET resolved_by = 'namespace' "
@@ -984,14 +1024,21 @@ class Manifest:
         `resolved_path`. It reaches files -- several of them -- and reporting
         it as unresolved would say the C# resolver does nothing, which is the
         opposite of the truth.
+
+        A declined edge is in neither half. It is not resolved and it is not
+        outstanding: no resolver at this rung can ever answer it, so leaving it
+        in the denominator would report a reach the resolver was never trying
+        for.
         """
         rows = self._db.execute(
             "SELECT f.language AS language, COUNT(*) AS total, "
-            "SUM(CASE WHEN i.resolved_path IS NOT NULL OR i.resolved_by IS NOT NULL "
+            "SUM(CASE WHEN i.resolved_path IS NOT NULL "
+            "OR (i.resolved_by IS NOT NULL AND i.resolved_by != 'declined') "
             "THEN 1 ELSE 0 END) AS resolved "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
-            "WHERE f.language IS NOT NULL GROUP BY f.language"
+            "WHERE f.language IS NOT NULL AND COALESCE(i.resolved_by, '') != 'declined' "
+            "GROUP BY f.language"
         )
         return {str(r["language"]): (int(r["resolved"] or 0), int(r["total"])) for r in rows}
 
@@ -1001,6 +1048,11 @@ class Manifest:
         Counted in SQL rather than by loading the edges, because the only
         question asked of this is how many, and the table is the one thing that
         already knows.
+
+        Declined edges are excluded from every column. They are not
+        unclassified -- `unclassified` is the queue for the next rule, and no
+        rule at this rung will ever claim a `using static` -- so counting them
+        there would grow a work queue with work nobody can do.
         """
         rows = self._db.execute(
             """
@@ -1016,7 +1068,9 @@ class Manifest:
                    SUM(i.origin IS NULL) AS unrecorded
             FROM imports i JOIN files f
             ON f.root_label = i.root_label AND f.rel_path = i.rel_path
-            WHERE f.language IS NOT NULL GROUP BY f.language
+            WHERE f.language IS NOT NULL
+              AND COALESCE(i.resolved_by, '') != 'declined'
+            GROUP BY f.language
             """
         )
         return {

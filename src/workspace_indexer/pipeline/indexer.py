@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from workspace_indexer.chunking import ChunkerRegistry, prefetch_languages, read_source
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.classification import Classification, DocumentClassifier
 from workspace_indexer.config import Settings, WorkspaceConfig
 from workspace_indexer.discovery import Walker
@@ -24,6 +25,7 @@ from workspace_indexer.graph import (
     NamespaceScanner,
 )
 from workspace_indexer.graph.import_resolver import ImportResolver
+from workspace_indexer.graph.import_scanner import GLOBAL_USING_STATIC, USING_STATIC
 from workspace_indexer.graph.import_scanner import SUPPORTED as IMPORT_LANGUAGES
 from workspace_indexer.graph.namespace_scanner import SUPPORTED as NAMESPACE_LANGUAGES
 from workspace_indexer.graph.origin_classifier import OriginClassifier
@@ -34,6 +36,7 @@ from workspace_indexer.models import EmbeddingSpace, RunStats, SourceFile
 from workspace_indexer.obs.context import bound, file_context, new_run_id
 from workspace_indexer.obs.logging import get_logger
 from workspace_indexer.pipeline.pending_file import PendingFile
+from workspace_indexer.pipeline.scanned_file import ScannedFile
 from workspace_indexer.secrets import SecretWithheldError
 from workspace_indexer.state import IndexDecision, Manifest
 from workspace_indexer.storage.vector_store import VectorStore
@@ -44,6 +47,11 @@ log = get_logger("workspace_indexer.pipeline")
 # a new kind of edge is added, which is what lets `_backfill_graph` find the
 # files whose rows predate it without re-embedding anything.
 GRAPH_VERSION = 1
+
+# Files per transaction in the backfill. Large enough that the fsync cost is
+# amortised, small enough that the write lock is released often on a run that
+# reads thousands of files -- the MCP server writes to this same database.
+_BACKFILL_BATCH = 500
 
 # The languages whose extraction changed at `GRAPH_VERSION`. The backfill
 # re-reads only these, and stamps only what it re-read: a file it never touched
@@ -59,7 +67,7 @@ GRAPH_LANGUAGES = IMPORT_LANGUAGES | NAMESPACE_LANGUAGES
 # C# directive forms this rung cannot resolve. `using static` names a *type*,
 # and a namespace table cannot answer that; answering it from the namespace
 # containing the type would claim an edge of a kind nothing here extracts.
-DECLINED_CSHARP_KINDS = frozenset({"using_static", "global_using_static"})
+DECLINED_CSHARP_KINDS = frozenset({USING_STATIC, GLOBAL_USING_STATIC})
 
 # Kinds no resolver at this rung can answer, in any language. Kept separate
 # from the C# set so the reason stays attached to the language that has it.
@@ -399,9 +407,9 @@ class Indexer:
             imports=self._imports.scan(source.text or "", source.language or "", tree),
             namespaces=self._namespaces.scan(source.text or "", source.language or "", tree),
             routes=self._routes.declarations(
-                source.text or "", source.language or "", source.rel_path
+                source.text or "", source.language or "", source.rel_path, tree
             ),
-            calls=self._routes.calls(source.text or "", source.language or ""),
+            calls=self._routes.calls(source.text or "", source.language or "", tree),
         )
 
     def _classify(self, source: SourceFile) -> Classification:
@@ -587,12 +595,18 @@ class Indexer:
         parses those files once, records their edges, and stamps the version so
         the next run skips them again. No embedding, no API calls.
 
-        Every kind of edge the file produces is re-recorded, not only the new
-        one. Recording namespaces alone and stamping the version would assert
-        that the file's *imports* were extracted at this version too -- and on
-        an index built before the directive forms were kept apart, those rows
-        still say `using` where they mean `using static`, which is exactly the
-        fabricated edge resolution declines to make.
+        Every kind of edge the file produces is re-recorded -- imports,
+        namespaces and routes -- not only the new one. Stamping the version
+        asserts that the file's whole graph was extracted at it, and a partial
+        re-scan leaves older rows behind a claim that they are current: an
+        index built before the directive forms were kept apart holds
+        `using static` rows labelled `using`, and those would then resolve.
+
+        Reading and parsing happen outside the transaction, which is the
+        difference between this and `_flush`: that one does its slow work
+        first and holds the write lock only for the writes. A transaction
+        spanning the reads would hold it for the length of the whole upgrade
+        run, and the MCP server writes to this same database.
         """
         stale = self._manifest.files_missing_graph_version(
             GRAPH_VERSION, languages=GRAPH_VERSION_LANGUAGES, only_root=only_root
@@ -602,43 +616,21 @@ class Indexer:
 
         scanned = 0
         skipped = 0
-        # One transaction for the batch, like `_flush` and `_classify_origins`.
-        # Three autocommits per file across every C# file in an index is the
-        # fsync storm `begin()`'s docstring warns about, on precisely the
-        # first-upgrade workload this exists for. Redoing a file is idempotent,
-        # so a crash mid-batch costs the batch and nothing else.
-        self._manifest.begin()
-        try:
-            for root_label, rel_path, abs_path, language in stale:
-                with file_context(root_label, rel_path):
-                    # utf-8-sig, matching `read_source`: Visual Studio writes a
-                    # BOM on almost every .cs file, and decoding these two
-                    # paths differently would hand the same grammar different
-                    # bytes depending on which one reached the file.
-                    try:
-                        text = Path(abs_path).read_text(encoding="utf-8-sig")
-                    except (OSError, UnicodeDecodeError):
-                        # Gone or unreadable since it was indexed. The orphan
-                        # pass owns that decision; this one declines to guess,
-                        # and counts it so a run of futile reads is visible.
-                        skipped += 1
-                        continue
-                    tree = parse(text, language, log=log)
-                    if tree is None:
-                        skipped += 1
-                        continue
-                    self._manifest.record_imports(
-                        root_label, rel_path, self._imports.scan(text, language, tree)
-                    )
-                    self._manifest.record_namespaces(
-                        root_label, rel_path, self._namespaces.scan(text, language, tree)
-                    )
-                    self._manifest.set_graph_version(root_label, rel_path, GRAPH_VERSION)
-                    scanned += 1
-            self._manifest.commit()
-        except Exception:
-            self._manifest.rollback()
-            raise
+        batch: list[ScannedFile] = []
+        for root_label, rel_path, abs_path, language in stale:
+            with file_context(root_label, rel_path):
+                extracted = self._rescan(root_label, rel_path, abs_path, language)
+            if extracted is None:
+                skipped += 1
+                continue
+            batch.append(extracted)
+            if len(batch) >= _BACKFILL_BATCH:
+                self._record_rescanned(batch)
+                scanned += len(batch)
+                batch = []
+        if batch:
+            self._record_rescanned(batch)
+            scanned += len(batch)
 
         log.info(
             "graph.backfilled",
@@ -649,6 +641,58 @@ class Indexer:
             "new kind of edge does not need a paid reindex to appear; skipped "
             "files are unreadable or unparseable and are retried next run",
         )
+
+    def _rescan(
+        self, root_label: str, rel_path: str, abs_path: str, language: str
+    ) -> ScannedFile | None:
+        """Every graph edge one file contributes, or None if it cannot be read.
+
+        Decoded by the same function `read_source` uses, rather than by the
+        same rule written out twice: the walk and this pass read the same files
+        by different routes, and a decoder they agree on only by convention is
+        one an edit can separate without anything failing.
+        """
+        try:
+            text = decode_source(Path(abs_path).read_bytes())
+        except (OSError, UnicodeDecodeError):
+            # Gone or unreadable since it was indexed. The orphan pass owns
+            # that decision; this one declines to guess, and counts it so a run
+            # of futile reads is visible rather than silent.
+            return None
+        tree = parse(text, language, log=log)
+        if tree is None:
+            return None
+        return ScannedFile(
+            root_label=root_label,
+            rel_path=rel_path,
+            imports=self._imports.scan(text, language, tree),
+            namespaces=self._namespaces.scan(text, language, tree),
+            routes=self._routes.declarations(text, language, rel_path, tree),
+            calls=self._routes.calls(text, language, tree),
+        )
+
+    def _record_rescanned(self, batch: list[ScannedFile]) -> None:
+        """One transaction per chunk, holding the write lock only for writes.
+
+        Chunked rather than one transaction for the whole pass: per-statement
+        autocommit is the fsync storm `begin()` warns about, and a single
+        transaction across the whole upgrade run would block every other writer
+        for its duration. A crash costs the current chunk, which the next run
+        redoes -- nothing in it was stamped.
+        """
+        self._manifest.begin()
+        try:
+            for file in batch:
+                self._manifest.record_imports(file.root_label, file.rel_path, file.imports)
+                self._manifest.record_namespaces(file.root_label, file.rel_path, file.namespaces)
+                self._manifest.record_routes(
+                    file.root_label, file.rel_path, file.routes, file.calls
+                )
+                self._manifest.set_graph_version(file.root_label, file.rel_path, GRAPH_VERSION)
+            self._manifest.commit()
+        except Exception:
+            self._manifest.rollback()
+            raise
 
     def _resolve_imports(self, stats: RunStats) -> None:
         """Point each import edge at the file it names, where that is decidable.
@@ -666,13 +710,29 @@ class Indexer:
         namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
         retired = self._retire_stale_namespace_edges(namespaces)
 
-        # Declined kinds are dropped before anything counts them. Leaving them
-        # in means every run re-fetches an edge it will never resolve and
-        # reports a resolution rate against a denominator that includes it --
-        # "not resolvable at this rung" reading as "not resolved yet".
-        pending = [
-            edge for edge in self._manifest.unresolved_imports() if edge[5] not in DECLINED_KINDS
-        ]
+        # Declined kinds are recorded as declined and dropped before anything
+        # counts them. Leaving them pending means every run re-fetches an edge
+        # it can never resolve and reports a resolution rate against a
+        # denominator that includes it -- "not resolvable at this rung" reading
+        # as "not resolved yet", on every surface that counts.
+        outstanding: list[tuple[str, str, str, str, bool, str]] = []
+        declined = 0
+        for edge in self._manifest.unresolved_imports():
+            root_label, rel_path, module, _, _, kind = edge
+            if kind in DECLINED_KINDS:
+                self._manifest.mark_declined(root_label, rel_path, module, kind=kind)
+                declined += 1
+                continue
+            outstanding.append(edge)
+        if declined:
+            log.info(
+                "graph.declined",
+                edges=declined,
+                detail="directive forms no resolver at this rung can answer -- a C# "
+                "`using static` names a type, not a namespace",
+            )
+
+        pending = outstanding
         if not pending:
             if retired:
                 log.info("graph.namespace_edges_retired", edges=retired)
@@ -683,19 +743,16 @@ class Indexer:
         by_namespace = 0
         for root_label, rel_path, module, language, is_relative, kind in pending:
             if language == "csharp":
-                if kind in DECLINED_CSHARP_KINDS:
-                    # `using static My.Thing` names a *type*, not a namespace,
-                    # so a namespace table cannot answer it. Declining is the
-                    # honest result: resolving it against the namespace that
-                    # contains the type would claim an edge of a kind this
-                    # rung does not extract.
-                    continue
+                # Declined kinds were dropped when `pending` was built -- one
+                # guard, not two, so a kind added to the declined set cannot be
+                # handled by one check and missed by the other.
+                #
                 # A `using` names a namespace, which is declared across N
                 # files. Nothing is written into `resolved_path` -- the targets
                 # are derived by join when something asks, because there is one
                 # column and N answers.
                 if namespaces.targets(module, root_label=root_label, from_path=rel_path):
-                    self._manifest.mark_namespace_resolved(root_label, rel_path, module, kind)
+                    self._manifest.mark_namespace_resolved(root_label, rel_path, module, kind=kind)
                     resolved += 1
                     by_namespace += 1
                 continue
