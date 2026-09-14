@@ -807,10 +807,27 @@ corpora, the rest being the framework and NuGet packages. Python and the JS
 family do not share this property: there a first-party edge is identified by
 its shape, so an unresolved one is a visible defect.
 
+`using static My.Thing` names a **type**, not a namespace, so it is declined
+rather than resolved — answering it from the namespace table would claim an
+edge of a kind this rung does not extract. `global using` applies to every file
+in its compilation unit; it resolves like any other using, but the propagation
+to the rest of the project is not modelled. Both are recorded under their own
+`kind`, so what is and is not handled is visible in the data rather than
+flattened into one label.
+
 **Not** resolved, deliberately: packages (`react`, `pydantic`, `Azure.Identity`)
 and tsconfig path aliases (`@/lib/utils`). Those need a build system or a
 manifest reader; until then they resolve to nothing rather than to something
 plausible. An unresolved edge is not a missing dependency.
+
+**An existing index collects new edge kinds without being re-embedded.** The
+decision ladder skips an unchanged file before it is ever read, so a new kind
+of edge — namespace declarations, here — would otherwise stay uncollected until
+every file happened to change, or until a `--force` run paid to re-embed the
+workspace for metadata no model is involved in. Each file records which version
+of graph extraction produced its edges, and a run reads and re-scans the files
+whose version is behind. It costs one read and one parse per stale file, once,
+and `graph.backfilled` reports how many.
 
 The reverse edge — *which files import this one* — spans every repository in
 the workspace, which is what a per-project language server cannot answer.

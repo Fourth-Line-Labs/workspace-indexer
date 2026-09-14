@@ -128,9 +128,12 @@ CREATE TABLE IF NOT EXISTS namespace_declarations (
         ON DELETE CASCADE
 );
 
--- The join goes symbol -> files, so that is the index.
+-- The join goes symbol -> files, so that is the index -- and every selective
+-- query pins the root as well, so the root is in it. A namespace declared in
+-- two repositories of one workspace is the ordinary case this exists to keep
+-- apart, and a symbol-only index would read both before filtering.
 CREATE INDEX IF NOT EXISTS namespace_declarations_by_symbol
-    ON namespace_declarations (symbol);
+    ON namespace_declarations (symbol, root_label);
 
 -- Endpoints a file exposes, and endpoints a file calls.
 --

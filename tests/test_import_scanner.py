@@ -6,6 +6,8 @@ the module string exactly as written, with no attempt to turn it into a file.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from workspace_indexer.graph import SUPPORTED, ImportScanner
@@ -141,3 +143,36 @@ def test_every_supported_language_parses(scanner: ImportScanner, language: str) 
 def test_empty_and_broken_input_do_not_raise(scanner: ImportScanner) -> None:
     assert scanner.scan("", "python") == []
     assert isinstance(scanner.scan("from . import", "python"), list)
+
+
+def test_a_tree_too_deep_to_walk_costs_the_edges_not_the_run() -> None:
+    """Same exposure as the namespace scanner, and the same contract: a stack
+    exhausted by deeply nested source must cost this file's edges rather than
+    the run that is walking thousands of files."""
+    source = "using System;\n" + "class C { " * 400 + "}" * 400
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(120)
+    try:
+        assert ImportScanner().scan(source, "csharp") == []
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+def test_the_csharp_directive_form_is_kept() -> None:
+    """All four forms were recorded as `using`, which reads as one thing and
+    is three: `using static` names a type rather than a namespace, and a
+    `global using` applies to the whole compilation unit rather than to the
+    file declaring it. Flattening them hides both facts in the data."""
+    source = (
+        "global using System.Linq;\n"
+        "using static MyApp.Helpers;\n"
+        "using MyApp.Data;\n"
+        "using Alias = MyApp.Other;\n"
+    )
+    found = [(e.kind, e.module) for e in ImportScanner().scan(source, "csharp")]
+    assert found == [
+        ("global_using", "System.Linq"),
+        ("using_static", "MyApp.Helpers"),
+        ("using", "MyApp.Data"),
+        ("using", "MyApp.Other"),
+    ]

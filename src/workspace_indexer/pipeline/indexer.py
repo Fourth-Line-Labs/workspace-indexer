@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 
 from workspace_indexer.chunking import ChunkerRegistry, prefetch_languages, read_source
 from workspace_indexer.classification import Classification, DocumentClassifier
@@ -23,7 +24,9 @@ from workspace_indexer.graph import (
     NamespaceScanner,
 )
 from workspace_indexer.graph.import_resolver import ImportResolver
+from workspace_indexer.graph.namespace_scanner import SUPPORTED as NAMESPACE_LANGUAGES
 from workspace_indexer.graph.origin_classifier import OriginClassifier
+from workspace_indexer.graph.parse import parse
 from workspace_indexer.graph.route_resolver import RouteResolver
 from workspace_indexer.graph.route_scanner import RouteScanner
 from workspace_indexer.models import EmbeddingSpace, RunStats, SourceFile
@@ -35,6 +38,11 @@ from workspace_indexer.state import IndexDecision, Manifest
 from workspace_indexer.storage.vector_store import VectorStore
 
 log = get_logger("workspace_indexer.pipeline")
+
+# What version of graph extraction a file's edges were produced by. Bumped when
+# a new kind of edge is added, which is what lets `_backfill_graph` find the
+# files whose rows predate it without re-embedding anything.
+GRAPH_VERSION = 1
 
 # When a run would remove this share of a root's recorded files, and at least
 # this many, it stops and asks instead. Deleting from an absence is right when
@@ -262,6 +270,7 @@ class Indexer:
                 unobservable=walker.unobservable_roots,
                 allow_deletes=allow_deletes,
             )
+            self._backfill_graph(only_root=only_root)
             self._resolve_imports(stats)
             self._classify_origins()
             self._resolve_routes(stats)
@@ -345,6 +354,8 @@ class Indexer:
             # remove them -- a rebuild that quietly accumulates orphans is
             # worse than no rebuild.
             delta = delta.model_copy(update={"to_upsert": produced, "unchanged": []})
+
+        tree = parse(source.text or "", source.language or "", log=log) if source.text else None
         return PendingFile(
             source=source,
             chunker=chunker.name,
@@ -352,8 +363,11 @@ class Indexer:
             chunks=chunks,
             delta=delta,
             classification=classification,
-            imports=self._imports.scan(source.text or "", source.language or ""),
-            namespaces=self._namespaces.scan(source.text or "", source.language or ""),
+            # One parse, both walkers. Imports and the namespaces they resolve
+            # against are two questions about the same syntax tree, and
+            # parsing is the expensive half of asking either.
+            imports=self._imports.scan(source.text or "", source.language or "", tree),
+            namespaces=self._namespaces.scan(source.text or "", source.language or "", tree),
             routes=self._routes.declarations(
                 source.text or "", source.language or "", source.rel_path
             ),
@@ -429,6 +443,7 @@ class Indexer:
         self._manifest.record_chunks(file.chunks, self._space.slug())
         self._manifest.record_imports(source.root_label, source.rel_path, file.imports)
         self._manifest.record_namespaces(source.root_label, source.rel_path, file.namespaces)
+        self._manifest.set_graph_version(source.root_label, source.rel_path, GRAPH_VERSION)
         self._manifest.record_routes(source.root_label, source.rel_path, file.routes, file.calls)
         self._manifest.record_space(
             source.root_label, source.rel_path, self._space.slug(), len(file.chunks)
@@ -528,6 +543,52 @@ class Indexer:
         )
         return True
 
+    def _backfill_graph(self, *, only_root: str | None) -> None:
+        """Collect edges from files the walk never opened.
+
+        The decision ladder is the point of this project: an unchanged file is
+        skipped before it is read, so it costs a stat() and nothing else. That
+        is also why adding a new kind of edge would otherwise do nothing to an
+        existing index -- namespace declarations are extracted when a file is
+        indexed, and on a workspace that has not changed, no file is.
+
+        The alternative is `--force`, which re-embeds everything and costs real
+        money to collect metadata that needs no model at all. This reads and
+        parses those files once, records their edges, and stamps the version so
+        the next run skips them again. No embedding, no API calls.
+        """
+        stale = self._manifest.files_missing_graph_version(
+            GRAPH_VERSION, languages=NAMESPACE_LANGUAGES, only_root=only_root
+        )
+        if not stale:
+            return
+
+        scanned = 0
+        for root_label, rel_path, abs_path, language in stale:
+            with file_context(root_label, rel_path):
+                try:
+                    text = Path(abs_path).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    # Gone or unreadable since it was indexed. The orphan pass
+                    # owns that decision; this one just declines to guess.
+                    continue
+                tree = parse(text, language, log=log)
+                if tree is None:
+                    continue
+                self._manifest.record_namespaces(
+                    root_label, rel_path, self._namespaces.scan(text, language, tree)
+                )
+                self._manifest.set_graph_version(root_label, rel_path, GRAPH_VERSION)
+                scanned += 1
+
+        log.info(
+            "graph.backfilled",
+            files=scanned,
+            version=GRAPH_VERSION,
+            detail="edges collected from files the walk skipped as unchanged, so a "
+            "new kind of edge does not need a paid reindex to appear",
+        )
+
     def _resolve_imports(self, stats: RunStats) -> None:
         """Point each import edge at the file it names, where that is decidable.
 
@@ -535,16 +596,33 @@ class Indexer:
         has not been reached yet, so resolving per file would depend on walk
         order and give different answers on different runs.
         """
+        # Built before the early return, and retirement run before it too. A
+        # workspace whose every edge resolves -- a C# repository referencing
+        # only itself -- leaves `pending` empty, and a deleted declaring file
+        # would then keep its `resolved_by` flag for ever: coverage would go on
+        # counting it, and nothing else clears it. The guard is about work to
+        # do, not about work to undo.
+        namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
+        retired = self._retire_stale_namespace_edges(namespaces)
+
         pending = self._manifest.unresolved_imports()
         if not pending:
+            if retired:
+                log.info("graph.namespace_edges_retired", edges=retired)
             return
 
         resolver = ImportResolver(self._manifest.files_by_unit())
-        namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
         resolved = 0
         by_namespace = 0
-        for root_label, rel_path, module, language, is_relative in pending:
+        for root_label, rel_path, module, language, is_relative, kind in pending:
             if language == "csharp":
+                if kind == "using_static":
+                    # `using static My.Thing` names a *type*, not a namespace,
+                    # so a namespace table cannot answer it. Declining is the
+                    # honest result: resolving it against the namespace that
+                    # contains the type would claim an edge of a kind this
+                    # rung does not extract.
+                    continue
                 # A `using` names a namespace, which is declared across N
                 # files. Nothing is written into `resolved_path` -- the targets
                 # are derived by join when something asks, because there is one
@@ -561,8 +639,6 @@ class Indexer:
             if target is not None:
                 self._manifest.set_resolved_path(root_label, rel_path, module, target)
                 resolved += 1
-
-        retired = self._retire_stale_namespace_edges(namespaces)
 
         stats.imports_resolved = resolved
         log.info(

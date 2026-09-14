@@ -18,7 +18,7 @@ from tests.conftest import make_source
 from workspace_indexer.chunking.chunk_factory import build_chunk
 from workspace_indexer.classification import Classification
 from workspace_indexer.discovery.file_candidate import FileCandidate
-from workspace_indexer.graph import ImportEdge, NamespaceDeclaration
+from workspace_indexer.graph import ImportEdge, NamespaceDeclaration, NamespaceResolver
 from workspace_indexer.models import Chunk, DocumentType, FileKind, RunStats, SourceFile
 from workspace_indexer.state.index_decision import IndexDecision
 from workspace_indexer.state.manifest import Manifest
@@ -1077,7 +1077,7 @@ def test_a_namespace_resolved_using_is_not_offered_for_resolution_again(
     user = _use(manifest, "service/Web/Startup.cs", "MyApp.Data")
     manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
 
-    pending = [module for _, _, module, _, _ in manifest.unresolved_imports()]
+    pending = [module for _, _, module, _, _, _ in manifest.unresolved_imports()]
     assert "MyApp.Data" not in pending
 
 
@@ -1162,3 +1162,80 @@ def test_the_reverse_edge_stays_inside_the_unit(manifest: Manifest) -> None:
     manifest.mark_namespace_resolved(outsider.root_label, outsider.rel_path, "MyApp.Data")
 
     assert manifest.dependents_of(declaring.root_label, declaring.rel_path) == []
+
+
+def test_a_root_level_file_resolves_the_same_way_both_views_do(manifest: Manifest) -> None:
+    """`unit_of` returns "" for a file at the repository root, which no prefix
+    test can express -- so the in-memory resolver found these declarations,
+    marked the edge resolved, and every query here then reported it unresolved.
+    Permanently: retirement consults the resolver, so the flag was never
+    cleared either.
+    """
+    _declare(manifest, "Repo.cs", "MyApp.Data")
+    user = _use(manifest, "Startup.cs", "MyApp.Data")
+    manifest.mark_namespace_resolved(user.root_label, user.rel_path, "MyApp.Data")
+
+    resolver = NamespaceResolver(manifest.namespaces_by_unit())
+    assert resolver.targets("MyApp.Data", root_label="repo_one", from_path="Startup.cs") == [
+        "Repo.cs"
+    ]
+    assert manifest.namespace_targets("repo_one", "", "MyApp.Data") == ["Repo.cs"]
+    assert [d.rel_path for d in manifest.dependencies_of("repo_one", "Startup.cs")] == ["Repo.cs"]
+    assert [d.rel_path for d in manifest.dependents_of("repo_one", "Repo.cs")] == ["Startup.cs"]
+
+
+def test_a_root_level_unit_does_not_swallow_a_subdirectory(manifest: Manifest) -> None:
+    """The empty unit is a unit, not a wildcard: a file in `service/` belongs
+    to `service`, and must not answer for the root."""
+    _declare(manifest, "service/Repo.cs", "MyApp.Data")
+    assert manifest.namespace_targets("repo_one", "", "MyApp.Data") == []
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == ["service/Repo.cs"]
+
+
+def test_one_file_declaring_a_namespace_twice_is_one_target(manifest: Manifest) -> None:
+    """Two blocks in one file is legal C# and two rows under a key that
+    includes `line`. The in-memory view and the query have to agree, or a
+    caller counting fan-out double-counts depending which it asked."""
+    source = _lang_source("service/Repo.cs", "csharp")
+    manifest.record_file(source, chunker="code", chunker_version=1)
+    manifest.record_namespaces(
+        source.root_label,
+        source.rel_path,
+        [
+            NamespaceDeclaration(symbol="MyApp.Data", line=1),
+            NamespaceDeclaration(symbol="MyApp.Data", line=20),
+        ],
+    )
+
+    resolver = NamespaceResolver(manifest.namespaces_by_unit())
+    assert resolver.targets("MyApp.Data", root_label="repo_one", from_path="service/A.cs") == [
+        "service/Repo.cs"
+    ]
+    assert manifest.namespace_targets("repo_one", "service", "MyApp.Data") == ["service/Repo.cs"]
+
+
+def test_a_path_edge_resolved_before_provenance_existed_is_backfilled(tmp_path: Path) -> None:
+    """`resolved_by` says how an edge resolved, and absent means it reached
+    nothing. A row written before the column existed carries a path and no
+    provenance, which is the one combination that must not occur -- and
+    resolution never revisits a resolved edge, so it would have been permanent.
+    """
+    database = tmp_path / "manifest.sqlite3"
+    with Manifest(database) as manifest:
+        target = _lang_source("service/helper.py", "python")
+        manifest.record_file(target, chunker="code", chunker_version=1)
+        user = _lang_source("service/app.py", "python")
+        manifest.record_file(user, chunker="code", chunker_version=1)
+        manifest.record_imports(user.root_label, user.rel_path, [_edge(".helper")])
+        manifest.set_resolved_path(user.root_label, user.rel_path, ".helper", target.rel_path)
+
+    # Put the file back into the state an older version left it in: a target,
+    # and nothing saying how. Done against the database rather than through the
+    # manifest, because the manifest has no way to write that combination --
+    # which is the property being protected.
+    with sqlite3.connect(database) as old_version:
+        old_version.execute("UPDATE imports SET resolved_by = NULL")
+
+    with Manifest(database) as reopened:
+        found = reopened.dependencies_of("repo_one", "service/app.py")
+        assert [(d.rel_path, d.resolved_by) for d in found] == [("service/helper.py", "path")]

@@ -402,9 +402,9 @@ def test_an_unresolved_first_party_edge_is_called_a_gap_not_a_package(
 
 
 def test_a_language_with_no_first_party_edges_reports_no_rate(manifest: Manifest) -> None:
-    """The C# position today: edges extracted, none identified as first-party
-    because that needs the namespace declarations table. No rate is not the
-    same as a rate of zero, and must not read as one."""
+    """A file whose only edge is the framework: extracted, and none of them
+    first-party. No rate is not the same as a rate of zero, and must not read
+    as one."""
     add_file(manifest, "app/Thing.cs", language="csharp")
     add_import(manifest, "app/Thing.cs", "System.Text", line=1)
     manifest.record_origins([(ROOT, "app/Thing.cs", "System.Text", ImportOrigin.FRAMEWORK.value)])

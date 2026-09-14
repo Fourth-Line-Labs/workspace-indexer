@@ -42,6 +42,22 @@ log = get_logger("workspace_indexer.state.manifest")
 _SCHEMA = Path(__file__).with_name("schema.sql")
 
 
+def _unit_expression(column: str) -> str:
+    """SQL for `unit_of`, applied to a path column.
+
+    The same derivation, not an approximation of it. A prefix test cannot
+    express it: `unit_of` returns "" for a file at the repository root, and
+    `rel_path = '' OR rel_path LIKE '/%'` is false for every relative path --
+    so a root-level declaration was found by the in-memory resolver, marked
+    resolved, and then reported unresolved by every query here. The two views
+    have to compute the unit the same way or they disagree permanently.
+    """
+    return (
+        f"(CASE WHEN instr({column}, '/') = 0 THEN '' "
+        f"ELSE substr({column}, 1, instr({column}, '/') - 1) END)"
+    )
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -71,6 +87,12 @@ class Manifest:
                 "doc_confidence": "REAL NOT NULL DEFAULT 0.0",
                 "doc_reason": "TEXT NOT NULL DEFAULT ''",
                 "classifier_version": "INTEGER NOT NULL DEFAULT 0",
+                # Which version of graph extraction produced this file's edges.
+                # 0 means "before extraction was versioned", which is what
+                # every row in an existing index says -- and is why adding a
+                # new kind of edge does not require re-embedding the workspace
+                # to collect it. See `Indexer._backfill_graph`.
+                "graph_version": "INTEGER NOT NULL DEFAULT 0",
             },
             "runs": {
                 "unpriced_requests": "INTEGER NOT NULL DEFAULT 0",
@@ -100,6 +122,25 @@ class Manifest:
         # create on every database predating the column and take the open with
         # it. The reverse edge everyone wants is "which files import this one".
         self._db.execute("CREATE INDEX IF NOT EXISTS imports_by_target ON imports (resolved_path)")
+
+        # Rows resolved before `resolved_by` existed carry a path and no
+        # provenance, which is the one combination the column is not allowed to
+        # mean: absent provenance says the edge reached nothing. Left alone
+        # they would never be revisited -- resolution only offers unresolved
+        # edges -- so the contradiction would be permanent.
+        self._db.execute(
+            "UPDATE imports SET resolved_by = 'path' "
+            "WHERE resolved_path IS NOT NULL AND resolved_by IS NULL"
+        )
+
+        # The retirement pass asks for namespace-resolved edges on every run,
+        # and `imports` is the largest table here. Partial, because that is the
+        # whole of the question and a full index would carry every other edge
+        # for nothing.
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS imports_namespace_resolved "
+            "ON imports (root_label, rel_path, module) WHERE resolved_by = 'namespace'"
+        )
 
     def __enter__(self) -> Manifest:
         return self
@@ -362,16 +403,20 @@ class Manifest:
             for r in rows
         ]
 
-    def unresolved_imports(self) -> list[tuple[str, str, str, str, bool]]:
+    def unresolved_imports(self) -> list[tuple[str, str, str, str, bool, str]]:
         """Every edge with no target yet, as (root_label, rel_path, module,
-        language, is_relative).
+        language, is_relative, kind).
 
         Resolution needs the whole file set, so it runs after the walk rather
         than per file -- an import can name a file that has not been reached
         yet.
+
+        `kind` comes along because the directive form decides whether an edge
+        is resolvable at all: `using static` names a type rather than a
+        namespace, and a namespace table cannot answer it.
         """
         rows = self._db.execute(
-            "SELECT i.root_label, i.rel_path, i.module, i.is_relative, f.language "
+            "SELECT i.root_label, i.rel_path, i.module, i.is_relative, i.kind, f.language "
             "FROM imports i JOIN files f "
             "ON f.root_label = i.root_label AND f.rel_path = i.rel_path "
             "WHERE i.resolved_path IS NULL AND i.resolved_by IS NULL"
@@ -383,6 +428,7 @@ class Manifest:
                 str(r["module"]),
                 str(r["language"] or ""),
                 bool(r["is_relative"]),
+                str(r["kind"]),
             )
             for r in rows
         ]
@@ -423,6 +469,43 @@ class Manifest:
             for r in rows
         ]
 
+    def files_missing_graph_version(
+        self, version: int, *, languages: Iterable[str], only_root: str | None = None
+    ) -> list[tuple[str, str, str, str]]:
+        """Indexed files whose edges predate `version`, with where to read them.
+
+        Returned as (root_label, rel_path, abs_path, language). The point is
+        that a new kind of edge -- namespace declarations, here -- can be
+        collected from an existing index without re-embedding anything: the
+        decision ladder skips an unchanged file before it is ever read, so
+        without this the table for a new edge stays empty until every file
+        happens to change.
+        """
+        wanted = sorted(set(languages))
+        if not wanted:
+            return []
+        placeholders = ",".join("?" for _ in wanted)
+        clauses = [f"language IN ({placeholders})", "graph_version < ?"]
+        parameters: list[object] = [*wanted, version]
+        if only_root is not None:
+            clauses.append("root_label = ?")
+            parameters.append(only_root)
+        rows = self._db.execute(
+            f"SELECT root_label, rel_path, abs_path, language FROM files "
+            f"WHERE {' AND '.join(clauses)} ORDER BY root_label, rel_path",
+            parameters,
+        )
+        return [
+            (str(r["root_label"]), str(r["rel_path"]), str(r["abs_path"]), str(r["language"]))
+            for r in rows
+        ]
+
+    def set_graph_version(self, root_label: str, rel_path: str, version: int) -> None:
+        self._db.execute(
+            "UPDATE files SET graph_version = ? WHERE root_label = ? AND rel_path = ?",
+            (version, root_label, rel_path),
+        )
+
     def record_namespaces(
         self, root_label: str, rel_path: str, declarations: Iterable[NamespaceDeclaration]
     ) -> None:
@@ -460,10 +543,17 @@ class Manifest:
         The resolver's search space, shaped the same way `files_by_unit` is and
         for the same reason: a unit is a repository, and two repositories
         declaring the same namespace must not resolve into each other.
+
+        DISTINCT and ordered, so this agrees with `namespace_targets` on both
+        content and order. A file may legally declare the same namespace twice
+        -- two blocks in one file -- which is two rows under a primary key that
+        includes `line`, and would otherwise hand the resolver the same path
+        twice while the query returned it once.
         """
         grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
         for row in self._db.execute(
-            "SELECT root_label, rel_path, symbol FROM namespace_declarations"
+            "SELECT DISTINCT root_label, rel_path, symbol FROM namespace_declarations "
+            "ORDER BY rel_path"
         ):
             rel = str(row["rel_path"])
             key = (str(row["root_label"]), unit_of(rel))
@@ -479,18 +569,18 @@ class Manifest:
         added or deleted after resolution ran is reflected immediately, with no
         re-resolve pass and no dependence on walk order.
 
-        The unit is matched as the leading path segment, the same derivation
-        `files_by_unit` uses. Compared with `substr` rather than `LIKE` because
-        a repository directory containing `%` or `_` would otherwise match
-        neighbours it has nothing to do with -- `_` is LIKE's single-character
-        wildcard, and a leading-underscore directory name is ordinary.
+        The unit is derived in SQL by the same rule `unit_of` uses in Python,
+        rather than matched as a prefix. A prefix test looks equivalent and is
+        not: the unit of a file at the repository root is "", which no prefix
+        test can express, so a root-level declaration was found by the resolver
+        and never by this query.
         """
         rows = self._db.execute(
             "SELECT rel_path FROM namespace_declarations "
             "WHERE root_label = ? AND symbol = ? "
-            "AND (rel_path = ? OR substr(rel_path, 1, ?) = ?) "
+            f"AND {_unit_expression('rel_path')} = ? "
             "ORDER BY rel_path",
-            (root_label, symbol, unit, len(unit) + 1, f"{unit}/"),
+            (root_label, symbol, unit),
         )
         return sorted({str(r["rel_path"]) for r in rows})
 
@@ -592,17 +682,9 @@ class Manifest:
             # resolver ever claimed. Without it, a second repository in this
             # root declaring the same namespace would import our file
             # according to this query and according to nothing else.
-            "AND (i.rel_path = ? OR substr(i.rel_path, 1, ?) = ?) "
+            f"AND {_unit_expression('i.rel_path')} = ? "
             "ORDER BY rel_path, line",
-            (
-                root_label,
-                rel_path,
-                root_label,
-                rel_path,
-                unit_of(rel_path),
-                len(unit_of(rel_path)) + 1,
-                f"{unit_of(rel_path)}/",
-            ),
+            (root_label, rel_path, root_label, rel_path, unit_of(rel_path)),
         )
         return [
             Dependent(

@@ -13,10 +13,10 @@ and nothing else.
 
 from __future__ import annotations
 
-import tree_sitter_language_pack as tslp
-from tree_sitter import Node
+from tree_sitter import Node, Tree
 
 from workspace_indexer.graph.namespace_declaration import NamespaceDeclaration
+from workspace_indexer.graph.parse import parse
 from workspace_indexer.obs.logging import get_logger
 
 log = get_logger("workspace_indexer.graph.namespaces")
@@ -28,19 +28,27 @@ _DECLARATIONS = frozenset({"namespace_declaration", "file_scoped_namespace_decla
 
 
 class NamespaceScanner:
-    def scan(self, text: str, language: str) -> list[NamespaceDeclaration]:
+    def scan(
+        self, text: str, language: str, tree: Tree | None = None
+    ) -> list[NamespaceDeclaration]:
+        """`tree` is the already-parsed source, when the caller has one -- the
+        import scan of the same file has just produced it."""
         if language not in SUPPORTED or not text:
             return []
-        try:
-            tree = tslp.get_parser(language).parse(text.encode())  # pyright: ignore[reportArgumentType]
-        except Exception as exc:
-            # Same rule as the import scanner: a grammar cache miss with no
-            # network costs the edges, never the file.
-            log.debug("namespaces.parse_failed", language=language, error=str(exc))
+        if tree is None:
+            tree = parse(text, language, log=log)
+        if tree is None:
             return []
 
         found: list[NamespaceDeclaration] = []
-        _walk(tree.root_node, prefix="", out=found)
+        try:
+            _walk(tree.root_node, prefix="", out=found)
+        except RecursionError:
+            # The walk is as exposed as the parse was: deeply nested generated
+            # source exhausts the stack, and the stated rule is that this costs
+            # the declarations rather than the run.
+            log.debug("namespaces.walk_too_deep", language=language)
+            return []
         return found
 
 

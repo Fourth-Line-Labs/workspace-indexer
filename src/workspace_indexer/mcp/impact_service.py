@@ -131,9 +131,10 @@ class ImpactService:
             if not dependents:
                 parts.append(
                     "No indexed file resolves an import to this one. Edges naming a "
-                    "package, a build alias or a namespace are recorded but not "
-                    "resolved to a file, so a dependency expressed that way would "
-                    "not appear here."
+                    "package or a build alias are recorded but not resolved to a "
+                    "file, so a dependency expressed that way would not appear "
+                    "here. A C# `using` naming a namespace declared in this "
+                    "repository does resolve, and would appear."
                 )
             barrels = sorted({d.rel_path for d in dependents if _is_barrel(d.rel_path)})
             if barrels:

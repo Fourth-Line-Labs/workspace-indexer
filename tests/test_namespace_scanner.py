@@ -8,9 +8,13 @@ convention is how a graph comes to be confidently wrong about the rest.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from workspace_indexer.graph import NamespaceScanner
+from workspace_indexer.graph.parse import parse
+from workspace_indexer.obs.logging import get_logger
 
 
 @pytest.fixture
@@ -72,3 +76,30 @@ def test_usings_above_the_declaration_do_not_shift_the_line(
     own line rather than the file's first."""
     source = "using System;\nusing System.Linq;\n\nnamespace MyApp.Services;\n"
     assert [(d.symbol, d.line) for d in scanner.scan(source, "csharp")] == [("MyApp.Services", 4)]
+
+
+def test_a_tree_the_caller_already_parsed_is_reused(scanner: NamespaceScanner) -> None:
+    """Imports and the namespaces they resolve against are two questions about
+    one syntax tree, and parsing is the expensive half of asking either. The
+    answer must not depend on which way it was called."""
+    source = "namespace MyApp.Data;\nusing System;\npublic class Repo {}\n"
+    tree = parse(source, "csharp", log=get_logger("tests.namespace_scanner"))
+    assert tree is not None
+    assert [d.symbol for d in scanner.scan(source, "csharp", tree)] == ["MyApp.Data"]
+    assert scanner.scan(source, "csharp", tree) == scanner.scan(source, "csharp")
+
+
+def test_a_tree_too_deep_to_walk_costs_the_declarations_not_the_run(
+    scanner: NamespaceScanner,
+) -> None:
+    """Machine-generated source, or tree-sitter's error recovery on a
+    half-written file, can nest deeply enough to exhaust the stack. The walk
+    was outside the guard that promises this costs the edges and never the
+    file, so a `RecursionError` escaped into the indexing run."""
+    source = "namespace A;\n" + "class C { " * 400 + "}" * 400
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(120)
+    try:
+        assert scanner.scan(source, "csharp") == []
+    finally:
+        sys.setrecursionlimit(limit)
