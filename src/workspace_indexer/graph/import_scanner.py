@@ -122,9 +122,17 @@ def _csharp_kind(node: Node) -> str:
     instead of hidden by a shared label.
     """
     keywords = {child.type for child in node.children}
-    if "static" in keywords:
+    static = "static" in keywords
+    is_global = "global" in keywords
+    if static and is_global:
+        # `global using static X;` is legal and carries both keywords.
+        # Checking one first would drop the other, and the dropped marker is
+        # the one a reader would have to know about: precedence is not a way
+        # to record two facts.
+        return "global_using_static"
+    if static:
         return "using_static"
-    if "global" in keywords:
+    if is_global:
         return "global_using"
     return "using"
 

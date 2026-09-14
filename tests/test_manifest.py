@@ -1219,6 +1219,11 @@ def test_a_path_edge_resolved_before_provenance_existed_is_backfilled(tmp_path: 
     nothing. A row written before the column existed carries a path and no
     provenance, which is the one combination that must not occur -- and
     resolution never revisits a resolved edge, so it would have been permanent.
+
+    The repair belongs to the migration that adds the column and runs only
+    there: afterwards nothing can produce that combination, and repeating the
+    check would scan the largest table on every open to learn there is nothing
+    to do. So the fixture removes the column rather than blanking it.
     """
     database = tmp_path / "manifest.sqlite3"
     with Manifest(database) as manifest:
@@ -1229,12 +1234,14 @@ def test_a_path_edge_resolved_before_provenance_existed_is_backfilled(tmp_path: 
         manifest.record_imports(user.root_label, user.rel_path, [_edge(".helper")])
         manifest.set_resolved_path(user.root_label, user.rel_path, ".helper", target.rel_path)
 
-    # Put the file back into the state an older version left it in: a target,
-    # and nothing saying how. Done against the database rather than through the
-    # manifest, because the manifest has no way to write that combination --
-    # which is the property being protected.
+    # Put the file back into the state an older version left it in: resolved
+    # rows, and no column saying how. Dropping the column is what makes this
+    # the upgrade path rather than a hand-made contradiction -- the repair runs
+    # in the migration that adds the column, so a database that already has it
+    # is not the case under test.
     with sqlite3.connect(database) as old_version:
-        old_version.execute("UPDATE imports SET resolved_by = NULL")
+        old_version.execute("DROP INDEX IF EXISTS imports_namespace_resolved")
+        old_version.execute("ALTER TABLE imports DROP COLUMN resolved_by")
 
     with Manifest(database) as reopened:
         found = reopened.dependencies_of("repo_one", "service/app.py")

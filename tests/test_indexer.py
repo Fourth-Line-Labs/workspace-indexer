@@ -78,6 +78,16 @@ async def harness(config_for: ConfigFactory, tmp_path: Path) -> AsyncIterator[Ha
     await client.close()
 
 
+def _origin_rows(harness: Harness) -> list[tuple[str, str, str, str, bool, str, str | None]]:
+    """Every edge with its directive form and provenance, read from the
+    manifest rather than from a private attribute."""
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as database:
+        rows = database.execute(
+            "SELECT root_label, rel_path, module, '', is_relative, kind, resolved_by FROM imports"
+        ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2]), str(r[3]), bool(r[4]), str(r[5]), r[6]) for r in rows]
+
+
 def _embedded(harness: Harness) -> int:
     return sum(len(batch) for batch in harness.backend.batches)
 
@@ -1152,3 +1162,82 @@ async def test_a_static_using_is_declined_rather_than_resolved(
 
     found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
     assert [(d.module, d.resolved, d.resolved_by) for d in found] == [("MyApp.Util", False, None)]
+
+
+async def test_a_byte_order_mark_does_not_change_what_the_backfill_sees(
+    harness: Harness, workspace: Path
+) -> None:
+    """`read_source` decodes `utf-8-sig` because Visual Studio writes a BOM on
+    almost every .cs file. The backfill reads the same files, so it decodes the
+    same way -- otherwise the two paths hand the same grammar different bytes
+    depending which one reached the file first."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text(
+        "namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8-sig"
+    )
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8-sig")
+    await harness.indexer().run()
+
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE files SET graph_version = 0")
+
+    await harness.indexer().run()
+
+    assert harness.manifest.namespace_targets("workspace", "repo_one", "MyApp.Data") == [
+        "repo_one/src/Repo.cs"
+    ]
+
+
+async def test_the_backfill_re_extracts_imports_not_only_the_new_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """Stamping the version asserts the file's *whole* graph was extracted at
+    it. An index built before the directive forms were kept apart holds
+    `using static` rows labelled `using`; recording namespaces alone and
+    stamping would leave those rows to be namespace-resolved -- the fabricated
+    edge the decline exists to prevent.
+    """
+    src = workspace / "repo_one" / "src"
+    (src / "Helpers.cs").write_text(
+        "namespace MyApp.Util;\npublic static class Helpers {}\n", encoding="utf-8"
+    )
+    (src / "Startup.cs").write_text(
+        "using static MyApp.Util;\npublic class S {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    # The older index: namespaces uncollected, and the directive form flattened
+    # to `using` the way extraction recorded it before this change.
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE imports SET kind = 'using', resolved_by = NULL")
+        older.execute("UPDATE files SET graph_version = 0")
+
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    assert [(d.module, d.resolved) for d in found] == [("MyApp.Util", False)]
+
+
+async def test_a_file_using_a_module_both_ways_resolves_only_the_resolvable_one(
+    harness: Harness, workspace: Path
+) -> None:
+    """`using X;` and `using static X;` are the same module in two directive
+    forms, one answerable by a namespace table and one not. The resolution mark
+    is keyed on the form as well, or the declined row is marked resolved by its
+    twin without ever being offered."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text(
+        "using MyApp.Data;\nusing static MyApp.Data;\npublic class S {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    provenance = {
+        (module, kind): resolved_by
+        for _, rel_path, module, _, _, kind, resolved_by in _origin_rows(harness)
+        if rel_path == "repo_one/src/Startup.cs"
+    }
+    assert provenance[("MyApp.Data", "using")] == "namespace"
+    assert provenance[("MyApp.Data", "using_static")] is None

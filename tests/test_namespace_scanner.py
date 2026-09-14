@@ -97,9 +97,16 @@ def test_a_tree_too_deep_to_walk_costs_the_declarations_not_the_run(
     was outside the guard that promises this costs the edges and never the
     file, so a `RecursionError` escaped into the indexing run."""
     source = "namespace A;\n" + "class C { " * 400 + "}" * 400
+    # Parsed *before* the limit drops. `parse` catches every exception,
+    # `RecursionError` included, so a cold grammar import under a lowered limit
+    # would return None and this would pass without the walk guard ever firing
+    # -- the assertion holding for a reason unrelated to its name.
+    tree = parse(source, "csharp", log=get_logger("tests.namespace_scanner"))
+    assert tree is not None
+
     limit = sys.getrecursionlimit()
     sys.setrecursionlimit(120)
     try:
-        assert scanner.scan(source, "csharp") == []
+        assert scanner.scan(source, "csharp", tree) == []
     finally:
         sys.setrecursionlimit(limit)

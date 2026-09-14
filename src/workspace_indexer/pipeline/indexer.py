@@ -24,6 +24,7 @@ from workspace_indexer.graph import (
     NamespaceScanner,
 )
 from workspace_indexer.graph.import_resolver import ImportResolver
+from workspace_indexer.graph.import_scanner import SUPPORTED as IMPORT_LANGUAGES
 from workspace_indexer.graph.namespace_scanner import SUPPORTED as NAMESPACE_LANGUAGES
 from workspace_indexer.graph.origin_classifier import OriginClassifier
 from workspace_indexer.graph.parse import parse
@@ -43,6 +44,26 @@ log = get_logger("workspace_indexer.pipeline")
 # a new kind of edge is added, which is what lets `_backfill_graph` find the
 # files whose rows predate it without re-embedding anything.
 GRAPH_VERSION = 1
+
+# The languages whose extraction changed at `GRAPH_VERSION`. The backfill
+# re-reads only these, and stamps only what it re-read: a file it never touched
+# keeps version 0 and is picked up by the next bump, which is the conservative
+# direction -- claiming currency this pass has not earned is what would make a
+# future bump silently skip work.
+GRAPH_VERSION_LANGUAGES = NAMESPACE_LANGUAGES
+
+# Every language some graph scanner reads. A file outside this set is
+# never parsed for the graph, because nothing would look at the tree.
+GRAPH_LANGUAGES = IMPORT_LANGUAGES | NAMESPACE_LANGUAGES
+
+# C# directive forms this rung cannot resolve. `using static` names a *type*,
+# and a namespace table cannot answer that; answering it from the namespace
+# containing the type would claim an edge of a kind nothing here extracts.
+DECLINED_CSHARP_KINDS = frozenset({"using_static", "global_using_static"})
+
+# Kinds no resolver at this rung can answer, in any language. Kept separate
+# from the C# set so the reason stays attached to the language that has it.
+DECLINED_KINDS = DECLINED_CSHARP_KINDS
 
 # When a run would remove this share of a root's recorded files, and at least
 # this many, it stops and asks instead. Deleting from an absence is right when
@@ -355,7 +376,16 @@ class Indexer:
             # worse than no rebuild.
             delta = delta.model_copy(update={"to_upsert": produced, "unchanged": []})
 
-        tree = parse(source.text or "", source.language or "", log=log) if source.text else None
+        # Parsed here so imports and namespaces share one tree -- but only for
+        # a language a scanner will actually read. Parsing every file first
+        # would hand markdown, JSON and YAML a full tree-sitter pass whose
+        # result both scanners discard, and log a failure per file for every
+        # language with no grammar at all.
+        tree = (
+            parse(source.text, source.language, log=log)
+            if source.text and source.language in GRAPH_LANGUAGES
+            else None
+        )
         return PendingFile(
             source=source,
             chunker=chunker.name,
@@ -556,37 +586,68 @@ class Indexer:
         money to collect metadata that needs no model at all. This reads and
         parses those files once, records their edges, and stamps the version so
         the next run skips them again. No embedding, no API calls.
+
+        Every kind of edge the file produces is re-recorded, not only the new
+        one. Recording namespaces alone and stamping the version would assert
+        that the file's *imports* were extracted at this version too -- and on
+        an index built before the directive forms were kept apart, those rows
+        still say `using` where they mean `using static`, which is exactly the
+        fabricated edge resolution declines to make.
         """
         stale = self._manifest.files_missing_graph_version(
-            GRAPH_VERSION, languages=NAMESPACE_LANGUAGES, only_root=only_root
+            GRAPH_VERSION, languages=GRAPH_VERSION_LANGUAGES, only_root=only_root
         )
         if not stale:
             return
 
         scanned = 0
-        for root_label, rel_path, abs_path, language in stale:
-            with file_context(root_label, rel_path):
-                try:
-                    text = Path(abs_path).read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    # Gone or unreadable since it was indexed. The orphan pass
-                    # owns that decision; this one just declines to guess.
-                    continue
-                tree = parse(text, language, log=log)
-                if tree is None:
-                    continue
-                self._manifest.record_namespaces(
-                    root_label, rel_path, self._namespaces.scan(text, language, tree)
-                )
-                self._manifest.set_graph_version(root_label, rel_path, GRAPH_VERSION)
-                scanned += 1
+        skipped = 0
+        # One transaction for the batch, like `_flush` and `_classify_origins`.
+        # Three autocommits per file across every C# file in an index is the
+        # fsync storm `begin()`'s docstring warns about, on precisely the
+        # first-upgrade workload this exists for. Redoing a file is idempotent,
+        # so a crash mid-batch costs the batch and nothing else.
+        self._manifest.begin()
+        try:
+            for root_label, rel_path, abs_path, language in stale:
+                with file_context(root_label, rel_path):
+                    # utf-8-sig, matching `read_source`: Visual Studio writes a
+                    # BOM on almost every .cs file, and decoding these two
+                    # paths differently would hand the same grammar different
+                    # bytes depending on which one reached the file.
+                    try:
+                        text = Path(abs_path).read_text(encoding="utf-8-sig")
+                    except (OSError, UnicodeDecodeError):
+                        # Gone or unreadable since it was indexed. The orphan
+                        # pass owns that decision; this one declines to guess,
+                        # and counts it so a run of futile reads is visible.
+                        skipped += 1
+                        continue
+                    tree = parse(text, language, log=log)
+                    if tree is None:
+                        skipped += 1
+                        continue
+                    self._manifest.record_imports(
+                        root_label, rel_path, self._imports.scan(text, language, tree)
+                    )
+                    self._manifest.record_namespaces(
+                        root_label, rel_path, self._namespaces.scan(text, language, tree)
+                    )
+                    self._manifest.set_graph_version(root_label, rel_path, GRAPH_VERSION)
+                    scanned += 1
+            self._manifest.commit()
+        except Exception:
+            self._manifest.rollback()
+            raise
 
         log.info(
             "graph.backfilled",
             files=scanned,
+            skipped=skipped,
             version=GRAPH_VERSION,
             detail="edges collected from files the walk skipped as unchanged, so a "
-            "new kind of edge does not need a paid reindex to appear",
+            "new kind of edge does not need a paid reindex to appear; skipped "
+            "files are unreadable or unparseable and are retried next run",
         )
 
     def _resolve_imports(self, stats: RunStats) -> None:
@@ -605,7 +666,13 @@ class Indexer:
         namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
         retired = self._retire_stale_namespace_edges(namespaces)
 
-        pending = self._manifest.unresolved_imports()
+        # Declined kinds are dropped before anything counts them. Leaving them
+        # in means every run re-fetches an edge it will never resolve and
+        # reports a resolution rate against a denominator that includes it --
+        # "not resolvable at this rung" reading as "not resolved yet".
+        pending = [
+            edge for edge in self._manifest.unresolved_imports() if edge[5] not in DECLINED_KINDS
+        ]
         if not pending:
             if retired:
                 log.info("graph.namespace_edges_retired", edges=retired)
@@ -616,7 +683,7 @@ class Indexer:
         by_namespace = 0
         for root_label, rel_path, module, language, is_relative, kind in pending:
             if language == "csharp":
-                if kind == "using_static":
+                if kind in DECLINED_CSHARP_KINDS:
                     # `using static My.Thing` names a *type*, not a namespace,
                     # so a namespace table cannot answer it. Declining is the
                     # honest result: resolving it against the namespace that
@@ -628,7 +695,7 @@ class Indexer:
                 # are derived by join when something asks, because there is one
                 # column and N answers.
                 if namespaces.targets(module, root_label=root_label, from_path=rel_path):
-                    self._manifest.mark_namespace_resolved(root_label, rel_path, module)
+                    self._manifest.mark_namespace_resolved(root_label, rel_path, module, kind)
                     resolved += 1
                     by_namespace += 1
                 continue

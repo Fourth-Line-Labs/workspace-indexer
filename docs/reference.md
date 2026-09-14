@@ -824,10 +824,20 @@ plausible. An unresolved edge is not a missing dependency.
 decision ladder skips an unchanged file before it is ever read, so a new kind
 of edge — namespace declarations, here — would otherwise stay uncollected until
 every file happened to change, or until a `--force` run paid to re-embed the
-workspace for metadata no model is involved in. Each file records which version
-of graph extraction produced its edges, and a run reads and re-scans the files
-whose version is behind. It costs one read and one parse per stale file, once,
-and `graph.backfilled` reports how many.
+workspace for metadata no model is involved in.
+
+Each file records which version of graph extraction produced its edges. A run
+re-reads the files that are behind **in the languages the change affects** —
+C# for this one — and re-extracts *everything* that file contributes to the
+graph, not only the new edge kind: stamping the version asserts the whole of
+that file's graph was produced at it, and a partial re-scan would leave older
+rows behind a claim that they are current. Files in untouched languages keep
+their old version and are picked up by the next change that needs them, which
+is the conservative direction.
+
+It costs one read and one parse per stale file, once. `graph.backfilled`
+reports how many were scanned and how many were skipped as unreadable or
+unparseable — those are retried on the next run rather than stamped.
 
 The reverse edge — *which files import this one* — spans every repository in
 the workspace, which is what a per-project language server cannot answer.

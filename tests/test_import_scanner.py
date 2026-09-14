@@ -11,6 +11,8 @@ import sys
 import pytest
 
 from workspace_indexer.graph import SUPPORTED, ImportScanner
+from workspace_indexer.graph.parse import parse
+from workspace_indexer.obs.logging import get_logger
 
 
 @pytest.fixture
@@ -150,10 +152,17 @@ def test_a_tree_too_deep_to_walk_costs_the_edges_not_the_run() -> None:
     exhausted by deeply nested source must cost this file's edges rather than
     the run that is walking thousands of files."""
     source = "using System;\n" + "class C { " * 400 + "}" * 400
+    # Parsed before the limit drops, and handed in, so the only thing that can
+    # exhaust the stack is the walk. `parse` swallows `RecursionError` along
+    # with everything else, so parsing under the lowered limit would make this
+    # pass through the wrong guard.
+    tree = parse(source, "csharp", log=get_logger("tests.import_scanner"))
+    assert tree is not None
+
     limit = sys.getrecursionlimit()
     sys.setrecursionlimit(120)
     try:
-        assert ImportScanner().scan(source, "csharp") == []
+        assert ImportScanner().scan(source, "csharp", tree) == []
     finally:
         sys.setrecursionlimit(limit)
 
@@ -166,6 +175,7 @@ def test_the_csharp_directive_form_is_kept() -> None:
     source = (
         "global using System.Linq;\n"
         "using static MyApp.Helpers;\n"
+        "global using static MyApp.Both;\n"
         "using MyApp.Data;\n"
         "using Alias = MyApp.Other;\n"
     )
@@ -173,6 +183,11 @@ def test_the_csharp_directive_form_is_kept() -> None:
     assert found == [
         ("global_using", "System.Linq"),
         ("using_static", "MyApp.Helpers"),
+        # Both markers, not the first one checked: `global using static` is
+        # legal and carries both, and a precedence rule would record one fact
+        # and silently drop the other -- the dropped one being what decides
+        # whether resolution declines the edge.
+        ("global_using_static", "MyApp.Both"),
         ("using", "MyApp.Data"),
         ("using", "MyApp.Other"),
     ]

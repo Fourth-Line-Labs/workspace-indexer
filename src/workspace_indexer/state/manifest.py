@@ -110,11 +110,13 @@ class Manifest:
             "imports": {"resolved_path": "TEXT", "origin": "TEXT", "resolved_by": "TEXT"},
             "route_edges": {"resolved_root": "TEXT"},
         }
+        added: set[str] = set()
         for table, columns in additions.items():
             existing = {str(row["name"]) for row in self._db.execute(f"PRAGMA table_info({table})")}
             for column, definition in columns.items():
                 if column not in existing:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                    added.add(f"{table}.{column}")
                     log.info("state.migrated", table=table, column=column)
 
         # After the columns exist, never before: schema.sql runs first, so an
@@ -128,10 +130,16 @@ class Manifest:
         # mean: absent provenance says the edge reached nothing. Left alone
         # they would never be revisited -- resolution only offers unresolved
         # edges -- so the contradiction would be permanent.
-        self._db.execute(
-            "UPDATE imports SET resolved_by = 'path' "
-            "WHERE resolved_path IS NOT NULL AND resolved_by IS NULL"
-        )
+        #
+        # Only in the run that adds the column. Afterwards nothing can produce
+        # that combination -- `set_resolved_path` writes both -- so repeating it
+        # is a scan of the largest table, per run and per MCP session, to
+        # discover there is nothing to do. No index serves the predicate.
+        if "imports.resolved_by" in added:
+            self._db.execute(
+                "UPDATE imports SET resolved_by = 'path' "
+                "WHERE resolved_path IS NOT NULL AND resolved_by IS NULL"
+            )
 
         # The retirement pass asks for namespace-resolved edges on every run,
         # and `imports` is the largest table here. Partial, because that is the
@@ -602,18 +610,26 @@ class Manifest:
             (resolved, root_label, rel_path, module),
         )
 
-    def mark_namespace_resolved(self, root_label: str, rel_path: str, module: str) -> None:
+    def mark_namespace_resolved(
+        self, root_label: str, rel_path: str, module: str, kind: str = "using"
+    ) -> None:
         """Record that this using reaches declared files, without naming one.
 
         `resolved_path` stays NULL deliberately. Writing one of the N declaring
         files there would make a namespace edge indistinguishable from a path
         edge, which claims a file-level precision the join does not have; the
         targets are derived by `namespace_targets` when something asks.
+
+        Keyed on `kind` as well as the module, unlike `set_resolved_path`. A
+        file may write both `using X;` and `using static X;` -- the same module
+        in two directive forms, one resolvable and one not -- and keying
+        without the form would mark the declined row resolved without it ever
+        having been offered.
         """
         self._db.execute(
             "UPDATE imports SET resolved_by = 'namespace' "
-            "WHERE root_label = ? AND rel_path = ? AND module = ?",
-            (root_label, rel_path, module),
+            "WHERE root_label = ? AND rel_path = ? AND module = ? AND kind = ?",
+            (root_label, rel_path, module, kind),
         )
 
     def namespace_resolved_imports(self) -> list[tuple[str, str, str]]:
