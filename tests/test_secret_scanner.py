@@ -9,6 +9,8 @@ is called, and the value never leaves the scanner.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from workspace_indexer.secrets import SecretFinding, scan, shannon_entropy
@@ -260,3 +262,429 @@ def test_hyphenated_and_underscored_names_read_as_identifiers() -> None:
     assert not scan('"password": "some-long-kebab-cased-name-here"')
     assert not scan('"password": "some_long_snake_cased_name_here"')
     assert scan('"password": "some-long-kebab-c4sed-name~here"')
+
+
+# --- expressions in C#, and credentials inside URLs ------------------------
+#
+# Both halves of #89. The first is a false positive that purged eight tracked
+# files from a live index; the second is a false negative that would have sent
+# a working credential to the embedding provider. Every value here is
+# synthetic.
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The exact shape that purged the eight files: the key matches on
+        # `token`, and the value is an expression the scanner could not see
+        # through because `?.` puts a `?` where it expected a dot.
+        "    MaxOutputTokens = options?.MaxOutputTokens ?? _maxTokens,",
+        "    ClaudeSecretRef = domain?.ClaudeSecretRef,",
+        "    ApiKey = settings?.ApiKey ?? DefaultApiKeyValue,",
+        "var token = context?.Request?.Headers?.Authorization;",
+        # `??` alone, with no member access at all.
+        "    ConnectionString = configured ?? FallbackConnectionValue,",
+    ],
+)
+def test_csharp_null_conditional_expressions_are_not_secrets(line: str) -> None:
+    assert not scan(line)
+
+
+def test_a_real_literal_beside_a_null_conditional_is_still_caught() -> None:
+    """Teaching the scanner about `?.` must not become a way to smuggle a
+    value past it.
+
+    This line used to be flagged for the wrong reason -- `options?.ApiKey`
+    read as a generated value -- which happened to cover the literal after the
+    `??`. Seeing through the expression would have uncovered it, so `??` is
+    now an assignment operator in its own right: it is one.
+    """
+    assert scan(f'    ApiKey = options?.ApiKey ?? "{_WITH_TILDE}",')
+
+
+def test_a_fallback_literal_is_judged_against_the_key_on_the_other_side() -> None:
+    """`ApiKey = configured ?? "<literal>"` is the same hard-coded credential
+    with the name on the far side of the `=`. The assignment rule reads
+    `configured` and stops, so the key has to be carried across the operator --
+    otherwise the one shape a C# default is usually written in is the one shape
+    that escapes."""
+    assert scan(f'    ApiKey = configured ?? "{_HIGH_ENTROPY}";')
+    assert scan(f'    private readonly string _token = opts.Token ?? "{_WITH_TILDE}";')
+
+
+def test_a_fallback_naming_a_variable_is_not_a_credential() -> None:
+    """Carrying the key across must not turn every `??` into a finding: the
+    fallback has to be a literal, and an identifier is not one."""
+    assert not scan("    ApiKey = configured ?? _fallbackApiKeyValue;")
+    assert not scan("    ApiKey = options?.ApiKey ?? DefaultApiKeySettingsValue,")
+
+
+def test_a_reference_earlier_on_the_line_does_not_end_the_search() -> None:
+    """One line can hold both a reference and a literal. Rejecting the first
+    must not stop the second from being judged -- otherwise writing a harmless
+    assignment ahead of a real one hides it."""
+    assert scan(f'client(api_key=settings.voyage_api_key, secret="{_HIGH_ENTROPY}")')
+    assert scan(f'{{"auth": os.environ["X"], "password": "{_WITH_TILDE}"}}')
+
+
+def test_a_credential_in_a_url_authority_is_caught() -> None:
+    """No assignment rule can see this shape -- there is no `key = value`.
+    Before this rule the credential shipped to the embedding provider unless
+    an unrelated query parameter happened to trip the entropy check."""
+    findings = scan("mongodb://admin:devpassword123@localhost:27017/")
+    assert findings and findings[0].rule == "url_credential"
+
+
+def test_the_url_rule_does_not_depend_on_a_query_string() -> None:
+    """The case that prompted this was found *with* a query string and was
+    flagged for the wrong reason -- an unrelated `authSource` parameter. Both
+    forms must be caught by the URL rule itself."""
+    bare = "postgres://svc:Xk29fbQ2wwTmeeQ@db.internal:5432/app"
+    assert [f.rule for f in scan(bare)] == ["url_credential"]
+    assert [f.rule for f in scan(bare + "?sslmode=require&pool=10")] == ["url_credential"]
+
+
+def test_a_weak_password_in_a_url_is_still_a_password() -> None:
+    """Entropy is not consulted for this shape. `user:value@host` is written
+    for one reason, and a weak credential is still a credential."""
+    assert scan("redis://cache:hunter2xyz@10.0.0.4:6379/0")
+
+
+def test_the_finding_names_neither_the_user_nor_the_password() -> None:
+    findings = scan("mongodb://admin:devpassword123@localhost:27017/")
+    rendered = " ".join(str(f) + f.model_dump_json() for f in findings)
+    assert "devpassword123" not in rendered
+    assert "admin" not in rendered
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Documentation showing the syntax is exactly what this index is for.
+        "postgres://user:password@host:5432/dbname",
+        "mongodb://USER:PASSWORD@cluster.example.com/",
+        "postgres://user:<password>@host/db",
+        "postgres://user:${DB_PASSWORD}@host/db",
+        "mongodb://admin:changeme@localhost:27017/",
+        "postgres://user:****@host/db",
+        # No password at all.
+        "https://example.com/oauth/authorize/v2",
+        "redis://localhost:6379/0",
+        "git@github.com:Fourth-Line-Labs/workspace-indexer.git",
+    ],
+)
+def test_url_syntax_examples_are_not_withheld(line: str) -> None:
+    assert not scan(line)
+
+
+def test_a_query_parameter_value_ends_at_the_ampersand() -> None:
+    """`authSource=admin` names a database. It read as a credential because
+    the value ran on through the rest of the query string, which cleared the
+    entropy bar -- so a file was withheld over a parameter, while the real
+    credential in the same URL went unnoticed."""
+    assert scan("?authSource=admin&directConnection=true&serverSelectionTimeoutMS=10000") == []
+    assert scan("connect?authSource=admin&retryWrites=true&w=majority") == []
+
+
+def test_a_credential_in_a_query_parameter_is_still_caught() -> None:
+    """Ending the value at `&` must not stop the parameter's own value from
+    being judged."""
+    assert scan(f"https://api.example.com/v1/items?api_key={_HIGH_ENTROPY}&page=2")
+
+
+# --- what the first round of review found -----------------------------------
+#
+# Nine findings, all of them holes in the rules this PR added. Each test below
+# fails on the commit that introduced the rule it covers.
+
+
+def test_a_password_containing_an_ampersand_is_still_seen_whole() -> None:
+    """`&` is a legal password character. Excluding it from the value class
+    split this to `Xk9`, which falls under the length floor -- so the value was
+    not judged at all, rather than judged and cleared. A false positive traded
+    for a false negative."""
+    assert scan("password=Xk9&bQ2mZrT7pLqW3nBc")
+    assert scan(f'PASSWORD="{_WITH_TILDE}&{_HIGH_ENTROPY}"')
+
+
+def test_a_query_string_still_splits_into_parameters() -> None:
+    """The cut is made where the *next parameter* begins, which is what
+    separates a query string from a password containing `&`."""
+    assert scan("?authSource=admin&directConnection=true&serverSelectionTimeoutMS=10000") == []
+    assert scan(f"https://api.example.com/v1?api_key={_HIGH_ENTROPY}&page=2")
+
+
+def test_a_url_with_no_host_is_an_unfinished_example() -> None:
+    """`scheme://user:sample123@` with the host elided is how documentation
+    shows the shape. Requiring only the `@` withheld the page."""
+    assert scan("connect with scheme://user:sample123@ and your own host") == []
+    assert scan("mongodb://svc:R3alSecret9xQ2@[2001:db8::1]:27017/db")
+
+
+def test_a_default_credential_is_a_credential() -> None:
+    """`admin` and `root` read like placeholders and are not -- they are the
+    most commonly deployed defaults there are. Excluding them by name broke
+    this module's own rule that a weak password is still a password."""
+    assert scan("mongodb://root:root@10.0.0.5/db")
+    assert scan("postgres://admin:admin@prod.internal:5432/app")
+
+
+def test_a_percent_encoded_password_is_not_a_windows_variable() -> None:
+    """Percent-encoding is the standard way (RFC 3986) to put a special
+    character into userinfo, so a real password very plausibly starts with `%`.
+    A bare prefix check shipped `%40dmin12345%21` to the provider as a
+    sample."""
+    assert scan("mongodb://user:%40dmin12345%21@host")
+    assert scan("postgres://user:%DB_PASSWORD%@host") == []
+
+
+def test_a_placeholder_url_does_not_hide_a_real_one_behind_it() -> None:
+    """Only the first URL on the line was judged, and nothing else looks at a
+    credential in an authority -- so a syntax example written in front of a
+    connection string made it invisible."""
+    assert scan("postgres://user:password@host or mongodb://svc:R3alSecret9xQ2@db")
+
+
+def test_a_password_containing_a_colon_is_visible() -> None:
+    """RFC 3986 allows colons in userinfo after the first. The trailing `@`
+    anchors the match, so the password class does not need the restriction."""
+    assert scan("mongodb://svc:pa:ssR3alSecret9x@host")
+
+
+def test_the_hyphenated_placeholders_are_reachable() -> None:
+    """The comparison stripped `-` and `_` before looking the password up, and
+    the shared placeholder set stores its entries hyphenated -- so every one of
+    them was dead code here, and a docs URL using one was flagged."""
+    for password in ("replace-me", "your-api-key-here", "insert-key-here"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+
+
+def test_an_alphanumeric_mask_is_a_mask() -> None:
+    """`xxxxxxxx` redacts exactly as `********` does. Requiring punctuation
+    meant the commonest written mask withheld the page it appeared on."""
+    for password in ("xxxxxxxx", "aaaa", "XXXXXXXXXXXX"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+    # Not a blanket amnesty for short values: two characters is not a mask.
+    assert scan("postgres://user:ab@host")
+
+
+def test_a_credential_in_a_later_query_parameter_is_judged_too() -> None:
+    """A regression the `&` fix introduced and the previous test missed.
+
+    Admitting `&` into the value class means one match can swallow the whole
+    query string, so scanning had to resume where the judged *parameter* ended
+    rather than where the match ended -- otherwise the first parameter clears
+    and the scan re-anchors past the credential in the second. The earlier test
+    only covered a credential in the first parameter, which is why this was not
+    caught by it.
+    """
+    findings = scan(f"https://api.example.com/v1?authSource=admin&api_key={_HIGH_ENTROPY}")
+    assert findings
+    # And named for the parameter that carries it, not the one that cleared.
+    assert "api_key" in findings[0].description
+
+
+def test_a_null_coalescing_assignment_is_an_assignment() -> None:
+    """`??=` sets the key to the literal when it is null -- the same semantics
+    as `??`, and it was seen by neither rule: the fallback pattern wants `[:=]`
+    straight after the key and finds `?`, while the assignment pattern matched
+    `??` and left `=` as the whole value."""
+    assert scan(f'    ApiKey ??= "{_HIGH_ENTROPY}";')
+    assert scan(f'    _token ??= "{_WITH_TILDE}";')
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "connect with scheme://user:sample123@, and your own host",
+        "see [the format](scheme://user:sample123@) for the shape",
+        "scheme://user:sample123@. Then add your host.",
+    ],
+)
+def test_punctuation_is_not_a_host(line: str) -> None:
+    """Requiring *a* host was not enough: any non-delimiter satisfied it, so
+    the comma in prose and the closing paren of a markdown link both passed as
+    hostnames -- the same false positive the host group was added to prevent."""
+    assert not scan(line)
+
+
+def test_a_template_is_matched_whole_rather_than_by_its_first_character() -> None:
+    """The defect fixed for `%` was still open for `<` and `{`: a value that
+    merely *begins* with one read as a placeholder, so a generated password
+    starting with a brace shipped to the provider."""
+    assert scan(f"postgres://user:{{{_HIGH_ENTROPY}@host")
+    assert scan(f"postgres://user:<{_HIGH_ENTROPY}@host")
+    # The real templates still read as templates.
+    for password in ("<password>", "${DB_PASSWORD}", "{password}", "%DB_PW%"):
+        assert scan(f"postgres://user:{password}@host") == [], password
+
+
+def test_an_assignment_whose_value_opens_a_template_it_never_closes() -> None:
+    """The assignment rule carried the same prefix check, and it turned out
+    not to be a hole: `<` and `{` are also in `_EXPRESSION`, which rejects the
+    value a step later for being a generic or an initializer. So this stays
+    unflagged either way -- recorded because the shared whole-shape test now
+    used there changes the *reason* and not the answer, and a reader comparing
+    the two rules should not conclude one of them started catching this.
+    """
+    assert scan(f'API_KEY = "<{_HIGH_ENTROPY}"') == []
+    assert scan('API_KEY = "<YOUR_TOKEN>"') == []
+    assert scan('API_KEY = "${API_KEY}"') == []
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        "{DB_PW}",
+        "${DB_PW}",
+        "{{DB_PASSWORD}}",
+        "${{VAR}}",
+        # Mustache's unescaped-output form, and one deeper than any templating
+        # language writes -- the point is that depth is counted rather than
+        # enumerated, so there is no next depth to miss.
+        "{{{DB_PASSWORD}}}",
+        "${{{VAR}}}",
+        "{{{{DEEP}}}}",
+        # docker-compose doubles the sigil to escape it, so this passes a
+        # literal `${DB_PASSWORD}` through to the container.
+        "$${DB_PASSWORD}",
+        # Composite formats documentation really does write.
+        "{USER}-{PW}",
+        "{PASS}.{DOMAIN}",
+        "<password>",
+        "%DB_PW%",
+    ],
+)
+def test_a_template_at_any_nesting_is_a_placeholder(password: str) -> None:
+    """Matching the shape whole fixed a prefix hole and opened a narrowness
+    one in the same edit: a single pair of braces was recognised, so every
+    docs page written in Handlebars, Mustache or Ansible was withheld as
+    carrying a live credential."""
+    assert scan(f"mongodb://user:{password}@host") == [], password
+
+
+def test_unbalanced_braces_are_not_a_template() -> None:
+    """Counting the braces must not become a way to open one and never close
+    it. The counts have to match, or the prefix hole this replaced comes back
+    wearing braces."""
+    assert scan(f"mongodb://user:{{{{{_HIGH_ENTROPY}@host")
+    assert scan(f"mongodb://user:{{{_HIGH_ENTROPY}}}}}@host")
+
+
+def test_a_group_appended_to_a_credential_does_not_launder_it() -> None:
+    """Accepting groups joined by punctuation must not accept a generated
+    value with a group stuck on the end. Only punctuation may sit outside a
+    group -- letters and digits there mean the value is not a template, it is
+    a password wearing one."""
+    assert scan(f"mongodb://user:{_HIGH_ENTROPY}{{a}}@db.internal")
+    assert scan(f"mongodb://user:{{a}}{_HIGH_ENTROPY}@db.internal")
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        # Wrapped: the shape a template and a credential genuinely share, and
+        # the one that has to be told apart by what is inside rather than by
+        # the braces around it.
+        "{{{high}}}",
+        "{{{high}}}{{a}}",
+        "{{x{{{high}}}}}",
+        "{{USER}}-{{{high}}}",
+    ],
+)
+def test_braces_around_a_credential_do_not_launder_it(password: str) -> None:
+    """Balanced braces and punctuation-only separators are not enough on their
+    own: both are satisfied by a generated value in a template's clothing. The
+    inside of a group is judged like any other value.
+
+    `{DB_PASSWORD}` and a wrapped credential are the same shape, so the test
+    cannot be a character class. It is the entropy and naming rules the scanner
+    already applies -- and the entropy floor is unreachable below about
+    thirteen characters, so a short template name passes on arithmetic.
+    """
+    assert scan(f"mongodb://user:{password.format(high=_HIGH_ENTROPY)}@db.internal"), password
+
+
+def test_a_mustache_section_is_still_a_template() -> None:
+    """Judging group interiors must not start withholding pages over ordinary
+    templating syntax -- the reason the rule is entropy rather than a
+    whitelist of characters.
+
+    Every case here has to be one the URL rule can actually capture: its
+    password class excludes `#`, `/` and whitespace, so `{{#if enabled}}` never
+    reaches the brace test at all and would assert nothing whatever the test
+    did. That case was here, and it was the one cited as evidence.
+    """
+    for password in ("{{^unless}}", "{{else}}", "{{&raw}}", "{{sectionName}}"):
+        assert scan(f"mongodb://user:{password}@db.internal") == [], password
+
+
+def test_a_credential_cut_into_short_pieces_is_still_a_credential() -> None:
+    """The entropy floor that lets a short section through is the same floor
+    that would let a secret through in pieces: no one segment of
+    `{Xk9mZx}{9RtVwL}{pA3nBc}` can reach 3.6 bits. The segments are judged
+    joined as well as separately, which costs nothing for the shapes this rule
+    exists to accept -- they join to names, not to secrets."""
+    pieces = "".join(f"{{{_HIGH_ENTROPY[i : i + 6]}}}" for i in range(0, 36, 6))
+    assert scan(f"mongodb://user:{pieces}@db.internal")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # Internal DNS and NetBIOS names begin with an underscore.
+        "_internal-db:27017",
+        # An IDN host written raw rather than punycoded. The non-ASCII
+        # character has to be *first*: a host merely containing one has an
+        # ordinary letter at the front and would pass either way.
+        "\u00f6stersund.example:27017",
+        "\u6570\u636e\u5e93.example:27017",
+        "[2001:db8::1]/db",
+        "db.internal",
+    ],
+)
+def test_a_host_is_more_than_letters_and_digits(host: str) -> None:
+    """This rule consults no entropy, so a host it declines to match is a
+    credential nothing else on the line will catch. Narrowing the first
+    character to RFC 1123 fixed the punctuation false positive and silently
+    dropped these."""
+    assert scan(f"mongodb://svc:{_HIGH_ENTROPY}@{host}"), host
+
+
+def test_this_project_does_not_withhold_its_own_source() -> None:
+    """Nothing under `src/` may trip the scanner.
+
+    Source files hold no credentials, so a finding there is a false positive by
+    definition -- and the file it withholds is one this index exists to make
+    searchable. This caught the scanner withholding *itself*: an example value
+    written into a comment as a literal `key=value` fired the rule the comment
+    was explaining. Fixtures live in tests, which are excluded here because
+    they hold deliberate look-alikes.
+    """
+    src = Path(__file__).resolve().parents[1] / "src"
+    withheld = {
+        path.relative_to(src).as_posix(): str(findings[0])
+        for path in sorted(src.rglob("*.py"))
+        if (findings := scan(path.read_text(encoding="utf-8")))
+    }
+    assert not withheld, f"the scanner would withhold our own source: {withheld}"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # Fullwidth and ideographic punctuation. Admitting every non-ASCII code
+        # point to catch IDN hosts let these back in, so a CJK page with the
+        # host elided was withheld over its own comma -- the same false
+        # positive the host requirement exists to prevent, entering from the
+        # other side of the alphabet.
+        "\uff0c\u7136\u540e\u91cd\u542f",
+        "\u3002\u7136\u540e\u91cd\u542f",
+        "\u300b",
+        "\u00a1Listo!",
+    ],
+)
+def test_non_ascii_punctuation_is_not_a_host(tail: str) -> None:
+    """`\\w` is Unicode-aware, so there was no trade-off to make between IDN
+    hosts and punctuation: it keeps the letters and drops the marks."""
+    assert not scan(f"mongodb://user:Passw0rdX9q2@{tail}")
