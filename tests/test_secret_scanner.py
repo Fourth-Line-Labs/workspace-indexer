@@ -608,9 +608,25 @@ def test_braces_around_a_credential_do_not_launder_it(password: str) -> None:
 def test_a_mustache_section_is_still_a_template() -> None:
     """Judging group interiors must not start withholding pages over ordinary
     templating syntax -- the reason the rule is entropy rather than a
-    whitelist of characters."""
-    for password in ("{{#if enabled}}", "{{^unless}}", "{{else}}"):
+    whitelist of characters.
+
+    Every case here has to be one the URL rule can actually capture: its
+    password class excludes `#`, `/` and whitespace, so `{{#if enabled}}` never
+    reaches the brace test at all and would assert nothing whatever the test
+    did. That case was here, and it was the one cited as evidence.
+    """
+    for password in ("{{^unless}}", "{{else}}", "{{&raw}}", "{{sectionName}}"):
         assert scan(f"mongodb://user:{password}@db.internal") == [], password
+
+
+def test_a_credential_cut_into_short_pieces_is_still_a_credential() -> None:
+    """The entropy floor that lets a short section through is the same floor
+    that would let a secret through in pieces: no one segment of
+    `{Xk9mZx}{9RtVwL}{pA3nBc}` can reach 3.6 bits. The segments are judged
+    joined as well as separately, which costs nothing for the shapes this rule
+    exists to accept -- they join to names, not to secrets."""
+    pieces = "".join(f"{{{_HIGH_ENTROPY[i : i + 6]}}}" for i in range(0, 36, 6))
+    assert scan(f"mongodb://user:{pieces}@db.internal")
 
 
 @pytest.mark.parametrize(

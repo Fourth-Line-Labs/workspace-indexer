@@ -306,15 +306,21 @@ def _is_braced_template(value: str) -> bool:
     Three things keep this from becoming a way to hide a credential. The braces
     must balance, so a value that merely *opens* like a template -- `{{Xk9...`
     -- is still judged. Only punctuation may sit outside a group, so appending
-    `{x}` to a generated value does not launder it. And the inside of a group
-    is judged like any other value, so wrapping one in braces does not either.
+    `{x}` to a generated value does not launder it. And the contents are judged
+    like any other value, so wrapping one in braces does not either.
 
     That last test cannot be a character class: `{DB_PASSWORD}` and a wrapped
     credential are the same shape. It is the naming-convention and entropy
     rules the scanner already applies, which clear a template name outright and
-    cannot reach the entropy floor below about thirteen characters -- so a
-    mustache section passes on arithmetic rather than on an exception, while a
+    cannot reach the entropy floor below about thirteen characters -- so
+    `{{^unless}}` passes on arithmetic rather than on an exception, while a
     generated run inside braces does not.
+
+    Each group *and* the groups joined. The floor that lets a short section
+    through is the same floor that would let a credential through in pieces:
+    `{Xk9mZx}{9RtVwL}{pA3nBc}` is three segments none of which can reach it.
+    Joining costs nothing for the shapes this exists to accept, which join to
+    names rather than to secrets -- `USER-PW`, `PASS.DOMAIN`, `DB_PASSWORD`.
     """
     seen = False
     depth = 0
@@ -333,10 +339,15 @@ def _is_braced_template(value: str) -> bool:
                 return False
     if not seen or depth:
         return False
-    # Each group's contents, judged as a value in its own right. The recursion
-    # back through `_looks_generated` stops immediately: these segments contain
-    # no braces, so the first thing it asks of them is answered False.
-    return not any(_looks_generated(segment) for segment in re.split(r"[{}]", value))
+    # Each group's contents judged as a value in its own right, and then all of
+    # them joined -- a secret cut into pieces short enough to clear the entropy
+    # floor is still a secret. The recursion back through `_looks_generated`
+    # stops immediately: these segments contain no braces, so the first thing
+    # it asks of them is answered False.
+    segments = re.split(r"[{}]", value)
+    if any(_looks_generated(segment) for segment in segments):
+        return False
+    return not _looks_generated("".join(segments))
 
 
 # Shortest run of one repeated character that reads as masking rather than as
