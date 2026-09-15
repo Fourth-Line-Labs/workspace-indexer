@@ -812,8 +812,8 @@ the declined set there is empty and the two denominators coincide. On a
 codebase that uses those forms they would differ, and the figure quoted here
 would be the higher one.
 
-Python and the JS family do not share this property: there a first-party edge is identified by
-its shape, so an unresolved one is a visible defect.
+Python and the JS family do not share this property: there a first-party
+edge is identified by its shape, so an unresolved one is a visible defect.
 
 Four directive forms are recorded, each under its own `kind`, so what is and is
 not handled is visible in the data rather than flattened into one label:
