@@ -79,11 +79,17 @@ def _read(path: str, kind: FileKind) -> str | None:
         return None
     try:
         # The same decoder the indexer used on the way in, so this compares
-        # against the text that was actually chunked: `read_text` would keep a
-        # byte-order mark and translate CRLF, and Visual Studio writes both.
-        # Harmless while the comparison is substring membership against
-        # normalised text, and a false "stale" on every C# file the moment it
-        # is not.
+        # against the text that was actually chunked.
+        #
+        # The two halves of the old `read_text` were not equally harmless. A
+        # kept byte-order mark only ever affected the first chunk of a file,
+        # and substring membership survived it. Translating CRLF to LF did not
+        # survive anything: a chunk's `source_text` keeps the line endings it
+        # was chunked from, so every *multi-line* chunk of a CRLF file failed
+        # the substring test and was flagged stale on every search. Measured on
+        # a CRLF C# file: stale before, not stale after. Visual Studio writes
+        # CRLF as reliably as it writes the mark, so that was most of a C#
+        # corpus reporting itself as changed since indexing.
         return decode_source(raw)
     except UnicodeDecodeError:
         # Staleness is a hint, not a gate. A file that cannot be decoded

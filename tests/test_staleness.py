@@ -130,3 +130,31 @@ def test_a_pdf_hit_is_stale_once_its_own_text_changes(tmp_path: Path) -> None:
 
     hit = _hit(path, "Rolling back a release requires the rollback script", kind=FileKind.PDF)
     assert mark_stale([hit])[0].stale is True
+
+
+def test_a_crlf_file_is_not_stale_the_moment_it_is_indexed(tmp_path: Path) -> None:
+    """The bug this guards was live, not latent.
+
+    A chunk's `source_text` keeps the line endings it was chunked from, and the
+    indexer decodes bytes rather than opening in text mode -- so a chunk from a
+    CRLF file carries CRLF. Reading the file back in text mode translated those
+    to LF, and the substring test then failed for every *multi-line* chunk:
+    Visual Studio writes CRLF on almost every .cs file, so most of a C# corpus
+    reported itself as changed since indexing, on every search.
+    """
+    path = tmp_path / "Repo.cs"
+    chunk = "public class Repo\r\n{\r\n    public int Value => 1;\r\n}"
+    path.write_bytes(f"namespace A;\r\n\r\n{chunk}\r\n".encode("utf-8-sig"))
+
+    assert mark_stale([_hit(path, chunk)])[0].stale is False
+
+
+def test_a_crlf_file_that_really_changed_is_still_stale(tmp_path: Path) -> None:
+    """Matching the indexer's decoding must not become a way of never noticing
+    a change -- the point is that the comparison is against the text that was
+    chunked, not that it always succeeds."""
+    path = tmp_path / "Repo.cs"
+    path.write_bytes("namespace A;\r\n\r\npublic class Other\r\n{\r\n}\r\n".encode("utf-8-sig"))
+
+    gone = "public class Repo\r\n{\r\n    public int Value => 1;\r\n}"
+    assert mark_stale([_hit(path, gone)])[0].stale is True

@@ -803,17 +803,16 @@ declared here matched it — so the first-party column reads 100% by
 construction and cannot fail. The figure that carries information for C# is the
 share of resolvable using-edges that resolve, which is bounded by how much of
 the repository's own code it references: measured at 42% and 54% on the two C#
-corpora, the rest being the framework and NuGet packages. Those figures predate
-the declined exclusion and are unaffected by it, because both corpora contain
-zero `using static` and zero `global using` — the declined set is empty there,
-so the two denominators are the same set. On a codebase that uses those forms
-the share would read higher than the same measurement taken before. Those two figures
-were measured against *all* using-edges, before declined forms were excluded
-from the denominator — they are unchanged by that exclusion because both
-corpora contain zero `using static` and zero `global using`, so the declined
-set there is empty and the two denominators coincide. On a codebase that uses
-those forms they would differ, and the figure quoted would be the higher one. Python and the JS
-family do not share this property: there a first-party edge is identified by
+corpora, the rest being the framework and NuGet packages.
+
+Those two figures were measured against *all* using-edges, before declined
+forms were excluded from the denominator. They are unchanged by that exclusion
+because both corpora contain zero `using static` and zero `global using`, so
+the declined set there is empty and the two denominators coincide. On a
+codebase that uses those forms they would differ, and the figure quoted here
+would be the higher one.
+
+Python and the JS family do not share this property: there a first-party edge is identified by
 its shape, so an unresolved one is a visible defect.
 
 Four directive forms are recorded, each under its own `kind`, so what is and is

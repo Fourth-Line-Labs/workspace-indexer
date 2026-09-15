@@ -1201,8 +1201,13 @@ async def test_the_backfill_decodes_a_file_exactly_as_the_pipeline_does(
     monkeypatch.setattr("workspace_indexer.pipeline.indexer.decode_source", recording)
     await harness.indexer().run()
 
-    assert decoded, "the backfill did not decode through the shared decoder"
-    text = decode_source(decoded[0])
+    # Found by content, not by position. Both files are rescanned, so
+    # `decoded` holds both, and which arrives first depends on an ordering
+    # decided in another module -- true today, and not this test's claim.
+    assert contents.encode("utf-8-sig") in decoded, (
+        "the file's raw bytes did not reach the shared decoder"
+    )
+    text = decode_source(contents.encode("utf-8-sig"))
     assert text == contents
     # Both halves of what the two decodings disagree about, named so a future
     # change cannot satisfy this by weakening one of them.
