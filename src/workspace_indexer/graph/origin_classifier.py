@@ -3,7 +3,10 @@
 Order is precedence, and it is the whole design:
 
 1. **Resolved** edges are first-party by construction -- they already point at
-   an indexed file.
+   an indexed file. Either way of resolving counts: a C# `using` matched
+   against a namespace declared in this workspace names our code as surely as
+   a path does, and it carries no `resolved_path` because a namespace is
+   declared across several files rather than one.
 2. A **relative** specifier names a neighbour, so it is first-party whether or
    not resolution managed it. This is the bucket that makes resolver bugs
    visible: an unresolved relative import is always ours to fix.
@@ -49,8 +52,9 @@ class OriginClassifier:
         resolved: str | None,
         root_label: str,
         from_path: str,
+        resolved_by: str | None = None,
     ) -> ImportOrigin:
-        if resolved is not None or is_relative:
+        if resolved is not None or resolved_by is not None or is_relative:
             return ImportOrigin.FIRST_PARTY
         if self._is_declared(module, root_label, unit_of(from_path), language):
             return ImportOrigin.DECLARED_DEPENDENCY

@@ -33,7 +33,10 @@ do not exist.
   origin of an import — first-party, a declared dependency, the language's
   framework, or unclassified. Origin is what makes coverage mean something:
   only a first-party edge can resolve to a file here, so only there is a
-  failure a defect.
+  failure a defect. C# resolves against declared namespaces rather than paths,
+  so one `using` reaches every file declaring that namespace; the edge records
+  *how* it resolved, because a namespace target is a candidate and a path
+  target is not.
 - `grounding/` — whether a codebase records *why* it is the way it is, so an
   empty answer can be told from an absent one.
 - `worktrees/` — reporting results as one git checkout sees them.

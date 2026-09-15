@@ -100,6 +100,41 @@ CREATE INDEX IF NOT EXISTS imports_by_module ON imports (module);
 -- executescript runs before the migration, so on a database predating that
 -- column this statement would fail and take the whole open with it.
 
+-- Which namespaces each file declares: the other end of a C# `using`.
+--
+-- A separate table rather than a column on `files` because a file may declare
+-- more than one namespace, and because the relation this exists to serve runs
+-- the other way -- symbol to files, many to many.
+--
+-- This is why a C# using is resolved by join rather than by writing
+-- `imports.resolved_path`: that column holds one path, `imports` is keyed per
+-- using *site*, and a namespace is declared across N files. There is
+-- physically nowhere to put N targets. Deriving them also inherits the
+-- property the import index already claims -- deleting a file cascades its
+-- declarations away, so "which files does this using reach" stays correct with
+-- no separate invalidation step and no dependence on walk order.
+CREATE TABLE IF NOT EXISTS namespace_declarations (
+    root_label  TEXT    NOT NULL,
+    rel_path    TEXT    NOT NULL,
+    -- Fully qualified, as a `using` would have to spell it: a namespace
+    -- nested inside another is stored joined.
+    symbol      TEXT    NOT NULL,
+    -- `namespace` today. Type declarations can share this table later to
+    -- narrow a using to the single file declaring what it references.
+    kind        TEXT    NOT NULL DEFAULT 'namespace',
+    line        INTEGER NOT NULL,
+    PRIMARY KEY (root_label, rel_path, symbol, line),
+    FOREIGN KEY (root_label, rel_path) REFERENCES files (root_label, rel_path)
+        ON DELETE CASCADE
+);
+
+-- The join goes symbol -> files, so that is the index -- and every selective
+-- query pins the root as well, so the root is in it. A namespace declared in
+-- two repositories of one workspace is the ordinary case this exists to keep
+-- apart, and a symbol-only index would read both before filtering.
+CREATE INDEX IF NOT EXISTS namespace_declarations_by_symbol
+    ON namespace_declarations (symbol, root_label);
+
 -- Endpoints a file exposes, and endpoints a file calls.
 --
 -- One table for both sides because they are two halves of one question and a

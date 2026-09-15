@@ -6,9 +6,14 @@ the module string exactly as written, with no attempt to turn it into a file.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from workspace_indexer.graph import SUPPORTED, ImportScanner
+from workspace_indexer.graph.import_scanner import KINDS
+from workspace_indexer.graph.parse import parse
+from workspace_indexer.obs.logging import get_logger
 
 
 @pytest.fixture
@@ -141,3 +146,79 @@ def test_every_supported_language_parses(scanner: ImportScanner, language: str) 
 def test_empty_and_broken_input_do_not_raise(scanner: ImportScanner) -> None:
     assert scanner.scan("", "python") == []
     assert isinstance(scanner.scan("from . import", "python"), list)
+
+
+def test_a_tree_too_deep_to_walk_costs_the_edges_not_the_run() -> None:
+    """Same exposure as the namespace scanner, and the same contract: a stack
+    exhausted by deeply nested source must cost this file's edges rather than
+    the run that is walking thousands of files."""
+    source = "using System;\n" + "class C { " * 400 + "}" * 400
+    # Parsed before the limit drops, and handed in, so the only thing that can
+    # exhaust the stack is the walk. `parse` swallows `RecursionError` along
+    # with everything else, so parsing under the lowered limit would make this
+    # pass through the wrong guard.
+    tree = parse(source, "csharp", log=get_logger("tests.import_scanner"))
+    assert tree is not None
+
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(120)
+    try:
+        assert ImportScanner().scan(source, "csharp", tree) == []
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+def test_the_csharp_directive_form_is_kept() -> None:
+    """All four forms were recorded as `using`, which reads as one thing and
+    is three: `using static` names a type rather than a namespace, and a
+    `global using` applies to the whole compilation unit rather than to the
+    file declaring it. Flattening them hides both facts in the data."""
+    source = (
+        "global using System.Linq;\n"
+        "using static MyApp.Helpers;\n"
+        "global using static MyApp.Both;\n"
+        "using MyApp.Data;\n"
+        "using Alias = MyApp.Other;\n"
+    )
+    found = [(e.kind, e.module) for e in ImportScanner().scan(source, "csharp")]
+    assert found == [
+        ("global_using", "System.Linq"),
+        ("using_static", "MyApp.Helpers"),
+        # Both markers, not the first one checked: `global using static` is
+        # legal and carries both, and a precedence rule would record one fact
+        # and silently drop the other -- the dropped one being what decides
+        # whether resolution declines the edge.
+        ("global_using_static", "MyApp.Both"),
+        ("using", "MyApp.Data"),
+        ("using", "MyApp.Other"),
+    ]
+
+
+def test_every_kind_the_scanner_emits_is_a_declared_one() -> None:
+    """`kind` is a contract across three modules -- this scanner, the decline
+    set in the pipeline, and `ImportEdge`'s own documentation. A new form added
+    here without the others learning about it would be resolved as though it
+    were a plain import, which is how `using static` came to be resolved as a
+    namespace."""
+    sources = {
+        "python": "import os\nfrom pathlib import Path\n",
+        "typescript": "import { a } from './a';\nexport { b } from './b';\n",
+        "csharp": (
+            "global using System.Linq;\n"
+            "using static MyApp.Helpers;\n"
+            "global using static MyApp.Both;\n"
+            "using MyApp.Data;\n"
+        ),
+    }
+    scanner = ImportScanner()
+    emitted = {
+        edge.kind for language, source in sources.items() for edge in scanner.scan(source, language)
+    }
+    # Equality, not containment. A subset test passes when a grammar fails to
+    # load and `scan` returns nothing -- `emitted` collapses to whatever did
+    # parse, and a stale entry or a broken walker for the other languages goes
+    # unnoticed. These three sources emit all seven kinds between them, so
+    # equality costs nothing and closes both directions.
+    assert emitted == KINDS, (
+        f"undeclared: {sorted(emitted - KINDS)}; unreached: {sorted(KINDS - emitted)}"
+    )

@@ -35,6 +35,20 @@ class Dependency(BaseModel):
     # is a defect worth chasing; a framework edge was never reachable and
     # nothing is wrong. Same null rel_path, opposite next move.
     origin: str | None = None
+    # How the target was reached: "path" for a specifier that named one file,
+    # "namespace" for a C# `using` matched against a namespace declared here,
+    # "declined" for a form no resolver at this rung can answer -- a
+    # `using static` names a type, which a namespace table cannot follow.
+    # None when the edge is simply unresolved, which is a different thing: it
+    # may resolve once something else lands, and `declined` never will.
+    #
+    # The two differ in precision and an agent has to be able to tell. A path
+    # edge names the file it depends on. A namespace edge names a module
+    # declared across several files, so each target is a candidate: the
+    # importer depends on something in that namespace, not necessarily on this
+    # file. Presenting them identically would report a precision the join does
+    # not have.
+    resolved_by: str | None = None
 
     @computed_field
     @property

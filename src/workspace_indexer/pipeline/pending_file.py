@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from workspace_indexer.classification import Classification
 from workspace_indexer.graph.import_edge import ImportEdge
+from workspace_indexer.graph.namespace_declaration import NamespaceDeclaration
 from workspace_indexer.graph.route_call import RouteCall
 from workspace_indexer.graph.route_declaration import RouteDeclaration
 from workspace_indexer.models import Chunk, SourceFile
@@ -32,6 +33,9 @@ class PendingFile(BaseModel):
     # written in the same transaction so the graph cannot survive a file
     # whose chunks were rolled back.
     imports: list[ImportEdge] = []
+    # The other end of a C# `using`, extracted in the same pass and written in
+    # the same transaction, so a file's declarations cannot outlive its chunks.
+    namespaces: list[NamespaceDeclaration] = []
 
     @property
     def to_embed(self) -> list[Chunk]:

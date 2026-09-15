@@ -8,6 +8,7 @@ assertion about "zero embedding calls" is the cost guarantee being enforced.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from tests.conftest import ConfigFactory
 from tests.fake_embedding_backend import FakeEmbeddingBackend
 from tests.fake_sparse_backend import FakeSparseBackend
 from workspace_indexer.chunking import ChunkerRegistry
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.classification import RuleClassifier
 from workspace_indexer.config import Settings, WorkspaceConfig
 from workspace_indexer.embedding.embedding_service import EmbeddingService
@@ -75,6 +77,16 @@ async def harness(config_for: ConfigFactory, tmp_path: Path) -> AsyncIterator[Ha
     with Manifest(tmp_path / "manifest.sqlite3") as manifest:
         yield Harness(config_for(), store, manifest, tmp_path)
     await client.close()
+
+
+def _origin_rows(harness: Harness) -> list[tuple[str, str, str, str, bool, str, str | None]]:
+    """Every edge with its directive form and provenance, read from the
+    manifest rather than from a private attribute."""
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as database:
+        rows = database.execute(
+            "SELECT root_label, rel_path, module, '', is_relative, kind, resolved_by FROM imports"
+        ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2]), str(r[3]), bool(r[4]), str(r[5]), r[6]) for r in rows]
 
 
 def _embedded(harness: Harness) -> int:
@@ -916,3 +928,342 @@ async def test_a_call_naming_an_endpoint_outside_the_workspace_stays_unresolved(
         assert total >= 1
         assert resolved == 0
     await client.close()
+
+
+async def test_a_csharp_using_resolves_to_every_file_declaring_the_namespace(
+    harness: Harness, workspace: Path
+) -> None:
+    """Rung 2 for C#. `using MyApp.Data` names no path at all, so it is matched
+    against the namespaces declared in the same repository -- and a namespace
+    is declared across several files, so the edge reaches all of them."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text(
+        "namespace MyApp.Data;\n\npublic class Repo {}\n", encoding="utf-8"
+    )
+    (src / "Context.cs").write_text(
+        "namespace MyApp.Data;\n\npublic class Context {}\n", encoding="utf-8"
+    )
+    (src / "Startup.cs").write_text(
+        "using System;\nusing MyApp.Data;\n\npublic class Startup {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    reached = {(d.module, d.rel_path, d.resolved_by) for d in found}
+    assert reached == {
+        ("MyApp.Data", "repo_one/src/Context.cs", "namespace"),
+        ("MyApp.Data", "repo_one/src/Repo.cs", "namespace"),
+        # The framework edge resolves to nothing, and that is the right answer.
+        ("System", None, None),
+    }
+
+    importers = harness.manifest.dependents_of("workspace", "repo_one/src/Repo.cs")
+    assert [d.rel_path for d in importers] == ["repo_one/src/Startup.cs"]
+
+
+async def test_every_first_party_csharp_edge_resolves(harness: Harness, workspace: Path) -> None:
+    """The gate the origin columns exist for: only a first-party edge can
+    reach a file here, so that is the one number where less than 100% is a
+    defect rather than a package reference."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text(
+        "using System;\nusing System.Text.Json;\nusing MyApp.Data;\n\npublic class S {}\n",
+        encoding="utf-8",
+    )
+    await harness.indexer().run()
+
+    coverage = harness.manifest.origin_coverage()["csharp"]
+    assert coverage.first_party == 1
+    assert coverage.first_party_resolution_percent == 100
+    # The framework edges are not a failure and must not be in the denominator.
+    assert coverage.framework == 2
+
+
+async def test_a_namespace_declared_in_another_repository_is_not_reached(
+    harness: Harness, workspace: Path
+) -> None:
+    """Cross-unit isolation, end to end. Two repositories in one workspace
+    declaring the same namespace is ordinary -- a service and the library it
+    was copied from -- and resolving across them would invent a dependency."""
+    (workspace / "repo_one" / "src" / "Repo.cs").write_text(
+        "namespace Shared.Models;\npublic class Repo {}\n", encoding="utf-8"
+    )
+    (workspace / "repo_two" / "app" / "Startup.cs").write_text(
+        "using Shared.Models;\n\npublic class Startup {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_two/app/Startup.cs")
+    assert [(d.module, d.rel_path) for d in found] == [("Shared.Models", None)]
+    assert harness.manifest.dependents_of("workspace", "repo_one/src/Repo.cs") == []
+
+
+async def test_deleting_the_declaring_file_retires_the_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """The reason targets are derived rather than written down: no
+    invalidation pass, and no edge left pointing at a file that has gone."""
+    src = workspace / "repo_one" / "src"
+    repo = src / "Repo.cs"
+    repo.write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+    assert harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")[0].resolved
+
+    repo.unlink()
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    assert [(d.module, d.resolved) for d in found] == [("MyApp.Data", False)]
+
+
+async def test_coverage_stops_claiming_a_retired_namespace_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """A path edge is retired by the cascade that removes its target. A
+    namespace edge stores no target, so nothing cascades -- and the flag
+    coverage reads would go on claiming a resolution the join cannot produce.
+    """
+    src = workspace / "repo_one" / "src"
+    repo = src / "Repo.cs"
+    repo.write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+    assert harness.manifest.origin_coverage()["csharp"].first_party_resolved == 1
+
+    repo.unlink()
+    await harness.indexer().run()
+
+    coverage = harness.manifest.origin_coverage()["csharp"]
+    assert coverage.first_party_resolved == 0
+    # And it is no longer claimed as ours at all: nothing in this workspace
+    # declares that namespace any more, so it reads like any other unknown.
+    assert coverage.first_party == 0
+    assert coverage.unclassified == 1
+
+
+async def _csharp_only_workspace(tmp_path: Path, config_for: ConfigFactory) -> WorkspaceConfig:
+    """A root holding nothing but two C# files that resolve to each other.
+
+    Every edge resolves here, which is the condition the retirement pass used
+    to be skipped under -- the shared fixture always has an `import os` keeping
+    the pending list non-empty, so a test built on it cannot see that.
+    """
+    root = tmp_path / "csharp_only"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "Repo.cs").write_text(
+        "namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8"
+    )
+    (root / "src" / "Startup.cs").write_text(
+        "using MyApp.Data;\npublic class Startup {}\n", encoding="utf-8"
+    )
+    return config_for(
+        workspace={
+            "name": "test",
+            "roots": [{"path": str(root), "recurse_into_children": True}],
+        }
+    )
+
+
+async def test_retirement_runs_even_when_nothing_is_left_to_resolve(
+    config_for: ConfigFactory, tmp_path: Path
+) -> None:
+    """The guard is about work to do, not work to undo.
+
+    In a workspace where every edge resolves, the pending list is empty and the
+    early return used to skip retirement entirely -- so deleting the only
+    declaring file left the using flagged resolved for ever, with coverage
+    still counting it.
+    """
+    config = await _csharp_only_workspace(tmp_path, config_for)
+    client = AsyncQdrantClient(path=str(tmp_path / "qdrant"))
+    store = QdrantStore(client, workspace="test", payload_indexes=False)
+    with Manifest(tmp_path / "manifest.sqlite3") as manifest:
+        harness = Harness(config, store, manifest, tmp_path)
+        await harness.indexer().run()
+        assert manifest.origin_coverage()["csharp"].first_party_resolved == 1
+
+        (tmp_path / "csharp_only" / "src" / "Repo.cs").unlink()
+        await harness.indexer().run()
+
+        coverage = manifest.origin_coverage()["csharp"]
+        assert coverage.first_party_resolved == 0
+        assert coverage.first_party == 0
+    await client.close()
+
+
+async def test_the_declaring_file_is_unflagged_and_not_merely_unreachable(
+    harness: Harness, workspace: Path
+) -> None:
+    """Asserting the derived targets is not asserting the flag: the join can
+    return nothing while `resolved_by` still says `namespace`, which is what
+    coverage reads. Both, or the guarantee this names is untested."""
+    src = workspace / "repo_one" / "src"
+    repo = src / "Repo.cs"
+    repo.write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+
+    repo.unlink()
+    await harness.indexer().run()
+
+    provenance = {
+        (rel_path, module): resolved_by
+        for _, rel_path, module, _, _, _, resolved_by in harness.manifest.imports_for_origin()
+    }
+    assert provenance[("repo_one/src/Startup.cs", "MyApp.Data")] is None
+
+
+async def test_a_new_kind_of_edge_is_collected_without_re_embedding(
+    harness: Harness, workspace: Path
+) -> None:
+    """The upgrade path. Namespace declarations are extracted when a file is
+    indexed, and the decision ladder skips an unchanged file before reading it
+    -- so on an existing index the table would stay empty until every C# file
+    happened to change, or until a `--force` run paid to re-embed the
+    workspace for metadata that needs no model at all.
+    """
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+
+    # An index built before namespace extraction existed: the files are
+    # indexed, their declarations are not recorded, and nothing has changed on
+    # disk to make the walk read them again.
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE files SET graph_version = 0")
+    harness.reset_counters()
+
+    await harness.indexer().run()
+
+    assert _embedded(harness) == 0
+    assert harness.manifest.namespace_targets("workspace", "repo_one", "MyApp.Data") == [
+        "repo_one/src/Repo.cs"
+    ]
+    assert harness.manifest.origin_coverage()["csharp"].first_party_resolved == 1
+
+
+async def test_a_static_using_is_declined_rather_than_resolved(
+    harness: Harness, workspace: Path
+) -> None:
+    """`using static My.Thing` names a type. A namespace table cannot answer
+    that, and resolving it against the namespace containing the type would
+    claim an edge of a kind this rung does not extract."""
+    src = workspace / "repo_one" / "src"
+    (src / "Helpers.cs").write_text(
+        "namespace MyApp.Util;\npublic static class Helpers {}\n", encoding="utf-8"
+    )
+    (src / "Startup.cs").write_text(
+        "using static MyApp.Util;\npublic class S {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    # `declined`, not absent: "no resolver here can answer this" has to stay
+    # distinguishable from "not resolved yet", or the edge is re-offered every
+    # run and counted in a denominator measuring the resolver's reach.
+    assert [(d.module, d.resolved, d.resolved_by) for d in found] == [
+        ("MyApp.Util", False, "declined")
+    ]
+
+
+async def test_the_backfill_decodes_a_file_exactly_as_the_pipeline_does(
+    harness: Harness, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backfill reads through the same decoder the walk reads through.
+
+    Asserted by watching the decoder the backfill actually calls, not by
+    re-deriving the rule here: a comparison written in the test would hold
+    whatever `_rescan` does, which is this guard's whole failure history. The
+    end-to-end result cannot distinguish the two decodings either -- a BOM'd
+    file still yields its namespace -- so the observable thing is which
+    function was called with which bytes.
+    """
+    src = workspace / "repo_one" / "src"
+    contents = "namespace MyApp.Data;\r\npublic class Repo {}\r\n"
+    (src / "Repo.cs").write_bytes(contents.encode("utf-8-sig"))
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
+
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE files SET graph_version = 0")
+
+    decoded: list[bytes] = []
+
+    def recording(raw: bytes) -> str:
+        decoded.append(raw)
+        return decode_source(raw)
+
+    monkeypatch.setattr("workspace_indexer.pipeline.indexer.decode_source", recording)
+    await harness.indexer().run()
+
+    # Found by content, not by position. Both files are rescanned, so
+    # `decoded` holds both, and which arrives first depends on an ordering
+    # decided in another module -- true today, and not this test's claim.
+    assert contents.encode("utf-8-sig") in decoded, (
+        "the file's raw bytes did not reach the shared decoder"
+    )
+    text = decode_source(contents.encode("utf-8-sig"))
+    assert text == contents
+    # Both halves of what the two decodings disagree about, named so a future
+    # change cannot satisfy this by weakening one of them.
+    assert "\ufeff" not in text
+    assert "\r\n" in text
+
+
+async def test_the_backfill_re_extracts_imports_not_only_the_new_edge(
+    harness: Harness, workspace: Path
+) -> None:
+    """Stamping the version asserts the file's *whole* graph was extracted at
+    it. An index built before the directive forms were kept apart holds
+    `using static` rows labelled `using`; recording namespaces alone and
+    stamping would leave those rows to be namespace-resolved -- the fabricated
+    edge the decline exists to prevent.
+    """
+    src = workspace / "repo_one" / "src"
+    (src / "Helpers.cs").write_text(
+        "namespace MyApp.Util;\npublic static class Helpers {}\n", encoding="utf-8"
+    )
+    (src / "Startup.cs").write_text(
+        "using static MyApp.Util;\npublic class S {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    # The older index: namespaces uncollected, and the directive form flattened
+    # to `using` the way extraction recorded it before this change.
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE imports SET kind = 'using', resolved_by = NULL")
+        older.execute("UPDATE files SET graph_version = 0")
+
+    await harness.indexer().run()
+
+    found = harness.manifest.dependencies_of("workspace", "repo_one/src/Startup.cs")
+    assert [(d.module, d.resolved) for d in found] == [("MyApp.Util", False)]
+
+
+async def test_a_file_using_a_module_both_ways_resolves_only_the_resolvable_one(
+    harness: Harness, workspace: Path
+) -> None:
+    """`using X;` and `using static X;` are the same module in two directive
+    forms, one answerable by a namespace table and one not. The resolution mark
+    is keyed on the form as well, or the declined row is marked resolved by its
+    twin without ever being offered."""
+    src = workspace / "repo_one" / "src"
+    (src / "Repo.cs").write_text("namespace MyApp.Data;\npublic class Repo {}\n", encoding="utf-8")
+    (src / "Startup.cs").write_text(
+        "using MyApp.Data;\nusing static MyApp.Data;\npublic class S {}\n", encoding="utf-8"
+    )
+    await harness.indexer().run()
+
+    provenance = {
+        (module, kind): resolved_by
+        for _, rel_path, module, _, _, kind, resolved_by in _origin_rows(harness)
+        if rel_path == "repo_one/src/Startup.cs"
+    }
+    assert provenance[("MyApp.Data", "using")] == "namespace"
+    assert provenance[("MyApp.Data", "using_static")] == "declined"

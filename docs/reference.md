@@ -773,11 +773,88 @@ Resolved within a repository only. Python relative and absolute imports,
 and JS/TS relative specifiers — including TypeScript's ESM convention where
 `import './x.js'` names a file that is actually `x.ts`.
 
-**Not** resolved, deliberately: packages (`react`, `pydantic`), tsconfig path
-aliases (`@/lib/utils`), and C# namespaces, which name no path at all. Those
-need a build system or a workspace-wide symbol table; until then they resolve
-to nothing rather than to something plausible. An unresolved edge is not a
-missing dependency.
+**C# resolves differently, and the difference is visible.** A `using` names no
+path, so it is matched against the `namespace` declarations extracted from the
+same repository — the namespace is read from the declaration rather than
+inferred from the directory, because namespace-to-directory correspondence is a
+convention that holds most of the time and a graph built on it is confidently
+wrong about the rest. A namespace is declared across several files, so the edge
+reaches all of them, and each target is recorded as `resolved_by: namespace`
+rather than as a path:
+
+| `resolved_by` | what it means |
+|---|---|
+| `path` | the specifier named one file, and this is it |
+| `namespace` | the using names a module declared across these files — the importer depends on something in it, not necessarily on this file |
+| absent | the edge reached nothing |
+
+That distinction is not decoration. Reporting a namespace candidate as a path
+edge would claim a file-level precision the join does not have, which is the
+error `route_edges.exact` exists to prevent on the other side of the graph.
+
+The targets are derived on every ask rather than written against the using
+site: `imports` holds one `resolved_path` per site and a namespace has N
+targets, so there is physically nowhere to put them. Deriving them also means
+deleting a declaring file retires the edge with no invalidation pass.
+
+One honest caveat about the numbers: for C#, first-party membership is
+*decided* by resolution — a using is known to be ours because a namespace
+declared here matched it — so the first-party column reads 100% by
+construction and cannot fail. The figure that carries information for C# is the
+share of resolvable using-edges that resolve, which is bounded by how much of
+the repository's own code it references: measured at 42% and 54% on the two C#
+corpora, the rest being the framework and NuGet packages.
+
+Those two figures were measured against *all* using-edges, before declined
+forms were excluded from the denominator. They are unchanged by that exclusion
+because both corpora contain zero `using static` and zero `global using`, so
+the declined set there is empty and the two denominators coincide. On a
+codebase that uses those forms they would differ, and the figure quoted here
+would be the higher one.
+
+Python and the JS family do not share this property: there a first-party
+edge is identified by its shape, so an unresolved one is a visible defect.
+
+Four directive forms are recorded, each under its own `kind`, so what is and is
+not handled is visible in the data rather than flattened into one label:
+
+| `kind` | resolved? |
+|---|---|
+| `using` | yes, against namespaces declared in the same repository |
+| `global_using` | yes, the same way — but it applies to every file in its compilation unit, and that propagation is not modelled |
+| `using_static` | **no.** It names a *type*, and answering it from the namespace table would claim an edge of a kind this rung does not extract |
+| `global_using_static` | **no**, for the same reason — the global marker does not make a type resolvable |
+
+A declined edge is marked `resolved_by: declined`, a terminal state rather than
+a pending one. That distinction is the point of recording it: an unresolved
+edge may resolve once something else lands, and a declined one never will, so
+it is excluded from the resolution rate and from the origin buckets. Counting
+it as `unclassified` would grow the queue for the next rule with work no rule
+at this rung can do.
+
+**Not** resolved, deliberately: packages (`react`, `pydantic`, `Azure.Identity`)
+and tsconfig path aliases (`@/lib/utils`). Those need a build system or a
+manifest reader; until then they resolve to nothing rather than to something
+plausible. An unresolved edge is not a missing dependency.
+
+**An existing index collects new edge kinds without being re-embedded.** The
+decision ladder skips an unchanged file before it is ever read, so a new kind
+of edge — namespace declarations, here — would otherwise stay uncollected until
+every file happened to change, or until a `--force` run paid to re-embed the
+workspace for metadata no model is involved in.
+
+Each file records which version of graph extraction produced its edges. A run
+re-reads the files that are behind **in the languages the change affects** —
+C# for this one — and re-extracts *everything* that file contributes to the
+graph, not only the new edge kind: stamping the version asserts the whole of
+that file's graph was produced at it, and a partial re-scan would leave older
+rows behind a claim that they are current. Files in untouched languages keep
+their old version and are picked up by the next change that needs them, which
+is the conservative direction.
+
+It costs one read and one parse per stale file, once. `graph.backfilled`
+reports how many were scanned and how many were skipped as unreadable or
+unparseable — those are retried on the next run rather than stamped.
 
 The reverse edge — *which files import this one* — spans every repository in
 the workspace, which is what a per-project language server cannot answer.

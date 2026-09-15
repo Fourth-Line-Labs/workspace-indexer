@@ -8,28 +8,70 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 
 from workspace_indexer.chunking import ChunkerRegistry, prefetch_languages, read_source
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.classification import Classification, DocumentClassifier
 from workspace_indexer.config import Settings, WorkspaceConfig
 from workspace_indexer.discovery import Walker
 from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.embedding.embedding_service import EmbeddingService
 from workspace_indexer.embedding.sparse_backend import SparseBackend
-from workspace_indexer.graph import ImportEdge, ImportScanner
+from workspace_indexer.graph import (
+    ImportEdge,
+    ImportScanner,
+    NamespaceResolver,
+    NamespaceScanner,
+)
 from workspace_indexer.graph.import_resolver import ImportResolver
+from workspace_indexer.graph.import_scanner import GLOBAL_USING_STATIC, USING_STATIC
+from workspace_indexer.graph.import_scanner import SUPPORTED as IMPORT_LANGUAGES
+from workspace_indexer.graph.namespace_scanner import SUPPORTED as NAMESPACE_LANGUAGES
 from workspace_indexer.graph.origin_classifier import OriginClassifier
+from workspace_indexer.graph.parse import parse
 from workspace_indexer.graph.route_resolver import RouteResolver
 from workspace_indexer.graph.route_scanner import RouteScanner
 from workspace_indexer.models import EmbeddingSpace, RunStats, SourceFile
 from workspace_indexer.obs.context import bound, file_context, new_run_id
 from workspace_indexer.obs.logging import get_logger
 from workspace_indexer.pipeline.pending_file import PendingFile
+from workspace_indexer.pipeline.scanned_file import ScannedFile
 from workspace_indexer.secrets import SecretWithheldError
 from workspace_indexer.state import IndexDecision, Manifest
 from workspace_indexer.storage.vector_store import VectorStore
 
 log = get_logger("workspace_indexer.pipeline")
+
+# What version of graph extraction a file's edges were produced by. Bumped when
+# a new kind of edge is added, which is what lets `_backfill_graph` find the
+# files whose rows predate it without re-embedding anything.
+GRAPH_VERSION = 1
+
+# Files per transaction in the backfill. Large enough that the fsync cost is
+# amortised, small enough that the write lock is released often on a run that
+# reads thousands of files -- the MCP server writes to this same database.
+_BACKFILL_BATCH = 500
+
+# The languages whose extraction changed at `GRAPH_VERSION`. The backfill
+# re-reads only these, and stamps only what it re-read: a file it never touched
+# keeps version 0 and is picked up by the next bump, which is the conservative
+# direction -- claiming currency this pass has not earned is what would make a
+# future bump silently skip work.
+GRAPH_VERSION_LANGUAGES = NAMESPACE_LANGUAGES
+
+# Every language some graph scanner reads. A file outside this set is
+# never parsed for the graph, because nothing would look at the tree.
+GRAPH_LANGUAGES = IMPORT_LANGUAGES | NAMESPACE_LANGUAGES
+
+# C# directive forms this rung cannot resolve. `using static` names a *type*,
+# and a namespace table cannot answer that; answering it from the namespace
+# containing the type would claim an edge of a kind nothing here extracts.
+DECLINED_CSHARP_KINDS = frozenset({USING_STATIC, GLOBAL_USING_STATIC})
+
+# Kinds no resolver at this rung can answer, in any language. Kept separate
+# from the C# set so the reason stays attached to the language that has it.
+DECLINED_KINDS = DECLINED_CSHARP_KINDS
 
 # When a run would remove this share of a root's recorded files, and at least
 # this many, it stops and asks instead. Deleting from an absence is right when
@@ -73,6 +115,7 @@ class Indexer:
         self._classifier = classifier
         self._flush_chunks = max(1, flush_chunks)
         self._imports = ImportScanner()
+        self._namespaces = NamespaceScanner()
         # Client function names come from config: measured on a real workspace,
         # a project wrapper was called 66 times against `fetch`'s 27, so a
         # fixed list would report a tenth of the call sites as full coverage.
@@ -256,6 +299,7 @@ class Indexer:
                 unobservable=walker.unobservable_roots,
                 allow_deletes=allow_deletes,
             )
+            self._backfill_graph(only_root=only_root)
             self._resolve_imports(stats)
             self._classify_origins()
             self._resolve_routes(stats)
@@ -339,6 +383,17 @@ class Indexer:
             # remove them -- a rebuild that quietly accumulates orphans is
             # worse than no rebuild.
             delta = delta.model_copy(update={"to_upsert": produced, "unchanged": []})
+
+        # Parsed here so imports and namespaces share one tree -- but only for
+        # a language a scanner will actually read. Parsing every file first
+        # would hand markdown, JSON and YAML a full tree-sitter pass whose
+        # result both scanners discard, and log a failure per file for every
+        # language with no grammar at all.
+        tree = (
+            parse(source.text, source.language, log=log)
+            if source.text and source.language in GRAPH_LANGUAGES
+            else None
+        )
         return PendingFile(
             source=source,
             chunker=chunker.name,
@@ -346,11 +401,15 @@ class Indexer:
             chunks=chunks,
             delta=delta,
             classification=classification,
-            imports=self._imports.scan(source.text or "", source.language or ""),
+            # One parse, both walkers. Imports and the namespaces they resolve
+            # against are two questions about the same syntax tree, and
+            # parsing is the expensive half of asking either.
+            imports=self._imports.scan(source.text or "", source.language or "", tree),
+            namespaces=self._namespaces.scan(source.text or "", source.language or "", tree),
             routes=self._routes.declarations(
-                source.text or "", source.language or "", source.rel_path
+                source.text or "", source.language or "", source.rel_path, tree
             ),
-            calls=self._routes.calls(source.text or "", source.language or ""),
+            calls=self._routes.calls(source.text or "", source.language or "", tree),
         )
 
     def _classify(self, source: SourceFile) -> Classification:
@@ -421,6 +480,8 @@ class Indexer:
         self._manifest.forget_chunks(file.delta.to_delete, self._space.slug())
         self._manifest.record_chunks(file.chunks, self._space.slug())
         self._manifest.record_imports(source.root_label, source.rel_path, file.imports)
+        self._manifest.record_namespaces(source.root_label, source.rel_path, file.namespaces)
+        self._manifest.set_graph_version(source.root_label, source.rel_path, GRAPH_VERSION)
         self._manifest.record_routes(source.root_label, source.rel_path, file.routes, file.calls)
         self._manifest.record_space(
             source.root_label, source.rel_path, self._space.slug(), len(file.chunks)
@@ -520,6 +581,119 @@ class Indexer:
         )
         return True
 
+    def _backfill_graph(self, *, only_root: str | None) -> None:
+        """Collect edges from files the walk never opened.
+
+        The decision ladder is the point of this project: an unchanged file is
+        skipped before it is read, so it costs a stat() and nothing else. That
+        is also why adding a new kind of edge would otherwise do nothing to an
+        existing index -- namespace declarations are extracted when a file is
+        indexed, and on a workspace that has not changed, no file is.
+
+        The alternative is `--force`, which re-embeds everything and costs real
+        money to collect metadata that needs no model at all. This reads and
+        parses those files once, records their edges, and stamps the version so
+        the next run skips them again. No embedding, no API calls.
+
+        Every kind of edge the file produces is re-recorded -- imports,
+        namespaces and routes -- not only the new one. Stamping the version
+        asserts that the file's whole graph was extracted at it, and a partial
+        re-scan leaves older rows behind a claim that they are current: an
+        index built before the directive forms were kept apart holds
+        `using static` rows labelled `using`, and those would then resolve.
+
+        Reading and parsing happen outside the transaction, which is the
+        difference between this and `_flush`: that one does its slow work
+        first and holds the write lock only for the writes. A transaction
+        spanning the reads would hold it for the length of the whole upgrade
+        run, and the MCP server writes to this same database.
+        """
+        stale = self._manifest.files_missing_graph_version(
+            GRAPH_VERSION, languages=GRAPH_VERSION_LANGUAGES, only_root=only_root
+        )
+        if not stale:
+            return
+
+        scanned = 0
+        skipped = 0
+        batch: list[ScannedFile] = []
+        for root_label, rel_path, abs_path, language in stale:
+            with file_context(root_label, rel_path):
+                extracted = self._rescan(root_label, rel_path, abs_path, language)
+            if extracted is None:
+                skipped += 1
+                continue
+            batch.append(extracted)
+            if len(batch) >= _BACKFILL_BATCH:
+                self._record_rescanned(batch)
+                scanned += len(batch)
+                batch = []
+        if batch:
+            self._record_rescanned(batch)
+            scanned += len(batch)
+
+        log.info(
+            "graph.backfilled",
+            files=scanned,
+            skipped=skipped,
+            version=GRAPH_VERSION,
+            detail="edges collected from files the walk skipped as unchanged, so a "
+            "new kind of edge does not need a paid reindex to appear; skipped "
+            "files are unreadable or unparseable and are retried next run",
+        )
+
+    def _rescan(
+        self, root_label: str, rel_path: str, abs_path: str, language: str
+    ) -> ScannedFile | None:
+        """Every graph edge one file contributes, or None if it cannot be read.
+
+        Decoded by the same function `read_source` uses, rather than by the
+        same rule written out twice: the walk and this pass read the same files
+        by different routes, and a decoder they agree on only by convention is
+        one an edit can separate without anything failing.
+        """
+        try:
+            text = decode_source(Path(abs_path).read_bytes())
+        except (OSError, UnicodeDecodeError):
+            # Gone or unreadable since it was indexed. The orphan pass owns
+            # that decision; this one declines to guess, and counts it so a run
+            # of futile reads is visible rather than silent.
+            return None
+        tree = parse(text, language, log=log)
+        if tree is None:
+            return None
+        return ScannedFile(
+            root_label=root_label,
+            rel_path=rel_path,
+            imports=self._imports.scan(text, language, tree),
+            namespaces=self._namespaces.scan(text, language, tree),
+            routes=self._routes.declarations(text, language, rel_path, tree),
+            calls=self._routes.calls(text, language, tree),
+        )
+
+    def _record_rescanned(self, batch: list[ScannedFile]) -> None:
+        """One transaction per chunk, holding the write lock only for writes.
+
+        Chunked rather than one transaction for the whole pass: per-statement
+        autocommit is the fsync storm `begin()` warns about, and a single
+        transaction across the whole upgrade run would block every other writer
+        for its duration. A crash costs the current chunk, which the next run
+        redoes -- nothing in it was stamped.
+        """
+        self._manifest.begin()
+        try:
+            for file in batch:
+                self._manifest.record_imports(file.root_label, file.rel_path, file.imports)
+                self._manifest.record_namespaces(file.root_label, file.rel_path, file.namespaces)
+                self._manifest.record_routes(
+                    file.root_label, file.rel_path, file.routes, file.calls
+                )
+                self._manifest.set_graph_version(file.root_label, file.rel_path, GRAPH_VERSION)
+            self._manifest.commit()
+        except Exception:
+            self._manifest.rollback()
+            raise
+
     def _resolve_imports(self, stats: RunStats) -> None:
         """Point each import edge at the file it names, where that is decidable.
 
@@ -527,13 +701,74 @@ class Indexer:
         has not been reached yet, so resolving per file would depend on walk
         order and give different answers on different runs.
         """
-        pending = self._manifest.unresolved_imports()
+        # Built before the early return, and retirement run before it too. A
+        # workspace whose every edge resolves -- a C# repository referencing
+        # only itself -- leaves `pending` empty, and a deleted declaring file
+        # would then keep its `resolved_by` flag for ever: coverage would go on
+        # counting it, and nothing else clears it. The guard is about work to
+        # do, not about work to undo.
+        namespaces = NamespaceResolver(self._manifest.namespaces_by_unit())
+        retired = self._retire_stale_namespace_edges(namespaces)
+
+        # Declined kinds are recorded as declined and dropped before anything
+        # counts them. Leaving them pending means every run re-fetches an edge
+        # it can never resolve and reports a resolution rate against a
+        # denominator that includes it -- "not resolvable at this rung" reading
+        # as "not resolved yet", on every surface that counts.
+        outstanding: list[tuple[str, str, str, str, bool, str]] = []
+        # Distinct edges, not rows: `unresolved_imports` does not select
+        # `line`, so a module used on three lines of one file arrives three
+        # times -- and `mark_declined` keys without the line, so the first
+        # call already covers all three. Counting rows would report three
+        # declined edges where the source wrote one.
+        declined: set[tuple[str, str, str, str]] = set()
+        for edge in self._manifest.unresolved_imports():
+            root_label, rel_path, module, _, _, kind = edge
+            if kind in DECLINED_KINDS:
+                declined.add((root_label, rel_path, module, kind))
+                continue
+            outstanding.append(edge)
+        if declined:
+            # One transaction, like every other batch of small writes here.
+            self._manifest.begin()
+            try:
+                for root_label, rel_path, module, kind in sorted(declined):
+                    self._manifest.mark_declined(root_label, rel_path, module, kind=kind)
+                self._manifest.commit()
+            except Exception:
+                self._manifest.rollback()
+                raise
+            log.info(
+                "graph.declined",
+                edges=len(declined),
+                detail="directive forms no resolver at this rung can answer -- a C# "
+                "`using static` names a type, not a namespace",
+            )
+
+        pending = outstanding
         if not pending:
+            if retired:
+                log.info("graph.namespace_edges_retired", edges=retired)
             return
 
         resolver = ImportResolver(self._manifest.files_by_unit())
         resolved = 0
-        for root_label, rel_path, module, language, is_relative in pending:
+        by_namespace = 0
+        for root_label, rel_path, module, language, is_relative, kind in pending:
+            if language == "csharp":
+                # Declined kinds were dropped when `pending` was built -- one
+                # guard, not two, so a kind added to the declined set cannot be
+                # handled by one check and missed by the other.
+                #
+                # A `using` names a namespace, which is declared across N
+                # files. Nothing is written into `resolved_path` -- the targets
+                # are derived by join when something asks, because there is one
+                # column and N answers.
+                if namespaces.targets(module, root_label=root_label, from_path=rel_path):
+                    self._manifest.mark_namespace_resolved(root_label, rel_path, module, kind=kind)
+                    resolved += 1
+                    by_namespace += 1
+                continue
             edge = ImportEdge(module=module, kind="import", is_relative=is_relative, line=0)
             target = resolver.resolve(
                 edge, from_path=rel_path, root_label=root_label, language=language
@@ -547,9 +782,28 @@ class Indexer:
             "graph.resolved",
             attempted=len(pending),
             resolved=resolved,
-            detail="unresolved edges are packages, tsconfig aliases or C# "
-            "namespaces, which need more than the file list",
+            by_namespace=by_namespace,
+            namespace_edges_retired=retired,
+            detail="unresolved edges are packages or tsconfig aliases, which need "
+            "more than the file list; a C# using resolves against the namespaces "
+            "declared in its own repository and names every file declaring one",
         )
+
+    def _retire_stale_namespace_edges(self, namespaces: NamespaceResolver) -> int:
+        """Unmark usings whose declaring files have all been deleted.
+
+        A path edge needs no equivalent: deleting its target cascades the row
+        away. A namespace edge stores no target -- that is the point -- so
+        nothing cascades, and the flag would go on claiming a resolution the
+        join can no longer produce. Coverage reads the flag, so the stale one
+        would report the C# resolver as working on edges that reach nothing.
+        """
+        retired = 0
+        for root_label, rel_path, module in self._manifest.namespace_resolved_imports():
+            if not namespaces.targets(module, root_label=root_label, from_path=rel_path):
+                self._manifest.clear_namespace_resolution(root_label, rel_path, module)
+                retired += 1
+        return retired
 
     def _classify_origins(self) -> None:
         """Record where each import points, so coverage has a denominator.
@@ -578,11 +832,12 @@ class Indexer:
                     language=language,
                     is_relative=is_relative,
                     resolved=resolved,
+                    resolved_by=resolved_by,
                     root_label=root_label,
                     from_path=rel_path,
                 ).value,
             )
-            for root_label, rel_path, module, language, is_relative, resolved in edges
+            for root_label, rel_path, module, language, is_relative, resolved, resolved_by in edges
         ]
         # One transaction for the batch. The connection is in autocommit, so
         # without this each UPDATE fsyncs on its own -- the cost `begin()`'s
