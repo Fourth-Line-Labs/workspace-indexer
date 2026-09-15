@@ -118,6 +118,20 @@ class Manifest:
         # The version this replaced was slow and self-healing; this one has to
         # be atomic to be neither.
         self._db.execute("BEGIN")
+        try:
+            self._apply_migration(additions)
+            self._db.execute("COMMIT")
+        except BaseException:
+            # A crash is not the only way out of this block. `SQLITE_BUSY` is
+            # the realistic one -- the MCP server writes to this database and
+            # the default busy timeout is five seconds -- and an exception in
+            # __init__ means __exit__ never runs, so the open write transaction
+            # would sit on its RESERVED lock until the connection is collected,
+            # blocking every other writer to the file.
+            self._db.execute("ROLLBACK")
+            raise
+
+    def _apply_migration(self, additions: dict[str, dict[str, str]]) -> None:
         added: set[str] = set()
         for table, columns in additions.items():
             existing = {str(row["name"]) for row in self._db.execute(f"PRAGMA table_info({table})")}
@@ -148,7 +162,6 @@ class Manifest:
                 "UPDATE imports SET resolved_by = 'path' "
                 "WHERE resolved_path IS NOT NULL AND resolved_by IS NULL"
             )
-        self._db.execute("COMMIT")
 
         # The retirement pass asks for namespace-resolved edges on every run,
         # and `imports` is the largest table here. Partial, because that is the
@@ -640,7 +653,13 @@ class Manifest:
         """
         self._db.execute(
             "UPDATE imports SET resolved_by = 'declined' "
-            "WHERE root_label = ? AND rel_path = ? AND module = ? AND kind = ?",
+            "WHERE root_label = ? AND rel_path = ? AND module = ? AND kind = ? "
+            # Never over an existing answer. `clear_namespace_resolution` keys
+            # on the state it expects for the same reason: a method whose
+            # contract is "this was never resolvable" should not be able to
+            # rewrite a resolution into a terminal state because a caller
+            # passed the wrong row.
+            "AND resolved_path IS NULL AND resolved_by IS NULL",
             (root_label, rel_path, module, kind),
         )
 

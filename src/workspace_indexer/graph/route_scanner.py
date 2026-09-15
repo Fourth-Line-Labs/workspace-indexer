@@ -93,6 +93,11 @@ class RouteScanner:
         A C# file is read by three walkers -- imports, namespaces and routes --
         and parsing is the expensive half of each. Passing the tree in is what
         makes that one parse rather than three.
+
+        It must be the tree from parsing *this* `text` as *this* `language`.
+        Nothing checks that, and nothing can cheaply: a tree from another
+        grammar walks without error and yields no node types this looks for, so
+        the failure is an empty result rather than an exception.
         """
         if rel_path.endswith((".cshtml", ".razor")):
             return self._razor(text, rel_path)

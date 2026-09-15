@@ -49,10 +49,13 @@ class ImportScanner:
     def scan(self, text: str, language: str, tree: Tree | None = None) -> list[ImportEdge]:
         """`tree` is the already-parsed source, when the caller has one.
 
-        Parsing is the expensive half of this, and a C# file is walked twice --
-        once for imports and once for the namespaces they resolve against. The
-        caller passes the tree so the file is parsed once per run rather than
-        once per walker.
+        Parsing is the expensive half of this, and a C# file is walked three
+        times -- imports, namespaces, and routes. The caller passes the tree so
+        the file is parsed once per run rather than once per walker.
+
+        It must be the tree from parsing *this* `text` as *this* `language`: a
+        tree from another grammar yields no node types this looks for, so the
+        failure would be an empty result rather than an error.
         """
         if language not in SUPPORTED or not text:
             return []

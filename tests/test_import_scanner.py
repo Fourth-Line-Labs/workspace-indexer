@@ -214,7 +214,11 @@ def test_every_kind_the_scanner_emits_is_a_declared_one() -> None:
     emitted = {
         edge.kind for language, source in sources.items() for edge in scanner.scan(source, language)
     }
-    assert emitted <= KINDS, f"undeclared kinds: {sorted(emitted - KINDS)}"
-    # And the declaration is not a superset nobody produces: every C# form is
-    # exercised above, so a stale entry shows up as an unreached one.
-    assert {"using", "using_static", "global_using", "global_using_static"} <= emitted
+    # Equality, not containment. A subset test passes when a grammar fails to
+    # load and `scan` returns nothing -- `emitted` collapses to whatever did
+    # parse, and a stale entry or a broken walker for the other languages goes
+    # unnoticed. These three sources emit all seven kinds between them, so
+    # equality costs nothing and closes both directions.
+    assert emitted == KINDS, (
+        f"undeclared: {sorted(emitted - KINDS)}; unreached: {sorted(KINDS - emitted)}"
+    )

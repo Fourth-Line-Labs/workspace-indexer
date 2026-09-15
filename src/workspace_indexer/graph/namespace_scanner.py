@@ -32,7 +32,12 @@ class NamespaceScanner:
         self, text: str, language: str, tree: Tree | None = None
     ) -> list[NamespaceDeclaration]:
         """`tree` is the already-parsed source, when the caller has one -- the
-        import scan of the same file has just produced it."""
+        import scan of the same file has just produced it.
+
+        It must be the tree from parsing *this* `text` as *this* `language`: a
+        tree from another grammar yields no node types this looks for, so the
+        failure would be an empty result rather than an error.
+        """
         if language not in SUPPORTED or not text:
             return []
         if tree is None:

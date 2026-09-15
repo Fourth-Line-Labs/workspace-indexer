@@ -1272,6 +1272,12 @@ def test_a_declined_edge_is_counted_by_neither_coverage_surface(manifest: Manife
     manifest.mark_declined(user.root_label, user.rel_path, "MyApp.Util", kind="using_static")
     manifest.record_origins([(user.root_label, user.rel_path, "System.Text", "framework")])
 
+    # Terminal, which is the half the docstring names and the coverage
+    # assertions below do not reach: if `unresolved_imports` stopped excluding
+    # it, the edge would be re-offered and re-marked every run for ever and
+    # nothing else in the suite would notice.
+    assert "MyApp.Util" not in [module for _, _, module, _, _, _ in manifest.unresolved_imports()]
+
     resolved, total = manifest.resolution_coverage()["csharp"]
     assert (resolved, total) == (0, 1)
 
@@ -1279,3 +1285,22 @@ def test_a_declined_edge_is_counted_by_neither_coverage_surface(manifest: Manife
     assert coverage.total == 1
     assert coverage.unclassified == 0
     assert coverage.framework == 1
+
+
+def test_declining_an_edge_cannot_overwrite_a_resolution(manifest: Manifest) -> None:
+    """`declined` means "this was never resolvable here", so it must not be
+    able to erase an answer. Enforced by the statement rather than by its
+    callers: today's only caller feeds it rows that are unresolved by
+    construction, and a method whose contract depends on that is one edit from
+    rewriting history."""
+    target = _lang_source("service/helper.py", "python")
+    manifest.record_file(target, chunker="code", chunker_version=1)
+    user = _lang_source("service/app.py", "python")
+    manifest.record_file(user, chunker="code", chunker_version=1)
+    manifest.record_imports(user.root_label, user.rel_path, [_edge(".helper")])
+    manifest.set_resolved_path(user.root_label, user.rel_path, ".helper", target.rel_path)
+
+    manifest.mark_declined(user.root_label, user.rel_path, ".helper", kind="import")
+
+    found = manifest.dependencies_of(user.root_label, user.rel_path)
+    assert [(d.rel_path, d.resolved_by) for d in found] == [("service/helper.py", "path")]

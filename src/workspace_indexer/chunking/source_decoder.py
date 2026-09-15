@@ -1,10 +1,15 @@
 """Turning a file's bytes into the text every reader of it sees.
 
-One function rather than a convention, because there are two paths to the same
-file -- the indexing walk and the graph backfill -- and they have to produce
-identical text. A grammar handed different bytes depending on which path
-reached the file is a difference nothing downstream can see until an
+One function rather than a convention, because three paths read the same file
+-- the indexing walk, the graph backfill and the staleness check -- and they
+have to produce identical text. A grammar handed different bytes depending on
+which path reached the file is a difference nothing downstream can see until an
 extraction quietly disagrees with itself.
+
+The staleness check differs in one way, deliberately: a file that will not
+decode strictly still gets an answer there, because staleness is a hint rather
+than a gate. It reaches that fallback only where indexing would have declined
+the file outright.
 """
 
 from __future__ import annotations

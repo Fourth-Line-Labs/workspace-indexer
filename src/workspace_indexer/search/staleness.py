@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.discovery.pdf_text import extract_pages
 from workspace_indexer.models import FileKind, SearchHit
 from workspace_indexer.obs.logging import get_logger, log_once
@@ -72,7 +73,21 @@ def _read(path: str, kind: FileKind) -> str | None:
         pages = extract_pages(Path(path))
         return None if pages is None else "\n\n".join(pages)
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
+        raw = Path(path).read_bytes()
     except OSError as exc:
         log.debug("staleness.unreadable", path=path, error=str(exc))
         return None
+    try:
+        # The same decoder the indexer used on the way in, so this compares
+        # against the text that was actually chunked: `read_text` would keep a
+        # byte-order mark and translate CRLF, and Visual Studio writes both.
+        # Harmless while the comparison is substring membership against
+        # normalised text, and a false "stale" on every C# file the moment it
+        # is not.
+        return decode_source(raw)
+    except UnicodeDecodeError:
+        # Staleness is a hint, not a gate. A file that cannot be decoded
+        # strictly still gets an answer here, which is the one place that
+        # differs from indexing -- indexing declines the file, and this only
+        # declines to be certain about it.
+        return raw.decode("utf-8", errors="replace")

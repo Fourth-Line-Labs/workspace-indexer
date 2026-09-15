@@ -20,13 +20,11 @@ from tests.conftest import ConfigFactory
 from tests.fake_embedding_backend import FakeEmbeddingBackend
 from tests.fake_sparse_backend import FakeSparseBackend
 from workspace_indexer.chunking import ChunkerRegistry
-from workspace_indexer.chunking.file_reader import read_source
 from workspace_indexer.chunking.source_decoder import decode_source
 from workspace_indexer.classification import RuleClassifier
 from workspace_indexer.config import Settings, WorkspaceConfig
-from workspace_indexer.discovery.file_candidate import FileCandidate
 from workspace_indexer.embedding.embedding_service import EmbeddingService
-from workspace_indexer.models import EmbeddingSpace, FileKind, SearchFilters
+from workspace_indexer.models import EmbeddingSpace, SearchFilters
 from workspace_indexer.pipeline import Indexer
 from workspace_indexer.state import Manifest
 from workspace_indexer.storage.qdrant_store import QdrantStore
@@ -1172,42 +1170,44 @@ async def test_a_static_using_is_declined_rather_than_resolved(
     ]
 
 
-def test_the_backfill_decodes_a_file_exactly_as_the_pipeline_does(tmp_path: Path) -> None:
-    """Byte-for-byte, not "close enough to parse the same".
+async def test_the_backfill_decodes_a_file_exactly_as_the_pipeline_does(
+    harness: Harness, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backfill reads through the same decoder the walk reads through.
 
-    Visual Studio writes both a BOM and CRLF on almost every .cs file, and the
-    two decodings differ on both: `read_text` would keep the mark and translate
-    the line endings. Neither difference changes what this grammar extracts --
-    a BOM'd file still yields its namespace, which is why the obvious
-    end-to-end assertion passes either way and proves nothing. So this compares
-    the decoded text itself, which is the invariant the comment claims.
+    Asserted by watching the decoder the backfill actually calls, not by
+    re-deriving the rule here: a comparison written in the test would hold
+    whatever `_rescan` does, which is this guard's whole failure history. The
+    end-to-end result cannot distinguish the two decodings either -- a BOM'd
+    file still yields its namespace -- so the observable thing is which
+    function was called with which bytes.
     """
-    path = tmp_path / "Repo.cs"
-    path.write_bytes("namespace MyApp.Data;\r\npublic class Repo {}\r\n".encode("utf-8-sig"))
+    src = workspace / "repo_one" / "src"
+    contents = "namespace MyApp.Data;\r\npublic class Repo {}\r\n"
+    (src / "Repo.cs").write_bytes(contents.encode("utf-8-sig"))
+    (src / "Startup.cs").write_text("using MyApp.Data;\npublic class S {}\n", encoding="utf-8")
+    await harness.indexer().run()
 
-    candidate = FileCandidate(
-        root_label="workspace",
-        unit="workspace",
-        abs_path=path,
-        rel_path="Repo.cs",
-        kind=FileKind.CODE,
-        language="csharp",
-        size=path.stat().st_size,
-        mtime_ns=path.stat().st_mtime_ns,
-    )
-    through_the_pipeline = read_source(candidate, ())
-    assert through_the_pipeline is not None
+    with sqlite3.connect(harness.tmp / "manifest.sqlite3") as older:
+        older.execute("DELETE FROM namespace_declarations")
+        older.execute("UPDATE files SET graph_version = 0")
 
-    # The decoder both paths call, rather than the rule written out twice. A
-    # test comparing two expressions I wrote here would pass whatever the
-    # backfill actually does, which is the weakness this file has been bitten
-    # by three times: it would assert the property and not the code.
-    through_the_backfill = decode_source(path.read_bytes())
-    assert through_the_backfill == through_the_pipeline.text
-    # Both halves of the difference, named so a future edit cannot satisfy the
-    # comparison by weakening one of them.
-    assert "\ufeff" not in through_the_backfill
-    assert "\r\n" in through_the_backfill
+    decoded: list[bytes] = []
+
+    def recording(raw: bytes) -> str:
+        decoded.append(raw)
+        return decode_source(raw)
+
+    monkeypatch.setattr("workspace_indexer.pipeline.indexer.decode_source", recording)
+    await harness.indexer().run()
+
+    assert decoded, "the backfill did not decode through the shared decoder"
+    text = decode_source(decoded[0])
+    assert text == contents
+    # Both halves of what the two decodings disagree about, named so a future
+    # change cannot satisfy this by weakening one of them.
+    assert "\ufeff" not in text
+    assert "\r\n" in text
 
 
 async def test_the_backfill_re_extracts_imports_not_only_the_new_edge(

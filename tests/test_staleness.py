@@ -71,13 +71,16 @@ def test_one_read_per_file_not_per_hit(tmp_path: Path, monkeypatch: pytest.Monke
     path.write_text(f"{BODY}\n\ndef other():\n    pass\n", encoding="utf-8")
 
     reads: list[str] = []
-    original = Path.read_text
+    original = Path.read_bytes
 
-    def counting(self: Path, *args: object, **kwargs: object) -> str:
+    def counting(self: Path) -> bytes:
         reads.append(str(self))
-        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+        return original(self)
 
-    monkeypatch.setattr(Path, "read_text", counting)
+    # `read_bytes`, because the file is decoded by the same function the
+    # indexer decodes with rather than opened in text mode -- a BOM kept or a
+    # CRLF translated here would compare against text that was never chunked.
+    monkeypatch.setattr(Path, "read_bytes", counting)
     hits = [
         _hit(path, BODY, "id-1"),
         _hit(path, "def other():\n    pass", "id-2"),

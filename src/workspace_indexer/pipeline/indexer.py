@@ -716,18 +716,31 @@ class Indexer:
         # denominator that includes it -- "not resolvable at this rung" reading
         # as "not resolved yet", on every surface that counts.
         outstanding: list[tuple[str, str, str, str, bool, str]] = []
-        declined = 0
+        # Distinct edges, not rows: `unresolved_imports` does not select
+        # `line`, so a module used on three lines of one file arrives three
+        # times -- and `mark_declined` keys without the line, so the first
+        # call already covers all three. Counting rows would report three
+        # declined edges where the source wrote one.
+        declined: set[tuple[str, str, str, str]] = set()
         for edge in self._manifest.unresolved_imports():
             root_label, rel_path, module, _, _, kind = edge
             if kind in DECLINED_KINDS:
-                self._manifest.mark_declined(root_label, rel_path, module, kind=kind)
-                declined += 1
+                declined.add((root_label, rel_path, module, kind))
                 continue
             outstanding.append(edge)
         if declined:
+            # One transaction, like every other batch of small writes here.
+            self._manifest.begin()
+            try:
+                for root_label, rel_path, module, kind in sorted(declined):
+                    self._manifest.mark_declined(root_label, rel_path, module, kind=kind)
+                self._manifest.commit()
+            except Exception:
+                self._manifest.rollback()
+                raise
             log.info(
                 "graph.declined",
-                edges=declined,
+                edges=len(declined),
                 detail="directive forms no resolver at this rung can answer -- a C# "
                 "`using static` names a type, not a namespace",
             )
