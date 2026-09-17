@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from qdrant_client import AsyncQdrantClient
 
-from workspace_indexer.config import RerankConfig, Settings
+from workspace_indexer.config import Settings
 from workspace_indexer.models import EmbeddingSpace, SparseVec
 from workspace_indexer.storage.qdrant_store import QdrantStore
 from workspace_indexer.storage.query_spec import QuerySpec
@@ -122,37 +122,18 @@ async def test_server_mode_round_trip() -> None:
         await client.close()
 
 
-def test_qdrant_refuses_a_configuration_that_asks_the_database_to_rerank() -> None:
-    """The failure this prevents is invisible.
+def test_the_store_is_built_without_any_reranking_argument() -> None:
+    """The factory used to take a `RerankConfig` solely to decide whether the
+    store reranked. That implementation was retired in #73 and the refusal
+    moved to config load, so a reranking argument here would be a second place
+    to disagree about the same question."""
+    from inspect import signature
 
-    Both factories consult the same provider list: the reranker factory
-    declines to rerank because the store will, and the store factory would
-    build no reranker because Qdrant has none. Every search would then return
-    fusion order while the configuration said `database:rerank-2.5-lite`, and
-    nothing anywhere would say so.
-    """
-    with pytest.raises(ValueError, match="no server-side reranker"):
-        build_vector_store(
-            Settings(vector_store="qdrant"),
-            "w",
-            RerankConfig(model="database:rerank-2.5-lite"),
-        )
+    assert "rerank" not in signature(build_vector_store).parameters
 
 
-def test_qdrant_is_unaffected_by_a_client_side_rerank_model() -> None:
-    store = build_vector_store(
-        Settings(vector_store="qdrant"), "w", RerankConfig(model="voyageai:rerank-2.5-lite")
-    )
-    assert store.describe().startswith("embedded qdrant")
-
-
-def test_reranking_turned_off_is_never_a_database_rerank() -> None:
-    """`enabled=false` with a `database:` model is contradictory but harmless,
-    and must resolve to "nobody reranks" rather than an error on a backend
-    that could not have honoured it anyway."""
-    store = build_vector_store(
-        Settings(vector_store="qdrant"),
-        "w",
-        RerankConfig(enabled=False, model="database:rerank-2.5-lite"),
-    )
+def test_a_client_side_rerank_model_does_not_reach_the_store_at_all() -> None:
+    """Reranking is now entirely a search-path concern: whichever client-side
+    model is configured, the store is built the same way."""
+    store = build_vector_store(Settings(vector_store="qdrant"), "w")
     assert store.describe().startswith("embedded qdrant")

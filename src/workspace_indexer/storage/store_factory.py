@@ -9,11 +9,9 @@ from __future__ import annotations
 
 from qdrant_client import AsyncQdrantClient
 
-from workspace_indexer.config import RerankConfig, Settings
+from workspace_indexer.config import Settings
 from workspace_indexer.obs.logging import get_logger, log_once
-from workspace_indexer.storage.atlas_rerank import AtlasRerank
 from workspace_indexer.storage.qdrant_store import QdrantStore
-from workspace_indexer.storage.server_reranker import ServerReranker
 from workspace_indexer.storage.vector_store import VectorStore
 
 log = get_logger("workspace_indexer.storage.factory")
@@ -39,32 +37,15 @@ def build_qdrant_client(settings: Settings) -> AsyncQdrantClient:
     return AsyncQdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
 
-# Rerank providers that mean "the store does it". Kept in step with the
-# reranker factory's own list by a test, because the two deciding differently
-# is the one failure this arrangement can have: both would decline to rerank
-# and a search would quietly return fusion order.
-DATABASE_PROVIDERS = frozenset({"database", "server"})
+def build_vector_store(settings: Settings, workspace: str) -> VectorStore:
+    """No reranking argument: nothing reranks inside the store.
 
-
-def build_vector_store(
-    settings: Settings, workspace: str, rerank: RerankConfig | None = None
-) -> VectorStore:
-    server_rerank = _server_rerank(rerank)
-
+    Server-side reranking was retired in #73 -- `RerankConfig` refuses a
+    `database:` model at config load, so no backend here has to know the
+    question exists. Restoring it is tracked in #94.
+    """
     if settings.vector_store == "mongodb":
-        return _build_mongo_store(settings, workspace, server_rerank)
-
-    if server_rerank is not None:
-        # Qdrant has no server-side reranker. Silently ignoring the setting
-        # would leave the reranker factory declining to rerank as well, so
-        # every search would return fusion order while the configuration
-        # claimed otherwise.
-        raise ValueError(
-            f"rerank model {rerank.model if rerank else ''!r} asks the database to "
-            "rerank, but VECTOR_STORE=qdrant has no server-side reranker. Use "
-            "VECTOR_STORE=mongodb, or a client-side model such as "
-            "voyageai:rerank-2.5-lite."
-        )
+        return _build_mongo_store(settings, workspace)
 
     embedded = settings.qdrant_mode == "embedded"
     return QdrantStore(
@@ -81,16 +62,7 @@ def build_vector_store(
     )
 
 
-def _server_rerank(rerank: RerankConfig | None) -> ServerReranker | None:
-    """The store's reranker, or None when something else does the reranking."""
-    if rerank is None or not rerank.enabled or rerank.provider not in DATABASE_PROVIDERS:
-        return None
-    return AtlasRerank(rerank.model_id, candidates=rerank.candidates)
-
-
-def _build_mongo_store(
-    settings: Settings, workspace: str, rerank: ServerReranker | None = None
-) -> VectorStore:
+def _build_mongo_store(settings: Settings, workspace: str) -> VectorStore:
     """Imported here rather than at module scope.
 
     pymongo is an optional extra. A top-level import would make the whole
@@ -117,12 +89,10 @@ def _build_mongo_store(
         "store.mongodb",
         database=settings.mongodb_database,
         dtype=settings.mongodb_vector_dtype,
-        rerank=rerank.name if rerank else "none",
     )
     return MongoStore(
         AsyncMongoClient(settings.mongodb_connection_string),
         workspace=workspace,
         database=settings.mongodb_database,
         dtype=settings.mongodb_vector_dtype,
-        rerank=rerank,
     )

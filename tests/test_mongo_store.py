@@ -296,142 +296,52 @@ def test_the_document_we_build_is_within_the_bson_limit() -> None:
     assert len(bson.encode(document)) < 16 * 1024 * 1024
 
 
-# ---- server-side reranking --------------------------------------------------
+# ---- nothing reranks inside the query (#73) ---------------------------------
 
 
-async def test_the_store_reranks_inside_the_aggregation_when_asked(
-    client: FakeMongoClient,
-) -> None:
-    """The point of the whole arrangement: one round trip instead of two."""
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
-
-    store = MongoStore(
-        cast(Any, client),
-        workspace="labbox",
-        database="idx",
-        rerank=AtlasRerank("rerank-2.5-lite", candidates=50),
-    )
-    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
-
-    pipeline = collection(client).pipelines[-1]
-    assert any("$rankFusion" in s for s in pipeline)
-    assert any("$rerank" in s for s in pipeline)
-    assert stages(pipeline, "$rerank")["query"] == {"text": "auth"}
-
-
-async def test_the_candidate_set_is_widened_for_the_reranker(
-    client: FakeMongoClient,
-) -> None:
-    """Nothing above the store knows a rerank is coming, so the store widens
-    for itself. Reranking the eight documents it was going to return anyway
-    would buy nothing at all."""
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
-
-    store = MongoStore(
-        cast(Any, client),
-        workspace="labbox",
-        database="idx",
-        rerank=AtlasRerank("rerank-2.5-lite", candidates=50),
-    )
-    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
-
-    pipeline = collection(client).pipelines[-1]
-    limits = [s["$limit"] for s in pipeline if "$limit" in s]
-    # Deep in, shallow out: the candidate set first, the page last.
-    assert limits[0] == 50
-    assert limits[-1] == 8
-
-
-async def test_no_rerank_stage_appears_when_the_store_does_not_rerank(
+async def test_no_pipeline_the_store_builds_contains_a_rerank_stage(
     store: MongoStore, client: FakeMongoClient
 ) -> None:
-    """The default has to produce the pipeline it always did."""
-    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
-    assert not any("$rerank" in s for s in collection(client).pipelines[-1])
-
-
-async def test_database_reranking_refuses_the_client_side_fusion_fallback(
-    client: FakeMongoClient,
-) -> None:
-    """Every other fallback here trades a round trip for the same answer. This
-    one would return a *different* answer -- fused, unreranked -- while the
-    configuration still claimed to rerank, so it raises instead.
+    """The retirement, asserted where it can actually break. `$rerank` is the
+    one stage no reachable environment accepts -- absent from the local binary
+    at every image tag, and Flex cannot reach the 8.3 it needs -- so a pipeline
+    that grows one again fails every search against every cluster we have.
     """
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
+    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
+    collection(client).unsupported_stage = "$rankFusion"
+    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
 
-    store = MongoStore(
-        cast(Any, client),
-        workspace="labbox",
-        database="idx",
-        rerank=AtlasRerank("rerank-2.5-lite"),
-    )
+    built = collection(client).pipelines
+    assert built, "no pipeline was captured, so this asserts nothing"
+    assert not any("$rerank" in stage for pipeline in built for stage in pipeline)
+
+
+async def test_the_candidate_set_is_not_widened(store: MongoStore, client: FakeMongoClient) -> None:
+    """With nothing reordering results inside the query, retrieving fifty
+    documents to return eight would be paid for and thrown away."""
+    await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
+
+    limits = [s["$limit"] for s in collection(client).pipelines[-1] if "$limit" in s]
+    assert limits[-1] == 8
+    assert 50 not in limits
+
+
+async def test_describe_names_the_database_and_nothing_else(client: FakeMongoClient) -> None:
+    """Preflight prints this. It carried a `rerank=` suffix while the store
+    could rerank; there is no second state to distinguish now."""
+    assert MongoStore(cast(Any, client), workspace="w", database="idx").describe() == "mongodb idx"
+
+
+async def test_a_rejected_fusion_stage_falls_back_rather_than_raising(
+    store: MongoStore, client: FakeMongoClient
+) -> None:
+    """The guard that raised here existed only for database reranking: the
+    client-side fallback fuses in Python, leaving no aggregation to append
+    `$rerank` to. With no reranker in the store the fallback is a plain
+    round-trip trade, so a deployment without `$rankFusion` must search, not
+    fail."""
     collection(client).unsupported_stage = "$rankFusion"
 
-    with pytest.raises(RuntimeError, match="database reranking needs \\$rankFusion"):
-        await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
+    hits = await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
 
-
-async def test_describe_says_when_the_store_is_reranking(client: FakeMongoClient) -> None:
-    """Preflight prints this. "mongodb idx" would not tell anyone why their
-    latency changed."""
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
-
-    plain = MongoStore(cast(Any, client), workspace="w", database="idx")
-    reranking = MongoStore(
-        cast(Any, client), workspace="w", database="idx", rerank=AtlasRerank("rerank-2.5")
-    )
-    assert plain.describe() == "mongodb idx"
-    assert reranking.describe() == "mongodb idx, rerank=database:rerank-2.5"
-
-
-async def test_an_unavailable_rerank_stage_says_what_to_change(
-    client: FakeMongoClient,
-) -> None:
-    """Atlas sends one generic message for every cause -- a cluster below 8.3,
-    a project without Native Reranking, or a malformed stage. Passed through,
-    it leaves you reading your own pipeline for a fault that is not in it.
-
-    Measured against a real cluster: 8.0.29 with the project toggle on still
-    refuses, because the version requirement is separate and undocumented in
-    the error.
-    """
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
-
-    store = MongoStore(
-        cast(Any, client),
-        workspace="labbox",
-        database="idx",
-        rerank=AtlasRerank("rerank-2.5-lite"),
-    )
-    collection(client).unsupported_stage = "$rerank"
-
-    with pytest.raises(RuntimeError) as caught:
-        await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
-
-    message = str(caught.value)
-    assert "8.3" in message
-    assert "Native Reranking" in message
-    # And the way out, so the reader is not left with only a diagnosis.
-    assert "voyageai:rerank-2.5-lite" in message
-
-
-async def test_a_refused_rerank_is_not_mistaken_for_a_missing_rank_fusion(
-    client: FakeMongoClient,
-) -> None:
-    """It was, the first time. `$rankFusion` works on this cluster and
-    `$rerank` does not, and the fallback logic blamed the stage that was fine
-    -- so the error named the wrong feature and the wrong fix."""
-    from workspace_indexer.storage.atlas_rerank import AtlasRerank
-
-    store = MongoStore(
-        cast(Any, client),
-        workspace="labbox",
-        database="idx",
-        rerank=AtlasRerank("rerank-2.5-lite"),
-    )
-    collection(client).unsupported_stage = "$rerank"
-
-    with pytest.raises(RuntimeError) as caught:
-        await store.search(SPACE, QuerySpec(dense=[1.0] * 4, text="auth", limit=8))
-
-    assert "$rankFusion" not in str(caught.value)
+    assert isinstance(hits, list)

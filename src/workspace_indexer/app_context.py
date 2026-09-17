@@ -13,6 +13,7 @@ from workspace_indexer.chunking import ChunkerRegistry
 from workspace_indexer.classification import DocumentClassifier, RuleClassifier
 from workspace_indexer.config import (
     LoggingConfig,
+    RerankConfig,
     Settings,
     WorkspaceConfig,
     load_workspace_config,
@@ -72,7 +73,7 @@ class AppContext:
             registry=ChunkerRegistry(config.workspace.name),
             embeddings=build_embedding_service(settings),
             sparse=build_sparse_backend(settings),
-            store=build_vector_store(settings, config.workspace.name, config.search.rerank),
+            store=build_vector_store(settings, config.workspace.name),
             reranker=build_reranker(config.search.rerank, settings),
             classifier=RuleClassifier(),
         )
@@ -132,7 +133,13 @@ def with_rerank_overrides(config: WorkspaceConfig, settings: Settings) -> Worksp
         updates["model"] = settings.rerank_model
     if not updates:
         return config
-    rerank = config.search.rerank.model_copy(update=updates)
+    # Validated rather than copied in. `model_copy(update=...)` does not run
+    # field validators, so an override went straight past the check that exists
+    # to catch a bad `RERANK_MODEL` at config load rather than an hour into a
+    # run -- including the retired `database:` provider (#73), which then
+    # surfaced from the reranker factory as "unknown provider" and named
+    # neither the requirement nor the issue.
+    rerank = RerankConfig.model_validate({**config.search.rerank.model_dump(), **updates})
     return config.model_copy(update={"search": config.search.model_copy(update={"rerank": rerank})})
 
 

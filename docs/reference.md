@@ -1,3 +1,19 @@
+---
+title: "workspace-indexer reference"
+summary: >-
+  Every CLI command, configuration option and MCP tool, with the defaults that
+  are actually in code rather than the ones in the example config. Includes the
+  storage backends and their differences, where reranking runs and which
+  environments can run it, cluster sizing limits, and the indexing brakes.
+created: 2026-08-27
+updated: 2026-09-17
+tags: [reference, configuration, cli, mcp, storage, reranking]
+status: current
+source_ref: "main @ 402cd52"
+confidential: false
+audience: "someone looking up a command, flag or default -- human or LLM"
+---
+
 # Reference
 
 Every command, every configuration option, every MCP tool. `README.md` is the
@@ -942,47 +958,51 @@ per process, by asking the server rather than by reading a version number.
 ### Where reranking runs
 
 `RERANK_MODEL` names the *provider*, and the provider already says where the
-model runs -- `local:` in this process, `voyageai:` over the network. A third,
-`database:`, says the store reranks inside its own query:
+model runs -- `local:` in this process, `voyageai:` over the network:
 
 ```
 RERANK_MODEL=voyageai:rerank-2.5-lite   # a call from here, after retrieval
 RERANK_MODEL=local:BAAI/bge-reranker-base
-RERANK_MODEL=database:rerank-2.5-lite   # a $rerank stage in the aggregation
 ```
 
-One knob rather than two. A separate `DATABASE_RERANKING` boolean would create
-four states of which two contradict each other, and leave "is it off?" needing
-both to be read; `RERANK_ENABLED=false` still turns everything off whichever
-provider is named.
+One knob rather than two. A separate boolean would create four states of which
+two contradict each other, and leave "is it off?" needing both to be read;
+`RERANK_ENABLED=false` turns everything off whichever provider is named.
 
-Nothing branches on this. `database:` resolves the client-side reranker to the
-same no-op object that `enabled: false` produces, and the store is handed a
-rerank stage-builder instead -- so the search path is identical in all three
-cases and never asks the question. It is the same trick `NoopReranker` already
-plays.
+**There is no `database:` provider.** It existed, and named a third location:
+the store reranking inside its own query via Atlas's `$rerank` stage, one round
+trip instead of two. It was retired in issue #73 because no environment this
+project can reach can execute it:
 
-Two things it will not do quietly:
+| environment | `$rerank` |
+|---|---|
+| Atlas Flex (the tier this was developed against) | no — cannot reach 8.3 |
+| Atlas Local container, any tag including `preview` | no — absent from the binary |
+| MongoDB Community (apt) | no — absent from the binary |
+| Paid Atlas tier at 8.3+ with Native Reranking on | yes, presumably — never tested |
 
-- With `VECTOR_STORE=qdrant` it **raises at startup**. Qdrant has no
-  server-side reranker, and both factories would otherwise decline to rerank,
-  leaving every search returning fusion order while the config said otherwise.
-- If the cluster rejects `$rankFusion`, hybrid search **raises** rather than
-  falling back. Every other fallback here trades a round trip for the same
-  answer; that one would return a different answer while still claiming to
-  rerank.
+The requirement is stricter than the toggle suggested: a cluster on **MongoDB
+8.3 or later** -- "Latest version with auto-upgrades" in the cluster builder --
+*and* Native Reranking enabled in Project Settings, which needs Project Owner
+access. **8.0 with the toggle on is not enough**; measured against a live
+8.0.29 cluster, every `$rerank` was refused. It is also a Preview feature,
+billed separately from Automated Embedding (200M free tokens at the
+organization level, then $0.02/M for `rerank-2.5-lite`).
 
-**Requirements, and they are stricter than the toggle suggests.** `$rerank`
-needs a cluster on **MongoDB 8.3 or later** -- "Latest version with
-auto-upgrades" in the cluster builder -- *and* Native Reranking enabled in
-Project Settings. **8.0 with the toggle on is not enough**; measured against a
-live 8.0.29 cluster, every `$rerank` is refused. Atlas sends one generic
-message for all causes (`$rerank is not allowed or the syntax is incorrect`),
-so the store translates it into one that names both requirements.
+What the code carried was an implementation whose happy path had never
+executed and could not be executed by anyone here, which is the kind of thing
+that breaks silently the next time the search pipeline changes while CI stays
+green. `RERANK_MODEL=database:...` (or `server:...`) is now **refused at config
+load**, with a message naming both requirements and pointing at issue #94,
+which restores the path if a capable cluster ever exists. Failing at load
+rather than at query time is the point: the alternative was both factories
+declining to rerank and every search quietly returning unreranked fusion order
+while the configuration claimed otherwise.
 
-It is also a Preview feature, and billed separately from Automated Embedding
-(200M free tokens at the organization level, then $0.02/M for
-`rerank-2.5-lite`).
+What survives is the seam, not the implementation: the store still appends a
+pipeline tail through a `ServerReranker`, and the one remaining implementation
+contributes the plain score projection. It runs on every search, so it cannot
+rot, and it is where #94 plugs back in.
 
 ### Sizing a shared cluster
 

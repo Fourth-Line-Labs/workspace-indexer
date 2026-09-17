@@ -82,7 +82,6 @@ class MongoStore:
         database: str,
         dtype: str = "float32",
         prefer_rank_fusion: bool = True,
-        rerank: ServerReranker | None = None,
     ) -> None:
         self._client = client
         self._workspace = workspace
@@ -90,9 +89,12 @@ class MongoStore:
         self._dtype = dtype
         self._ensured: set[str] = set()
         # An object rather than a flag, so nothing in the search path asks
-        # whether to rerank -- it appends whatever tail it is given, and the
-        # default implementation gives it the plain scoring projection.
-        self._rerank: ServerReranker = rerank or NoServerRerank()
+        # whether to rerank -- it appends whatever tail it is given, and this
+        # implementation gives it the plain scoring projection. The only other
+        # implementation reranked inside the query and was retired in #73;
+        # the seam is what #94 plugs back into, and it runs on every search
+        # either way.
+        self._rerank: ServerReranker = NoServerRerank()
         # None means "not yet discovered". Set on the first hybrid search, and
         # only ever set to False by the server actually rejecting the stage --
         # never inferred from a version string, because the rollout that gates
@@ -108,8 +110,7 @@ class MongoStore:
         self._search_indexes: bool | None = None
 
     def describe(self) -> str:
-        reranked = "" if self._rerank.name == "none" else f", rerank={self._rerank.name}"
-        return f"mongodb {self._db.name}{reranked}"
+        return f"mongodb {self._db.name}"
 
     def collection_name(self, space: EmbeddingSpace) -> str:
         """The same name Qdrant would use, so a workspace indexed into both
@@ -313,12 +314,20 @@ class MongoStore:
             try:
                 hits = await self._run(collection, self._rank_fusion_stages(query, filters, depth))
             except OperationFailure as exc:
-                # Only a rejection of the fusion stage itself means the
-                # fallback is worth trying. `_run` has already converted a
-                # $rerank rejection into a RuntimeError, which is not caught
-                # here -- so an unavailable reranker surfaces as itself rather
-                # than being misdiagnosed as an unavailable $rankFusion, which
-                # is exactly what it did the first time it happened.
+                # Wider than the question it answers, and knowingly so. The
+                # pipeline embeds `$vectorSearch` and `$search`, so a missing or
+                # still-building search index lands here too and is recorded as
+                # "no $rankFusion" -- permanently, since the flag is never
+                # re-tested. Narrowing it needs the real server error shapes for
+                # both causes, which no environment here can produce; tracked in
+                # #96 rather than guessed at.
+                #
+                # `_translated` used to narrow exactly one case, by converting a
+                # refused `$rerank` into a RuntimeError this does not catch. That
+                # case went with server-side reranking (#73); when #94 restores
+                # it, this has to exclude it again -- a refused `$rerank` was
+                # misdiagnosed as a missing `$rankFusion` the first time it
+                # happened.
                 self._rank_fusion = False
                 log_once(
                     log,
@@ -330,23 +339,6 @@ class MongoStore:
             else:
                 self._rank_fusion = True
                 return hits
-        if not isinstance(self._rerank, NoServerRerank):
-            # The client-side fallback fuses in Python, so there is no
-            # aggregation left to append `$rerank` to. Reranking each branch
-            # separately would rerank two lists nobody asked about and then
-            # fuse the results, which is not the same operation.
-            #
-            # Raised rather than degraded, deliberately. Every other fallback
-            # here trades a round trip for the same answer; this one would
-            # return a *different* answer while the configuration still claimed
-            # to be reranking, which is the silent quality loss this codebase
-            # goes out of its way to avoid.
-            raise RuntimeError(
-                "database reranking needs $rankFusion, which this deployment "
-                "rejected. Either upgrade the cluster (MongoDB 8.0+ with the "
-                "$rankFusion rollout applied) or configure a client-side "
-                "reranker, e.g. RERANK_MODEL=voyageai:rerank-2.5-lite."
-            )
         return await self._client_side_fusion(collection, query, filters)
 
     def _rank_fusion_stages(
@@ -474,11 +466,14 @@ class MongoStore:
         return [{"$search": {"index": TEXT_INDEX, "compound": compound}}, {"$limit": limit}]
 
     async def _run(self, collection: Any, stages: list[dict[str, Any]]) -> list[SearchHit]:
-        try:
-            cursor = await collection.aggregate(stages)
-            return [_to_hit(document) async for document in cursor]
-        except OperationFailure as exc:
-            raise _translated(exc) from exc
+        # No translation layer: an `OperationFailure` propagates as itself. The
+        # one message worth rewriting was Atlas's refusal of `$rerank`, and no
+        # pipeline built here contains that stage any more (#73). #94 restores
+        # both together or neither -- a raw "$rerank is not allowed or the
+        # syntax is incorrect" sends the reader hunting their own pipeline for
+        # a fault that is not in it.
+        cursor = await collection.aggregate(stages)
+        return [_to_hit(document) async for document in cursor]
 
     # ---- reading -------------------------------------------------------
 
@@ -628,28 +623,6 @@ def encode_vector(vector: Sequence[float], dtype: str = "float32") -> Binary:
             [max(-128, min(127, round(value * 127))) for value in vector], packed
         )
     return Binary.from_vector(list(vector), packed)
-
-
-def _translated(exc: OperationFailure) -> Exception:
-    """Turn Atlas's generic refusals into something actionable.
-
-    `$rerank is not allowed or the syntax is incorrect` is the entire message
-    the server sends, for every cause: a cluster below 8.3, a project without
-    Native Reranking enabled, or a genuinely malformed stage. Passing that
-    through would leave whoever hits it reading their own pipeline for a fault
-    that is not in it -- which is where an hour went the first time.
-    """
-    message = str(exc)
-    if "$rerank" not in message:
-        return exc
-    return RuntimeError(
-        "Atlas refused the $rerank stage. It needs BOTH a cluster running "
-        "MongoDB 8.3 or later -- set 'Latest version with auto-upgrades' in the "
-        "Atlas cluster builder; 8.0 is not enough even with the toggle on -- AND "
-        "Native Reranking enabled in Project Settings, which requires Project "
-        "Owner access. Until then use a client-side reranker, e.g. "
-        f"RERANK_MODEL=voyageai:rerank-2.5-lite. Server said: {message}"
-    )
 
 
 def _to_hit(document: dict[str, Any], score: float | None = None) -> SearchHit:
