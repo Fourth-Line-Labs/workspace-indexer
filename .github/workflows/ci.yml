@@ -77,6 +77,15 @@ jobs:
             tests/test_log_once_isolation.py \
             tests/test_vector_store_contract.py
 
+      # The offline half of the eval, named separately for the same reason the
+      # guards are: a failure here means extraction, resolution, classification
+      # or the secret scanner changed what they produce, which is a different
+      # thing from a broken unit test and calls for reading a diff rather than
+      # a traceback. It needs no key and no network because every number it
+      # asserts is a pure function of the fixture bytes.
+      - name: Language fixture baselines
+        run: poetry run pytest -q -m "not integration" tests/test_language_fixtures.py
+
       # Deliberately excludes integration tests: those download embedding and
       # reranking models, and nothing here needs an API key or network. That
       # was a design goal from the first iteration and this is where it pays

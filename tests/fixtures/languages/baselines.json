@@ -1,0 +1,67 @@
+{
+  "languages": {
+    "csharp": {
+      "files_indexed": 8,
+      "files_with_imports": 2,
+      "import_edges": 7,
+      "namespace_declarations": 10,
+      "first_party": 3,
+      "first_party_resolved": 3,
+      "declared_dependency": 0,
+      "framework": 2,
+      "unclassified": 1,
+      "declined": 1
+    },
+    "javascript": {
+      "files_indexed": 3,
+      "files_with_imports": 2,
+      "import_edges": 5,
+      "namespace_declarations": 0,
+      "first_party": 2,
+      "first_party_resolved": 2,
+      "declared_dependency": 0,
+      "framework": 2,
+      "unclassified": 1,
+      "declined": 0
+    },
+    "python": {
+      "files_indexed": 6,
+      "files_with_imports": 3,
+      "import_edges": 7,
+      "namespace_declarations": 0,
+      "first_party": 3,
+      "first_party_resolved": 3,
+      "declared_dependency": 0,
+      "framework": 3,
+      "unclassified": 1,
+      "declined": 0
+    },
+    "tsx": {
+      "files_indexed": 2,
+      "files_with_imports": 1,
+      "import_edges": 2,
+      "namespace_declarations": 0,
+      "first_party": 1,
+      "first_party_resolved": 1,
+      "declared_dependency": 0,
+      "framework": 0,
+      "unclassified": 1,
+      "declined": 0
+    },
+    "typescript": {
+      "files_indexed": 5,
+      "files_with_imports": 4,
+      "import_edges": 6,
+      "namespace_declarations": 0,
+      "first_party": 4,
+      "first_party_resolved": 4,
+      "declared_dependency": 0,
+      "framework": 1,
+      "unclassified": 1,
+      "declined": 0
+    }
+  },
+  "withheld": [
+    "python/credentials.py"
+  ]
+}
