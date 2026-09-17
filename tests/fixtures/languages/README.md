@@ -16,8 +16,8 @@ audience: "someone changing an extractor, a resolver, or a fixture"
 
 The retrieval eval needs embeddings, an API key, a vector store, and is
 nondeterministic. It cannot gate a pull request. **This can**: import
-extraction, namespace extraction, resolution, origin classification and chunk
-boundaries are pure functions of the file bytes. Tree-sitter parses locally,
+extraction, namespace extraction, resolution and origin classification are pure
+functions of the file bytes. Tree-sitter parses locally,
 the manifest is a file, resolution is a query. The whole corpus indexes in
 about **0.2 seconds** with no credentials.
 
@@ -67,6 +67,9 @@ applied to a copy of the tree and the gate run against it:
 | a query string is read as one value again | `config_values.py` withheld |
 | the diff stops naming the language, or the field, or the path | the formatter's own tests, in `test_language_fixture_diff.py` |
 | the diff reports only the first moved field | the same — three numbers move when the C# resolver breaks, and reporting one sends someone chasing a symptom |
+| JS directory/index lookup stops working | `javascript.first_party_resolved: 2 -> 1` **and** `typescript` — which is why `app.js` imports `./lib` rather than `./lib/index.js` |
+| the prefix-only builtin rule is dropped | `javascript.framework: 2 -> 1`, `unclassified: 1 -> 2` — `node:path` alone could not catch this, because `path` is a builtin either way |
+| a language is added with a README and no source files | the empty-tree guard, which exists because the *other* guard's failure message used to suggest exactly that |
 
 The first row is why the first-party gate is not enough on its own, and the
 last three are why `config_values.py` is written the way it is. An earlier

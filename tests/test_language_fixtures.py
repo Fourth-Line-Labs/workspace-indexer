@@ -2,10 +2,11 @@
 
 The retrieval eval needs embeddings, a key, a store, and is nondeterministic.
 This is not a degraded version of it -- it measures a different half, the one
-CI has been blind to. Import extraction, namespace extraction, resolution,
-origin classification and chunk boundaries are pure functions of the file
-bytes: tree-sitter parses locally, the manifest is a file, resolution is a
-query. So it runs on a clean runner with no credentials, in seconds, and can
+CI has been blind to. Import extraction, namespace extraction, resolution and
+origin classification are pure functions of the file bytes: tree-sitter parses
+locally, the manifest is a file, resolution is a query. Chunk boundaries are
+*not* on that list and are deliberately unmeasured here -- they move with the
+branch name, which is #93. So it runs on a clean runner with no credentials, in seconds, and can
 therefore gate a pull request rather than be reported after the fact.
 
 The fixtures are authored, so the counts are exact. A band would hide the
@@ -79,8 +80,30 @@ def test_every_extractable_language_has_a_fixture_tree() -> None:
     missing = sorted(EXTRACTOR_LANGUAGES - set(fixture_languages()))
     assert not missing, (
         f"languages with an import extractor and no fixture tree: {missing}. "
-        f"Add tests/fixtures/languages/<language>/ with a README saying what it exercises."
+        f"Add tests/fixtures/languages/<language>/ with at least one source file, "
+        f"and a README saying what each file exercises."
     )
+
+
+def test_every_fixture_tree_holds_something_to_measure() -> None:
+    """A directory is not coverage.
+
+    `source_files()` skips READMEs, so a language directory containing only a
+    README measures nothing -- and an all-zero baseline row matches those
+    nothing-counts exactly, the accounting identity holds at 0 + 0 = 0, and
+    every other test in this file passes. The guard above would report the
+    language as covered.
+
+    Its failure message used to suggest precisely that: "add a directory with a
+    README". So this is not a hypothetical someone would have to go out of
+    their way to hit -- it was the documented next step.
+    """
+    empty = sorted(
+        language
+        for language in fixture_languages()
+        if not any(rel.split("/")[0] == language for rel in source_files())
+    )
+    assert not empty, f"fixture trees with no source file, so nothing is measured for them: {empty}"
 
 
 def test_every_fixture_tree_has_a_baseline_row() -> None:

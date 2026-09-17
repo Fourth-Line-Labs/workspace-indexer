@@ -4,8 +4,10 @@
 |---|---|
 | `lib/util.js` | the target |
 | `lib/index.js` | a re-export, so the directory has an entry point |
-| `app.js` | a path through the index file, a Node builtin that is only a builtin *with* the `node:` prefix (`node:path`), and a package (`lodash`) |
+| `app.js` | a directory specifier resolved through the index file (`./lib`), an ordinary builtin (`node:path`), a **prefix-only** builtin (`node:test`), and a package (`lodash`) |
 
-`node:path` matters: `path` without the prefix is a builtin too, but several of
-Node's newer ones — `test`, `sqlite`, `sea` — are builtins **only** with it, and
-the prefix is what tells a framework module from someone's local package.
+Both builtins are here on purpose. `path` is a builtin with or without the
+prefix, so it cannot exercise the rule that matters: `test`, `sqlite` and `sea`
+are builtins **only** with `node:`, and without it `test` is someone's local
+package. A corpus holding only `node:path` would keep passing after a
+regression that stopped recognising the prefix-only ones.
