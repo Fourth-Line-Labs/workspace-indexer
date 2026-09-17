@@ -15,12 +15,12 @@ change it exists to catch.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
 
-from tests.indexer_harness import SPACE, Harness
+from tests.indexer_harness import Harness
 from tests.language_fixtures import (
     FIXTURE_ROOT,
     describe,
@@ -37,14 +37,20 @@ from workspace_indexer.storage.qdrant_store import QdrantStore
 ROOT_LABEL = "languages"
 
 
-@pytest.fixture
-async def indexed(tmp_path: Path) -> AsyncIterator[Manifest]:
-    """The fixture corpus, indexed once, with no API calls.
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def indexed(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Manifest]:
+    """The fixture corpus, indexed once for the whole module, with no API calls.
 
     Through the real `Indexer` rather than by calling the scanners directly:
     a gate that reimplements the pipeline measures the reimplementation. Only
     the paid backend is faked, which is what makes the run free.
+
+    Module-scoped because every test here only reads: at function scope the
+    corpus was re-indexed four times, and "indexed once" was true within a test
+    and false across the file. The loop scope has to match the fixture scope or
+    the store is created on a loop that is closed before the last test uses it.
     """
+    tmp_path = tmp_path_factory.mktemp("language-fixtures")
     config = WorkspaceConfig.model_validate(
         {
             "workspace": {
@@ -92,7 +98,7 @@ def test_every_language_matches_its_baseline(indexed: Manifest) -> None:
     said so, which is the thing that has been invisible.
     """
     expected, _ = load_baselines()
-    measured, _ = measure(indexed, root_label=ROOT_LABEL, space_slug=SPACE.slug())
+    measured, _ = measure(indexed, root_label=ROOT_LABEL)
 
     differences = describe(measured, expected)
     assert not differences, (
@@ -117,7 +123,7 @@ def test_the_first_party_gate_is_whole_for_every_language(indexed: Manifest) -> 
     `csharp.first_party: 3 -> 0`. For C# the baseline is the guard; for
     everything else the two are independent.
     """
-    measured, _ = measure(indexed, root_label=ROOT_LABEL, space_slug=SPACE.slug())
+    measured, _ = measure(indexed, root_label=ROOT_LABEL)
     short = {
         language: (row.first_party_resolved, row.first_party)
         for language, row in measured.items()
@@ -137,7 +143,7 @@ def test_only_the_intended_files_are_withheld(indexed: Manifest) -> None:
     here rather than being noticed months later.
     """
     _, expected = load_baselines()
-    _, withheld = measure(indexed, root_label=ROOT_LABEL, space_slug=SPACE.slug())
+    _, withheld = measure(indexed, root_label=ROOT_LABEL)
 
     unexpected = sorted(set(withheld) - set(expected))
     missing = sorted(set(expected) - set(withheld))
@@ -156,7 +162,7 @@ def test_every_fixture_file_is_accounted_for(indexed: Manifest) -> None:
     single number moving.
     """
     _, expected_withheld = load_baselines()
-    measured, withheld = measure(indexed, root_label=ROOT_LABEL, space_slug=SPACE.slug())
+    measured, withheld = measure(indexed, root_label=ROOT_LABEL)
 
     indexed_count = sum(row.files_indexed for row in measured.values())
     assert indexed_count + len(withheld) == len(source_files())

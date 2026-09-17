@@ -2,7 +2,7 @@
 
 `using` names a namespace, not a path, so resolution joins against the
 namespaces declared in the same repository. These files exercise the shapes
-that decides.
+that decide what it can follow.
 
 | file | what it is here for |
 |---|---|
@@ -12,7 +12,9 @@ that decides.
 | `Web/Shared.cs` | `global using`, recorded under its own kind; it resolves like any other using for the declaring file, and the compilation-unit propagation is deliberately not modelled |
 | `Legacy/Block.cs` | the block form, nested — `Fixture.Legacy` and `Fixture.Legacy.Inner` are both declared, because `using Inner` reaches nothing |
 | `Legacy/Two.cs` | two namespaces in one file: absent from both measured corpora, which is exactly why it is here — the schema allows it and nothing else exercises it |
+| `Web/Options.cs` | object initializers a secret scanner has read as credentials — the `?.` and `??` shape that purged eight files from a real index, plus a dotted attribute, a bracket expression, an enum member, a credential's *name* and a template. It exists to be **indexed** |
 
-Nine declarations from seven files is the number to check when this changes:
-three for `Fixture.Data`, one each for `Fixture.Web` and `Fixture.Web.Shared`,
-two from the nested block, two from the two-namespace file.
+Ten declarations across eight files is the number to check when this changes:
+three for `Fixture.Data`, **two** for `Fixture.Web` (`Startup.cs` and
+`Options.cs`), one for `Fixture.Web.Shared`, two from the nested block, two
+from the two-namespace file.

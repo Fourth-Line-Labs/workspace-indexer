@@ -41,7 +41,7 @@ def source_files() -> list[str]:
 
 
 def measure(
-    manifest: Manifest, *, root_label: str, space_slug: str
+    manifest: Manifest, *, root_label: str
 ) -> tuple[dict[str, LanguageBaseline], list[str]]:
     """The counts per language, and the files the run did not index.
 
@@ -64,7 +64,6 @@ def measure(
         edges = 0
         with_imports = 0
         declarations = 0
-        chunks = 0
         buckets = {
             "first_party": 0,
             "declared_dependency": 0,
@@ -79,7 +78,6 @@ def measure(
             edges += len(statements)
             with_imports += 1 if statements else 0
             declarations += len(manifest.namespaces_of(root_label, rel))
-            chunks += len(manifest.chunk_ids_for(root_label, rel, space_slug))
 
             # One entry per *edge*, which is what the origin columns count --
             # a namespace edge expands to one row per declaring file in
@@ -104,7 +102,6 @@ def measure(
             files_with_imports=with_imports,
             import_edges=edges,
             namespace_declarations=declarations,
-            chunks=chunks,
             first_party=buckets["first_party"],
             first_party_resolved=resolved_first_party,
             declared_dependency=buckets["declared_dependency"],

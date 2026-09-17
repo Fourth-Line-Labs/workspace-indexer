@@ -65,6 +65,8 @@ applied to a copy of the tree and the gate run against it:
 | `_EXPRESSION` forgets C#'s `?.` and `??` | `csharp/Web/Options.cs` withheld — the exact shape that purged eight files from a real index |
 | the all-letters identifier rule is dropped | `Options.cs` **and** `config_values.py` withheld |
 | a query string is read as one value again | `config_values.py` withheld |
+| the diff stops naming the language, or the field, or the path | the formatter's own tests, in `test_language_fixture_diff.py` |
+| the diff reports only the first moved field | the same — three numbers move when the C# resolver breaks, and reporting one sends someone chasing a symptom |
 
 The first row is why the first-party gate is not enough on its own, and the
 last three are why `config_values.py` is written the way it is. An earlier
@@ -79,9 +81,16 @@ different rejection rule.
   declared-dependency set until a manifest reader lands, so every third-party
   import falls to `unclassified`. The bucket is measured so that the day it
   stops being zero is visible.
-- **Chunk boundaries are only weakly covered.** These files are small enough to
-  produce one chunk each, so `chunks` pins the count and not the split. The
-  chunkers have their own tests for boundaries.
+- **Chunk counts are not measured at all**, and cannot be until #93 is decided.
+  They are not a function of the file bytes: the context header carries
+  `# repo: name (branch)`, its token cost comes out of the chunk budget, and
+  the same file therefore splits differently depending on the branch it is read
+  from. Measured on `config_values.py` — one chunk on `main`, two on
+  `feat/language-fixture-baselines`, one again on the detached HEAD a CI
+  checkout produces. This gate recorded a chunk count before that was noticed,
+  and passed CI only because the two environments disagreed in the same
+  direction. A number that moves when you rename a branch is the definition of
+  a gate that fails for innocent reasons.
 - **Cross-unit isolation is not here.** A unit is the first path segment, and
   every fixture sits under its language's directory, so this corpus is five
   units of one language each. Two repositories declaring the same namespace is
