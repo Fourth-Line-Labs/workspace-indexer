@@ -89,3 +89,14 @@ def test_client_side_providers_are_untouched() -> None:
     in the model name."""
     assert RerankConfig(model="voyageai:rerank-2.5-lite").provider == "voyageai"
     assert RerankConfig(model="fastembed:Xenova/ms-marco-MiniLM-L-6-v2").provider == "fastembed"
+
+
+@pytest.mark.parametrize("model", ["DATABASE:rerank-2.5-lite", "Server:rerank-2.5", "database :x"])
+def test_the_refusal_survives_casing_and_padding(model: str) -> None:
+    """`.env` is where this gets typed, alongside keys that are themselves
+    uppercase. An unnormalized comparison let `DATABASE:` past config load and
+    into the reranker factory, which called it an unknown provider -- naming
+    neither the requirement nor the way out, which is the whole failure this
+    refusal replaces."""
+    with pytest.raises(ValidationError, match="8.3"):
+        RerankConfig(model=model)

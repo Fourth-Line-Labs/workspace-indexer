@@ -314,11 +314,20 @@ class MongoStore:
             try:
                 hits = await self._run(collection, self._rank_fusion_stages(query, filters, depth))
             except OperationFailure as exc:
-                # Nothing else in this pipeline can be rejected now that the
-                # store appends no reranking stage, so a failure here is the
-                # fusion stage. When #94 restores server-side reranking this
-                # has to narrow again: a refused `$rerank` was misdiagnosed as
-                # a missing `$rankFusion` the first time it happened.
+                # Wider than the question it answers, and knowingly so. The
+                # pipeline embeds `$vectorSearch` and `$search`, so a missing or
+                # still-building search index lands here too and is recorded as
+                # "no $rankFusion" -- permanently, since the flag is never
+                # re-tested. Narrowing it needs the real server error shapes for
+                # both causes, which no environment here can produce; tracked in
+                # #96 rather than guessed at.
+                #
+                # `_translated` used to narrow exactly one case, by converting a
+                # refused `$rerank` into a RuntimeError this does not catch. That
+                # case went with server-side reranking (#73); when #94 restores
+                # it, this has to exclude it again -- a refused `$rerank` was
+                # misdiagnosed as a missing `$rankFusion` the first time it
+                # happened.
                 self._rank_fusion = False
                 log_once(
                     log,

@@ -47,7 +47,12 @@ class RerankConfig(Strict):
                 "e.g. voyageai:rerank-2.5-lite or "
                 "fastembed:Xenova/ms-marco-MiniLM-L-6-v2"
             )
-        if value.split(":", 1)[0] in DATABASE_PROVIDERS:
+        # Normalized before the comparison: `.env` is where this is typed, next
+        # to keys that are themselves uppercase, and `DATABASE:rerank-2.5-lite`
+        # slipping through would surface from the reranker factory as "unknown
+        # rerank provider" -- the confusing failure this refusal exists to
+        # replace.
+        if value.split(":", 1)[0].strip().lower() in DATABASE_PROVIDERS:
             raise ValueError(
                 f"rerank model {value!r} asks the database to rerank, which this "
                 "build does not support. Atlas $rerank needs BOTH a cluster running "
