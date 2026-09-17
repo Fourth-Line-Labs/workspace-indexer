@@ -69,6 +69,12 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The language fixtures are corpus, not code: their whole purpose is to contain
+# the shapes an extractor has to cope with -- an unused import, a name that
+# looks like a credential, a module that imports a package nobody installed.
+# Linting them would mean editing the data to satisfy a rule about code, and
+# then the fixture no longer exercises what it was written for.
+extend-exclude = ["tests/fixtures/languages"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -80,6 +86,12 @@ known-first-party = ["workspace_indexer", "tests"]
 
 [tool.pyright]
 include = ["src", "tests"]
+# Excluded for the same reason ruff excludes them: fixture sources are inputs to
+# an extractor, not code this project runs. `pkg.store` imports `requests`
+# precisely because an undeclared package has to land in the unclassified
+# bucket, and a type checker would report that as an error rather than as the
+# point.
+exclude = ["tests/fixtures/languages"]
 pythonVersion = "3.12"
 # Point pyright at the poetry venv, or every third-party import reads as
 # unresolved and buries the real diagnostics.
