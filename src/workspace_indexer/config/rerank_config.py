@@ -29,9 +29,10 @@ def _provider_of(model: str) -> str:
     and `'voyageai '` printed next to a list containing `voyageai` differs by an
     invisible character.
 
-    Only the provider. `model_id` keeps its case (`BAAI/bge-reranker-base` is
-    case-sensitive) and `model` keeps whatever was typed, so an error quotes the
-    input back rather than a cleaned-up version of it.
+    Only the provider is lowercased. `model_id` keeps its case
+    (`BAAI/bge-reranker-base` is case-sensitive) and `model` keeps whatever was
+    typed, so an error quotes the input back rather than a cleaned-up version
+    of it.
     """
     return model.split(":", 1)[0].strip().lower()
 
@@ -85,4 +86,11 @@ class RerankConfig(Strict):
 
     @property
     def model_id(self) -> str:
-        return self.model.split(":", 1)[1]
+        """Stripped, for the same reason the provider is.
+
+        A space *after* the colon used to survive all the way to the provider:
+        `voyageai: rerank-2.5-lite` cleared config load and then failed at query
+        time as an invalid Voyage model, or a not-found fastembed one. Case is
+        untouched -- `BAAI/bge-reranker-base` is case-sensitive.
+        """
+        return self.model.split(":", 1)[1].strip()

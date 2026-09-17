@@ -125,3 +125,19 @@ def test_canonicalizing_the_provider_leaves_the_model_id_alone() -> None:
     config = RerankConfig(model="Local:BAAI/bge-reranker-base")
     assert config.model_id == "BAAI/bge-reranker-base"
     assert config.model == "Local:BAAI/bge-reranker-base"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("voyageai: rerank-2.5-lite", "rerank-2.5-lite"),
+        ("local: BAAI/bge-reranker-base", "BAAI/bge-reranker-base"),
+        ("voyageai :  rerank-2.5-lite  ", "rerank-2.5-lite"),
+    ],
+)
+def test_padding_after_the_colon_does_not_reach_the_provider(model: str, expected: str) -> None:
+    """The shape check only requires each half to be non-empty *after*
+    stripping, so a space after the colon cleared config load and travelled on
+    as part of the model name -- failing at query time as an invalid Voyage
+    model or a not-found fastembed one, one layer away from the typo."""
+    assert RerankConfig(model=model).model_id == expected
