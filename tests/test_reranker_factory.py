@@ -112,34 +112,24 @@ async def test_noop_preserves_order_and_respects_top_n() -> None:
     assert [h.chunk_id for h in ranked] == ["id-0", "id-1", "id-2"]
 
 
-def test_a_database_provider_yields_the_no_op_reranker() -> None:
-    """`database:` is not a provider of a client-side reranker -- it declares
-    that the store reranks inside the query. So nothing runs here, and the
-    search path is unchanged because the *object* differs rather than a flag.
-    """
-    reranker = build_reranker(
-        RerankConfig(model="database:rerank-2.5-lite"), Settings(voyage_api_key="k")
-    )
-    assert isinstance(reranker, NoopReranker)
+def test_a_database_provider_never_reaches_this_factory() -> None:
+    """It used to resolve to a no-op here because the store reranked instead.
+    The store's implementation is gone (#73), so the model is refused at config
+    load -- this asserts the factory is not quietly carrying a second opinion
+    about a provider it can no longer be handed."""
+    from workspace_indexer.rerank.reranker_factory import KNOWN_PROVIDERS
+
+    assert "database" not in KNOWN_PROVIDERS
+    assert "server" not in KNOWN_PROVIDERS
 
 
-def test_delegating_to_the_store_is_logged_rather_than_silent() -> None:
-    """Someone reading the log has to be able to tell "reranking is off" from
-    "reranking moved", because the two have very different latency and only
-    one is a problem."""
-    import structlog.testing
+def test_an_unknown_provider_still_names_what_is_known() -> None:
+    """The message is the only thing telling someone what to type instead, so
+    it has to list the providers that actually survive."""
+    with pytest.raises(ValueError, match="unknown rerank provider") as caught:
+        build_reranker(RerankConfig(model="nonesuch:some-model"), Settings())
 
-    with structlog.testing.capture_logs() as logs:
-        build_reranker(RerankConfig(model="database:rerank-2.5-lite"), Settings(voyage_api_key="k"))
-    events = {entry["event"] for entry in logs}
-    assert "rerank.delegated_to_store" in events
-    assert "rerank.skipped" not in events
-
-
-def test_disabling_reranking_still_wins_over_the_database_provider() -> None:
-    """One knob turns it off, whichever provider is named. Two settings that
-    could disagree is exactly what naming the location in `model` avoids."""
-    reranker = build_reranker(
-        RerankConfig(enabled=False, model="database:rerank-2.5-lite"), Settings()
-    )
-    assert isinstance(reranker, NoopReranker)
+    message = str(caught.value)
+    assert "voyageai" in message
+    assert "fastembed" in message
+    assert "database" not in message

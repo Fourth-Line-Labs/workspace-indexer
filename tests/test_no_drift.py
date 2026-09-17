@@ -142,21 +142,23 @@ def test_the_payload_writer_and_the_qdrant_indexes_agree() -> None:
     assert not missing, f"indexed but never written into the payload: {missing}"
 
 
-def test_both_factories_agree_on_what_database_reranking_means() -> None:
-    """Two lists decide this, and they must decide the same way.
+def test_only_one_place_decides_what_a_database_rerank_provider_is() -> None:
+    """Two lists used to decide this -- the reranker factory declining because
+    the store would rerank, the store factory building that reranker -- and
+    them diverging was the one silent failure the arrangement could have.
 
-    The reranker factory returns a no-op for these providers because the store
-    reranks; the store factory builds the store's reranker for them. If the
-    lists diverged, one side would decline to rerank and the other would too,
-    and every search would quietly return fusion order while the configuration
-    said `database:`.
+    #73 retired the store's implementation and moved the decision into
+    `RerankConfig`, which refuses such a model at load. This asserts the
+    duplicates did not come back: a second list is a second thing to drift.
     """
-    from workspace_indexer.rerank.reranker_factory import (
-        DATABASE_PROVIDERS as rerank_side,
-    )
-    from workspace_indexer.storage.store_factory import DATABASE_PROVIDERS as store_side
+    from workspace_indexer.config import rerank_config
 
-    assert rerank_side == store_side
+    assert hasattr(rerank_config, "DATABASE_PROVIDERS")
+    sources = [
+        (SRC / "rerank" / "reranker_factory.py").read_text(encoding="utf-8"),
+        (SRC / "storage" / "store_factory.py").read_text(encoding="utf-8"),
+    ]
+    assert not [text for text in sources if "DATABASE_PROVIDERS" in text]
 
 
 def test_every_package_is_named_in_the_layer_list() -> None:

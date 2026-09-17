@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from workspace_indexer.config import Settings
 
@@ -126,9 +127,33 @@ def test_the_rerank_model_env_override_reaches_the_reranker(tmp_path: Path) -> N
     )
     assert config.search.rerank.model == "voyageai:rerank-2.5-lite"
 
-    overridden = with_rerank_overrides(config, Settings(rerank_model="database:rerank-2.5-lite"))
-    assert overridden.search.rerank.model == "database:rerank-2.5-lite"
-    assert overridden.search.rerank.provider == "database"
+    settings = Settings(rerank_model="local:BAAI/bge-reranker-base")
+    overridden = with_rerank_overrides(config, settings)
+    assert overridden.search.rerank.model == "local:BAAI/bge-reranker-base"
+    assert overridden.search.rerank.provider == "local"
+
+
+def test_an_override_is_validated_rather_than_copied_in(tmp_path: Path) -> None:
+    """`model_copy(update=...)` does not run field validators, so every check on
+    `RerankConfig.model` was dead on the one path people actually use: .env.
+
+    Both cases below reached the reranker factory instead, where a missing
+    provider prefix and the retired `database:` provider alike came back as
+    "unknown rerank provider" -- naming neither the real requirement nor the
+    way out.
+    """
+    from workspace_indexer.app_context import with_rerank_overrides
+    from workspace_indexer.config import WorkspaceConfig
+
+    config = WorkspaceConfig.model_validate(
+        {"workspace": {"name": "w", "roots": [{"path": str(tmp_path), "label": "main"}]}}
+    )
+
+    with pytest.raises(ValidationError, match="must be `provider:model`"):
+        with_rerank_overrides(config, Settings(rerank_model="rerank-2.5-lite"))
+
+    with pytest.raises(ValidationError, match="8.3"):
+        with_rerank_overrides(config, Settings(rerank_model="database:rerank-2.5-lite"))
 
 
 def test_an_unset_override_leaves_workspace_yaml_alone(tmp_path: Path) -> None:
