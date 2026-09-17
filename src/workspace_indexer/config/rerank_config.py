@@ -18,6 +18,24 @@ from workspace_indexer.config.strict import Strict
 DATABASE_PROVIDERS = frozenset({"database", "server"})
 
 
+def _provider_of(model: str) -> str:
+    """The provider half, canonicalized.
+
+    One rule, used by the validator and by `provider`, because the two
+    disagreeing is invisible: the validator would refuse a spelling the factory
+    then failed to recognise, or the reverse. Normalized because `.env` is where
+    this is typed -- `VOYAGEAI:rerank-2.5-lite` and a stray space both used to
+    clear config load and die in the reranker factory as an unknown provider,
+    and `'voyageai '` printed next to a list containing `voyageai` differs by an
+    invisible character.
+
+    Only the provider. `model_id` keeps its case (`BAAI/bge-reranker-base` is
+    case-sensitive) and `model` keeps whatever was typed, so an error quotes the
+    input back rather than a cleaned-up version of it.
+    """
+    return model.split(":", 1)[0].strip().lower()
+
+
 class RerankConfig(Strict):
     enabled: bool = True
     # `provider:model`, the same convention EMBEDDING_MODEL uses, so both
@@ -47,12 +65,7 @@ class RerankConfig(Strict):
                 "e.g. voyageai:rerank-2.5-lite or "
                 "fastembed:Xenova/ms-marco-MiniLM-L-6-v2"
             )
-        # Normalized before the comparison: `.env` is where this is typed, next
-        # to keys that are themselves uppercase, and `DATABASE:rerank-2.5-lite`
-        # slipping through would surface from the reranker factory as "unknown
-        # rerank provider" -- the confusing failure this refusal exists to
-        # replace.
-        if value.split(":", 1)[0].strip().lower() in DATABASE_PROVIDERS:
+        if _provider_of(value) in DATABASE_PROVIDERS:
             raise ValueError(
                 f"rerank model {value!r} asks the database to rerank, which this "
                 "build does not support. Atlas $rerank needs BOTH a cluster running "
@@ -68,7 +81,7 @@ class RerankConfig(Strict):
 
     @property
     def provider(self) -> str:
-        return self.model.split(":", 1)[0]
+        return _provider_of(self.model)
 
     @property
     def model_id(self) -> str:

@@ -100,3 +100,28 @@ def test_the_refusal_survives_casing_and_padding(model: str) -> None:
     refusal replaces."""
     with pytest.raises(ValidationError, match="8.3"):
         RerankConfig(model=model)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("VOYAGEAI:rerank-2.5-lite", "voyageai"),
+        ("voyageai :rerank-2.5-lite", "voyageai"),
+        ("Local:BAAI/bge-reranker-base", "local"),
+    ],
+)
+def test_an_accepted_provider_is_canonicalized_too(model: str, expected: str) -> None:
+    """The refusal and the factory have to agree on what a provider *is*, or
+    normalizing one of them just moves the confusion. All three of these cleared
+    config load and then died in `build_reranker` as an unknown provider -- and
+    `'voyageai '` printed beside a list containing `voyageai` differs by an
+    invisible character."""
+    assert RerankConfig(model=model).provider == expected
+
+
+def test_canonicalizing_the_provider_leaves_the_model_id_alone() -> None:
+    """Model ids are case-sensitive, so the normalization must stop at the
+    colon."""
+    config = RerankConfig(model="Local:BAAI/bge-reranker-base")
+    assert config.model_id == "BAAI/bge-reranker-base"
+    assert config.model == "Local:BAAI/bge-reranker-base"
