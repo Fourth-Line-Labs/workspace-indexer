@@ -29,6 +29,12 @@ class SearchResult(BaseModel):
     # Set when `text` was cut to fit the budget, so the agent knows to read the
     # file rather than assuming it has the whole chunk.
     text_truncated: bool = False
+    # Set when the body was never included, because the caller asked for
+    # locations only. Distinct from `text_truncated` and carried as its own
+    # field because an empty `text` is otherwise ambiguous: a chunk that is
+    # genuinely blank and a chunk whose body was withheld look identical, and
+    # an agent that reads the second as the first concludes the file is empty.
+    text_omitted: bool = False
     # The file changed after it was indexed: this text matched the query, but
     # it is not what is on disk now. Never silently hidden -- an agent editing
     # from stale text writes a patch that will not apply.

@@ -28,21 +28,35 @@ class ResultBudget:
         self._max_tokens = max_tokens
         self._min_chunk_tokens = min_chunk_tokens
 
-    def pack(self, hits: list[SearchHit]) -> tuple[list[SearchResult], int]:
-        """Returns the results that fit, and how many were dropped."""
+    def pack(
+        self, hits: list[SearchHit], *, include_text: bool = True
+    ) -> tuple[list[SearchResult], int]:
+        """Returns the results that fit, and how many were dropped.
+
+        `include_text=False` drops the chunk bodies, which are around ninety
+        per cent of what a hit costs -- so the same budget holds far more of
+        them. Measured on real tool calls: every response that overflowed did
+        so with the body included, and none at the default limit overflowed at
+        all.
+        """
         results: list[SearchResult] = []
         spent = 0
+        # A body-less hit costs tens of tokens, not hundreds, so the
+        # "too small to be worth returning" floor would stop packing while
+        # there was still room for a dozen more of them. There is no partial
+        # location: it either fits or it does not.
+        floor = self._min_chunk_tokens if include_text else 1
         for index, hit in enumerate(hits):
             remaining = self._max_tokens - spent
             # The first hit always goes in, even under a budget too small to
             # hold it. Returning nothing would be indistinguishable from "no
             # matches", and the caller would go and look somewhere else for
             # something we actually found.
-            if remaining < self._min_chunk_tokens and index:
+            if remaining < floor and index:
                 return results, len(hits) - index
-            result = _to_result(hit)
-            cost = _tokens(hit)
-            if cost > remaining:
+            result = _to_result(hit, include_text=include_text)
+            cost = _tokens(hit) if include_text else _metadata_tokens(result)
+            if include_text and cost > remaining:
                 result.text = _clip(hit.source_text, remaining)
                 result.text_truncated = True
                 cost = remaining
@@ -61,6 +75,17 @@ def _tokens(hit: SearchHit) -> int:
     return hit.token_count or max(1, len(hit.source_text) // _CHARS_PER_TOKEN)
 
 
+def _metadata_tokens(result: SearchResult) -> int:
+    """What a hit costs once its body is gone.
+
+    Measured off the serialized result rather than assumed, so adding a field
+    to `SearchResult` cannot quietly make the budget optimistic -- the failure
+    that would cause is an over-long response, which is the one thing this
+    class exists to prevent.
+    """
+    return max(1, len(result.model_dump_json()) // _CHARS_PER_TOKEN)
+
+
 def _clip(text: str, tokens: int) -> str:
     limit = max(0, tokens * _CHARS_PER_TOKEN)
     if len(text) <= limit:
@@ -70,7 +95,7 @@ def _clip(text: str, tokens: int) -> str:
     return (cut or text[:limit]) + "\n... (truncated to fit the response budget)"
 
 
-def _to_result(hit: SearchHit) -> SearchResult:
+def _to_result(hit: SearchHit, *, include_text: bool = True) -> SearchResult:
     return SearchResult(
         location=hit.location,
         rel_path=hit.rel_path,
@@ -81,7 +106,8 @@ def _to_result(hit: SearchHit) -> SearchResult:
         symbol_path=hit.symbol_path,
         language=hit.language,
         repo=hit.repo_name,
-        text=hit.source_text,
+        text=hit.source_text if include_text else "",
+        text_omitted=not include_text,
         stale=hit.stale,
         score=round(hit.rerank_score if hit.rerank_score is not None else hit.score, 4),
     )

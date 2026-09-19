@@ -73,6 +73,7 @@ class QueryService:
         language: str | None = None,
         path_prefix: str | None = None,
         include_tests: bool = False,
+        locations_only: bool = False,
         worktree: str | None = None,
     ) -> SearchResponse:
         # Before the search, not after: the choice cannot change what matches,
@@ -101,6 +102,7 @@ class QueryService:
                 if not include_tests
                 else "Nothing matched. Try a broader query, or drop the filters."
             ),
+            include_text=not locations_only,
         )
 
     async def find_guidance(
@@ -110,6 +112,7 @@ class QueryService:
         limit: int = 8,
         repo: str | None = None,
         doc_type: DocumentType | None = None,
+        locations_only: bool = False,
         worktree: str | None = None,
     ) -> SearchResponse:
         """Specs and design documents only.
@@ -139,6 +142,7 @@ class QueryService:
                 "guidance on the topic -- call list_document_types to see whether it "
                 "has any at all, and fall back to reading the implementation if not."
             ),
+            include_text=not locations_only,
         )
 
     async def get_file_context(
@@ -198,16 +202,31 @@ class QueryService:
         hits: list[SearchHit],
         *,
         empty_note: str,
+        include_text: bool = True,
     ) -> SearchResponse:
-        results, dropped = self._budget.pack(hits)
+        results, dropped = self._budget.pack(hits, include_text=include_text)
         note: str | None = None
         if not hits:
             note = empty_note
-        elif dropped:
-            note = (
-                f"{dropped} further match(es) were dropped to stay inside the "
-                "response token budget; narrow the query or raise the limit."
-            )
+        else:
+            parts: list[str] = []
+            if dropped:
+                parts.append(
+                    f"{dropped} further match(es) were dropped to stay inside the "
+                    "response token budget; narrow the query or raise the limit."
+                )
+            if not include_text:
+                # Said even when nothing was dropped. An agent that asked for
+                # locations and got results with empty bodies has no other way
+                # to tell "withheld" from "the chunks really are blank", and
+                # reading the second for the first is how it concludes a file
+                # has no content.
+                parts.append(
+                    "Chunk bodies were omitted (locations_only=true). Each result "
+                    "carries its file and line range: read those lines directly, or "
+                    "call get_file_context, to see the code."
+                )
+            note = " ".join(parts) or None
         response = SearchResponse(
             query=query,
             applied_filters=_describe(filters),
