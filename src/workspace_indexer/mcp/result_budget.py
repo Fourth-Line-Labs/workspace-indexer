@@ -98,10 +98,12 @@ def _tokens(hit: SearchHit) -> int:
 def anchor_tokens(result: SearchResult) -> int:
     """What a hit costs once its body is gone.
 
-    Public because it is the packer's contract rather than an implementation
-    detail: "this is what an anchor costs" is the thing a caller reasons about
-    when choosing a budget, and it is what a test has to read to assert the
-    budget was respected without re-implementing the formula.
+    Public because choosing a budget means knowing what an anchor costs, and
+    because a test asserting the budget was respected has to read this rather
+    than recompute it -- a test that re-implements the formula agrees with
+    itself whatever the packer does. Nothing outside the tests calls it yet;
+    #97, which settles what `max_response_tokens` should be, is where that
+    changes.
 
     Measured off the serialized result rather than from a constant, so adding a
     field to `SearchResult` cannot quietly make this optimistic -- a new field
