@@ -9,7 +9,7 @@ from workspace_indexer.mcp.grounding_service import GroundingService
 from workspace_indexer.mcp.impact_report import ImpactReport
 from workspace_indexer.mcp.impact_service import ImpactService
 from workspace_indexer.mcp.query_service import CODE_EXCLUDES, GUIDANCE_TYPES, QueryService
-from workspace_indexer.mcp.result_budget import ResultBudget
+from workspace_indexer.mcp.result_budget import ResultBudget, anchor_tokens
 from workspace_indexer.mcp.search_response import SearchResponse
 from workspace_indexer.mcp.search_result import SearchResult
 from workspace_indexer.mcp.server_factory import (
@@ -29,6 +29,7 @@ from workspace_indexer.mcp.unknown_repository_error import UnknownRepositoryErro
 
 __all__ = [
     "ALIASES",
+    "anchor_tokens",
     "CODE_EXCLUDES",
     "GUIDANCE_TYPES",
     "TAXONOMY_URI",

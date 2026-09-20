@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from workspace_indexer.mcp import ResultBudget
-from workspace_indexer.mcp.result_budget import anchor_tokens
+from workspace_indexer.mcp import ResultBudget, anchor_tokens
 from workspace_indexer.models import DocumentType, SearchHit
 
 
@@ -201,13 +200,25 @@ def test_packing_without_bodies_never_overshoots_the_budget() -> None:
     no matter what the packer does.
     """
     hits = [_hit(i, 500) for i in range(20)]
+    # Derived from the real cost rather than hardcoded. `SearchResult` is
+    # expected to grow -- `anchor_tokens` is written for exactly that -- and a
+    # fixed budget sitting just above today's anchor would one day start
+    # failing on the *permitted* first-hit overshoot instead of on a real one,
+    # reporting a broken guarantee that is not broken.
+    one = anchor_tokens(ResultBudget(10_000).pack(hits[:1], include_text=False)[0][0])
 
-    for budget in (100, 130, 200, 500, 1000):
+    for budget in (one // 2, one, one * 2, one * 6, one * 12):
         results, dropped = ResultBudget(budget).pack(hits, include_text=False)
         spent = sum(anchor_tokens(r) for r in results)
+        # The guarantee exactly: everything fits, except that the first hit
+        # goes in whatever it costs. Stated as a ceiling rather than as "or
+        # there is only one result", which would also pass a single result that
+        # fit comfortably and so assert less than it appears to.
+        ceiling = max(budget, anchor_tokens(results[0])) if results else budget
 
+        assert results, "nothing was packed, so this asserts nothing"
         assert len(results) + dropped == len(hits)
-        assert spent <= budget, f"overshot {budget} by {spent - budget}"
+        assert spent <= ceiling, f"overshot {budget} by {spent - ceiling}"
 
 
 def test_the_first_hit_still_goes_in_when_it_cannot_fit() -> None:
