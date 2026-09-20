@@ -6,7 +6,7 @@ summary: >-
   storage backends and their differences, where reranking runs and which
   environments can run it, cluster sizing limits, and the indexing brakes.
 created: 2026-08-27
-updated: 2026-09-17
+updated: 2026-09-19
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
 source_ref: "main @ 402cd52"
@@ -602,6 +602,7 @@ it from query text.
 | `language` | string | none | |
 | `path_prefix` | string | none | |
 | `include_tests` | boolean | `false` | Tests and generated files are excluded by default: a test naming a symbol twenty times otherwise outranks the file defining it. |
+| `locations_only` | boolean | `false` | Return file and line ranges without the code. Bodies are most of what a hit costs, so far more matches fit in one response. See **Surveying without reading** below. |
 
 **`find_guidance`** — specifications, design documents and guides only.
 
@@ -611,11 +612,36 @@ it from query text.
 | `limit` | integer 1–50 | `8` | |
 | `repo` | string | none | |
 | `doc_type` | string | none | Narrow to one type. Accepts aliases (`spec`, `adr`, `architecture`, `readme`…). **An unrecognised value returns an error naming the valid types — never an empty result.** |
+| `locations_only` | boolean | `false` | Return file and line ranges without the code. Bodies are most of what a hit costs, so far more matches fit in one response. See **Surveying without reading** below. |
 
 Guidance covers `normative`, `design` **and `guide`**. The last is there on
 evidence: normative + design alone scored no better than plain search over the
 eight guidance cases, because filtering out `guide` lost `CONTRIBUTING.md`
 entirely. Adding it took recall from 0.812 to 0.938.
+
+#### Surveying without reading
+
+`locations_only` returns each hit's anchor — `location`, `rel_path`, the line
+range, `symbol_path` — and sets `text` to `""` with `text_omitted: true`. The
+flag matters: an empty `text` would otherwise be indistinguishable from a chunk
+that is genuinely blank, and an agent reading the second for the first concludes
+the file has no content. The response note says the same thing in words.
+
+It exists because the chunk body is most of what a hit costs. Measured over real
+MCP tool calls: every response that overflowed the token budget was a
+`search_code` call asking for many hits, and 145 matches were dropped across four
+calls — only 9–23 of 50 survived each time. No call at the default limit of `8`
+overflowed at all. So this is a flag for the survey question ("where does retry
+logic live?"), not something to set by default.
+
+**It does not make search exhaustive.** Results are still ranked, still capped by
+`limit`, and `limit` still stops at 50. Fitting more hits makes a short list
+*look* more complete than it is, so a `locations_only` response with
+`dropped_for_budget: 0` is still not proof that nothing else matches — use grep
+for that.
+
+**`get_file_context`** takes no such flag, and will not: it exists to return the
+body of a file you have already located.
 
 **`get_file_context`** — every indexed chunk of one file, in order.
 

@@ -315,3 +315,64 @@ async def test_a_workspace_without_worktrees_needs_no_choice(server: MCPServer) 
     result = await server.call_tool("search_code", {"query": "store", "limit": 3})
 
     assert not getattr(result, "isError", False)
+
+
+# ---- locations only (#71) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["search_code", "find_guidance"])
+async def test_locations_only_is_offered_on_both_search_tools(server: MCPServer, tool: str) -> None:
+    """An option the agent cannot see is an option it will not use, and the
+    schema is the only place it can see one."""
+    tools = {t.name: t for t in await server.list_tools()}
+    schema = tools[tool].input_schema
+
+    assert "locations_only" in schema["properties"]
+    assert schema["properties"]["locations_only"]["default"] is False
+
+
+async def test_the_locations_only_description_warns_it_is_not_grep(
+    server: MCPServer,
+) -> None:
+    """The mode fits more hits, which makes a short list look more complete
+    than it is. Results stay ranked and capped, so absence still is not proof
+    -- and the schema is where an agent reads that."""
+    tools = {t.name: t for t in await server.list_tools()}
+    description = json.dumps(tools["search_code"].input_schema["properties"]["locations_only"])
+
+    assert "grep" in description
+    assert "ranked" in description
+
+
+async def test_locations_only_reaches_the_service_through_the_tool(
+    server: MCPServer,
+) -> None:
+    """The parameter existing in the schema proves nothing about it being
+    wired: an unpassed argument silently keeps the default."""
+    bodied = _payload(await server.call_tool("search_code", {"query": "store", "limit": 5}))
+    anchors = _payload(
+        await server.call_tool(
+            "search_code", {"query": "store", "limit": 5, "locations_only": True}
+        )
+    )
+
+    assert bodied["results"], "no hits, so this compares nothing"
+    assert all(r["text"] for r in bodied["results"])
+    assert all(r["text"] == "" and r["text_omitted"] for r in anchors["results"])
+    assert [r["location"] for r in anchors["results"]] == [r["location"] for r in bodied["results"]]
+
+
+@pytest.mark.parametrize("tool", ["search_code", "find_guidance"])
+async def test_the_server_instructions_advertise_locations_only_on_both(
+    server: MCPServer, tool: str
+) -> None:
+    """The instructions are how an agent picks a tool, before it ever reads a
+    schema. Advertising the mode on one of the two search tools leaves the
+    other's survey case invisible."""
+    instructions = server.instructions or ""
+    bullet = next(
+        line for line in instructions.splitlines() if line.strip().startswith(f"- {tool} --")
+    )
+    following = instructions.split(bullet, 1)[1].split("\n- ", 1)[0]
+
+    assert "locations_only" in bullet + following

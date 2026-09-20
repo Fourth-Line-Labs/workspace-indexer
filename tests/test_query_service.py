@@ -327,3 +327,70 @@ async def test_the_filters_the_tool_applied_are_recorded(store: QdrantStore) -> 
     await _queries(store, sink=sink).search_code("store", limit=5)
 
     assert "exclude_doc_types" in sink[0].parameters
+
+
+# --- locations only (#71) ------------------------------------------------
+
+
+async def test_locations_only_returns_anchors_without_code(store: QdrantStore) -> None:
+    """The survey case: find where something lives, then read only what
+    matters. Measured on real tool calls, the responses that overflowed the
+    budget were all bodied ones asking for many hits."""
+    response = await _queries(store).search_code("auth", limit=8, locations_only=True)
+
+    assert response.results, "no hits, so this asserts nothing about omission"
+    assert all(r.text == "" and r.text_omitted for r in response.results)
+    # The anchor survives, because it is the entire point of the mode.
+    assert all(r.location and r.rel_path and r.end_line >= r.start_line for r in response.results)
+
+
+async def test_locations_only_says_so_even_when_nothing_was_dropped(store: QdrantStore) -> None:
+    """An agent holding results with empty bodies and no note cannot tell
+    "withheld" from "these chunks are blank"."""
+    response = await _queries(store).search_code("auth", limit=8, locations_only=True)
+
+    assert response.dropped_for_budget == 0
+    assert response.note is not None
+    assert "locations_only" in response.note
+    assert "get_file_context" in response.note
+
+
+async def test_a_normal_search_says_nothing_about_omission(store: QdrantStore) -> None:
+    """The note must not appear on the default path, where bodies are present
+    and there is nothing to warn about."""
+    response = await _queries(store).search_code("auth", limit=8)
+
+    assert all(r.text and not r.text_omitted for r in response.results)
+    assert response.note is None or "locations_only" not in response.note
+
+
+async def test_a_clipped_response_reports_both_the_drop_and_the_omission(
+    store: QdrantStore,
+) -> None:
+    """The two notes are independent facts and a caller needs both: how many
+    matches it is not seeing, and that what it did get has no code in it."""
+    response = await _queries(store, max_tokens=80).search_code(
+        "auth", limit=8, locations_only=True
+    )
+
+    assert response.dropped_for_budget > 0
+    assert response.note is not None
+    assert "dropped to stay inside" in response.note
+    assert "locations_only" in response.note
+
+
+async def test_find_guidance_omits_bodies_too(store: QdrantStore) -> None:
+    """Surveying which documents govern a topic is the same job as surveying
+    where a symbol lives."""
+    response = await _queries(store).find_guidance("conventions", limit=8, locations_only=True)
+
+    assert response.results, "no hits, so this asserts nothing about omission"
+    assert all(r.text == "" and r.text_omitted for r in response.results)
+
+
+async def test_get_file_context_always_carries_the_code(store: QdrantStore) -> None:
+    """It exists to return the body of a file already located. There is no
+    locations_only for it, and adding one would make it a worse `search_code`."""
+    from inspect import signature
+
+    assert "locations_only" not in signature(QueryService.get_file_context).parameters

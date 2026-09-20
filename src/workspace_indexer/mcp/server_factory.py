@@ -49,8 +49,14 @@ A semantic + keyword index over this workspace. Use it instead of grepping when
 you know *what* you want but not *where* it is.
 
 - search_code -- implementation, with tests and generated files excluded.
+  Pass locations_only=true to survey where something lives: it returns anchors
+  without bodies, so many more matches fit in one response. Still ranked and
+  still capped by limit, so a short list is not proof that nothing else
+  matches.
 - find_guidance -- specifications and design documents only. Reach for this
   before writing new code, especially when there is nothing yet to imitate.
+  Takes locations_only=true as well, to survey which documents govern a topic
+  before reading any of them.
 - get_file_context -- every indexed chunk of one file, in order.
 - list_document_types -- what kinds of document this workspace actually holds,
   with counts. A count of zero is a real answer: it means look at the code.
@@ -118,6 +124,17 @@ def build_mcp_server(
         include_tests: Annotated[
             bool, Field(description="Include tests and generated files.")
         ] = False,
+        locations_only: Annotated[
+            bool,
+            Field(
+                description="Return file and line ranges without the code itself. "
+                "Chunk bodies are most of what a hit costs, so this fits far more "
+                "matches in one response -- use it to survey where something lives "
+                "before reading any of it. Not a substitute for grep: results are "
+                "still ranked and capped by limit, so a short list is not proof "
+                "that nothing else matches."
+            ),
+        ] = False,
         worktree: Annotated[
             str | None,
             Field(
@@ -141,6 +158,7 @@ def build_mcp_server(
                 language=language,
                 path_prefix=path_prefix,
                 include_tests=include_tests,
+                locations_only=locations_only,
                 worktree=worktree,
             )
         except WorktreeChoiceError as exc:
@@ -155,6 +173,17 @@ def build_mcp_server(
             str | None,
             Field(description=f"Narrow to one type. One of: {_TYPE_LIST}."),
         ] = None,
+        locations_only: Annotated[
+            bool,
+            Field(
+                description="Return file and line ranges without the code itself. "
+                "Chunk bodies are most of what a hit costs, so this fits far more "
+                "matches in one response -- use it to survey where something lives "
+                "before reading any of it. Not a substitute for grep: results are "
+                "still ranked and capped by limit, so a short list is not proof "
+                "that nothing else matches."
+            ),
+        ] = False,
         worktree: Annotated[
             str | None,
             Field(
@@ -185,7 +214,12 @@ def build_mcp_server(
             raise ToolError(str(exc)) from exc
         try:
             return await queries.find_guidance(
-                query, limit=limit, repo=repo, doc_type=selected, worktree=worktree
+                query,
+                limit=limit,
+                repo=repo,
+                doc_type=selected,
+                locations_only=locations_only,
+                worktree=worktree,
             )
         except WorktreeChoiceError as exc:
             raise ToolError(str(exc)) from exc

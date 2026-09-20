@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace_indexer.mcp import ResultBudget
+from workspace_indexer.mcp import ResultBudget, anchor_tokens
 from workspace_indexer.models import DocumentType, SearchHit
 
 
@@ -97,3 +97,152 @@ def test_the_top_hit_survives_a_budget_too_small_to_hold_it() -> None:
     assert len(results) == 1
     assert results[0].text_truncated
     assert dropped == 2
+
+
+# ---- locations only (#71) ---------------------------------------------------
+
+
+def test_omitting_bodies_keeps_the_anchor_and_drops_the_code() -> None:
+    """The anchor is the point: `location` and the line range are what the
+    agent needs to read the file itself."""
+    results, dropped = ResultBudget(1000).pack([_hit(0, 100)], include_text=False)
+
+    assert dropped == 0
+    assert results[0].text == ""
+    assert results[0].text_omitted is True
+    assert results[0].rel_path == "src/file0.py"
+    assert results[0].start_line == 1
+    assert results[0].end_line == 9
+
+
+def test_a_withheld_body_is_distinguishable_from_an_empty_chunk() -> None:
+    """Both have `text == ""`. Without the flag an agent reads the first as the
+    second and concludes the file has no content."""
+    withheld, _ = ResultBudget(1000).pack([_hit(0, 100)], include_text=False)
+    genuinely_empty, _ = ResultBudget(1000).pack([_hit(0, 1, text="")])
+
+    assert withheld[0].text == genuinely_empty[0].text == ""
+    assert withheld[0].text_omitted is True
+    assert genuinely_empty[0].text_omitted is False
+
+
+def test_dropping_bodies_fits_far_more_hits_in_the_same_budget() -> None:
+    """The whole reason the mode exists. Measured on real tool calls, every
+    response that overflowed did so with bodies included."""
+    hits = [_hit(i, 500) for i in range(50)]
+
+    with_text, dropped_with_text = ResultBudget(6000).pack(hits)
+    without_text, dropped_without = ResultBudget(6000).pack(hits, include_text=False)
+
+    assert dropped_with_text > 0, "the text case must overflow or this compares nothing"
+    assert dropped_without == 0
+    assert len(without_text) == 50
+    assert len(without_text) > len(with_text) * 3
+
+
+def test_body_size_stops_mattering_once_bodies_are_omitted() -> None:
+    """Cost is measured off the serialized result, not off the hit, so a chunk
+    that would have dominated the budget costs the same as a tiny one."""
+    huge, _ = ResultBudget(6000).pack([_hit(0, 100_000)], include_text=False)
+    small, _ = ResultBudget(6000).pack([_hit(0, 1)], include_text=False)
+
+    assert huge[0].text == small[0].text == ""
+    assert not huge[0].text_truncated
+
+
+def test_an_omitted_body_is_never_marked_truncated() -> None:
+    """`text_truncated` means "you have part of the chunk". Withholding the
+    body gives you none of it, and conflating the two would have the agent
+    believe it holds a prefix it does not."""
+    results, _ = ResultBudget(50).pack([_hit(i, 5000) for i in range(3)], include_text=False)
+    assert results
+    assert all(not r.text_truncated for r in results)
+
+
+def test_the_small_chunk_floor_does_not_apply_without_bodies() -> None:
+    """The floor exists because half a chunk is useless, and it is set near
+    what a body-less hit costs. A location has no partial form -- it fits or it
+    does not -- so honouring the floor would stop packing with room still left.
+
+    Asserted as a comparison rather than a count: the exact number of hits that
+    fit depends on how wide the metadata happens to be, which is not the claim.
+    """
+    hits = [_hit(i, 500) for i in range(40)]
+
+    tight, _ = ResultBudget(600, min_chunk_tokens=64).pack(hits, include_text=False)
+    loose, _ = ResultBudget(600, min_chunk_tokens=1).pack(hits, include_text=False)
+
+    assert tight, "nothing was packed, so this compares nothing"
+    assert len(tight) == len(loose)
+
+
+def test_omitting_bodies_does_not_change_the_default_path() -> None:
+    """The default must produce exactly what it produced before the flag
+    existed, or a normal search silently changes."""
+    hits = [_hit(i, 100) for i in range(5)]
+    explicit, _ = ResultBudget(1000).pack(hits, include_text=True)
+    default, _ = ResultBudget(1000).pack(hits)
+
+    assert [r.model_dump() for r in explicit] == [r.model_dump() for r in default]
+    assert all(r.text and not r.text_omitted for r in default)
+
+
+def test_packing_without_bodies_never_overshoots_the_budget() -> None:
+    """The guarantee the class exists for, on the path that nearly lost it.
+
+    The bodied path cannot overshoot because an oversized chunk is clipped to
+    exactly what is left. An anchor cannot be clipped, so the first version of
+    this mode appended a hit that did not fit and noticed only on the next
+    iteration -- spending up to a whole hit past the limit.
+
+    Costs are read through the packer's own cost function rather than
+    recomputed here: a test that re-implements the formula agrees with itself
+    no matter what the packer does.
+    """
+    hits = [_hit(i, 500) for i in range(20)]
+    # Derived from the real cost rather than hardcoded. `SearchResult` is
+    # expected to grow -- `anchor_tokens` is written for exactly that -- and a
+    # fixed budget sitting just above today's anchor would one day start
+    # failing on the *permitted* first-hit overshoot instead of on a real one,
+    # reporting a broken guarantee that is not broken.
+    one = anchor_tokens(ResultBudget(10_000).pack(hits[:1], include_text=False)[0][0])
+
+    for budget in (one // 2, one, one * 2, one * 6, one * 12):
+        results, dropped = ResultBudget(budget).pack(hits, include_text=False)
+        spent = sum(anchor_tokens(r) for r in results)
+        # The guarantee exactly: everything fits, except that the first hit
+        # goes in whatever it costs. Stated as a ceiling rather than as "or
+        # there is only one result", which would also pass a single result that
+        # fit comfortably and so assert less than it appears to.
+        ceiling = max(budget, anchor_tokens(results[0])) if results else budget
+
+        assert results, "nothing was packed, so this asserts nothing"
+        assert len(results) + dropped == len(hits)
+        assert spent <= ceiling, f"overshot {budget} by {spent - ceiling}"
+
+
+def test_the_first_hit_still_goes_in_when_it_cannot_fit() -> None:
+    """The one permitted overshoot, and it is deliberate: returning nothing is
+    indistinguishable from "no matches", and the caller would go looking
+    elsewhere for something we actually found."""
+    results, dropped = ResultBudget(1).pack([_hit(i, 500) for i in range(3)], include_text=False)
+
+    assert len(results) == 1
+    assert dropped == 2
+    assert anchor_tokens(results[0]) > 1
+
+
+def test_serialized_results_are_costed_more_conservatively_than_prose() -> None:
+    """Field names, quotes and braces are mostly punctuation, which splits into
+    more tokens per character than words do.
+
+    The true ratio depends on the tokenizer of whichever model reads the
+    response and is not knowable here, so the only thing worth asserting is the
+    direction: an anchor must cost *more* than the four-characters-per-token
+    rate used for prose. Packing fewer anchors is recoverable; an over-long
+    response is not.
+    """
+    results, _ = ResultBudget(10_000).pack([_hit(0, 100)], include_text=False)
+    serialized = len(results[0].model_dump_json())
+
+    assert anchor_tokens(results[0]) > serialized // 4
