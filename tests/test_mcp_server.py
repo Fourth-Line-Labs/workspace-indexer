@@ -360,3 +360,19 @@ async def test_locations_only_reaches_the_service_through_the_tool(
     assert all(r["text"] for r in bodied["results"])
     assert all(r["text"] == "" and r["text_omitted"] for r in anchors["results"])
     assert [r["location"] for r in anchors["results"]] == [r["location"] for r in bodied["results"]]
+
+
+@pytest.mark.parametrize("tool", ["search_code", "find_guidance"])
+async def test_the_server_instructions_advertise_locations_only_on_both(
+    server: MCPServer, tool: str
+) -> None:
+    """The instructions are how an agent picks a tool, before it ever reads a
+    schema. Advertising the mode on one of the two search tools leaves the
+    other's survey case invisible."""
+    instructions = server.instructions or ""
+    bullet = next(
+        line for line in instructions.splitlines() if line.strip().startswith(f"- {tool} --")
+    )
+    following = instructions.split(bullet, 1)[1].split("\n- ", 1)[0]
+
+    assert "locations_only" in bullet + following

@@ -12,6 +12,15 @@ from workspace_indexer.models import SearchHit
 # percent either way costs nothing.
 _CHARS_PER_TOKEN = 4
 
+# Serialized results tokenize denser than prose: field names, quotes, braces and
+# short numeric values are mostly punctuation, and punctuation splits into more
+# tokens per character than words do. A judgement call rather than a
+# measurement -- the tokenizer that matters belongs to whichever model consumes
+# the response, which we cannot run here -- so it is set on the safe side.
+# Understating the divisor overstates the cost, which packs slightly fewer
+# anchors; the opposite error sends a response over the budget.
+_JSON_CHARS_PER_TOKEN = 3
+
 
 class ResultBudget:
     """Packs hits into a fixed token budget, newest-ranked first.
@@ -43,8 +52,7 @@ class ResultBudget:
         spent = 0
         # A body-less hit costs tens of tokens, not hundreds, so the
         # "too small to be worth returning" floor would stop packing while
-        # there was still room for a dozen more of them. There is no partial
-        # location: it either fits or it does not.
+        # there was still room for a dozen more of them.
         floor = self._min_chunk_tokens if include_text else 1
         for index, hit in enumerate(hits):
             remaining = self._max_tokens - spent
@@ -55,8 +63,20 @@ class ResultBudget:
             if remaining < floor and index:
                 return results, len(hits) - index
             result = _to_result(hit, include_text=include_text)
-            cost = _tokens(hit) if include_text else _metadata_tokens(result)
-            if include_text and cost > remaining:
+            cost = _tokens(hit) if include_text else anchor_tokens(result)
+            if cost > remaining and not include_text:
+                # There is no partial location: an anchor with its line range
+                # cut off is not a smaller anchor, it is a wrong one. So a hit
+                # that does not fit stops the packing rather than going in
+                # anyway, which would overshoot the budget by up to a whole
+                # hit -- the one thing this class promises not to do.
+                #
+                # Except the first, which goes in regardless, exactly as on the
+                # bodied path: returning nothing is indistinguishable from "no
+                # matches". That one hit is the only overshoot possible here.
+                if index:
+                    return results, len(hits) - index
+            elif cost > remaining:
                 result.text = _clip(hit.source_text, remaining)
                 result.text_truncated = True
                 cost = remaining
@@ -75,15 +95,24 @@ def _tokens(hit: SearchHit) -> int:
     return hit.token_count or max(1, len(hit.source_text) // _CHARS_PER_TOKEN)
 
 
-def _metadata_tokens(result: SearchResult) -> int:
+def anchor_tokens(result: SearchResult) -> int:
     """What a hit costs once its body is gone.
 
-    Measured off the serialized result rather than assumed, so adding a field
-    to `SearchResult` cannot quietly make the budget optimistic -- the failure
-    that would cause is an over-long response, which is the one thing this
-    class exists to prevent.
+    Public because it is the packer's contract rather than an implementation
+    detail: "this is what an anchor costs" is the thing a caller reasons about
+    when choosing a budget, and it is what a test has to read to assert the
+    budget was respected without re-implementing the formula.
+
+    Measured off the serialized result rather than from a constant, so adding a
+    field to `SearchResult` cannot quietly make this optimistic -- a new field
+    costs what it costs without anyone remembering to update a number.
+
+    That is a claim about *relative* accuracy, not absolute. The
+    characters-to-tokens conversion is still an estimate, and the true count
+    depends on the tokenizer of whichever model reads the response. See #97:
+    the bodied path has the same imprecision and a larger one of its own.
     """
-    return max(1, len(result.model_dump_json()) // _CHARS_PER_TOKEN)
+    return max(1, len(result.model_dump_json()) // _JSON_CHARS_PER_TOKEN)
 
 
 def _clip(text: str, tokens: int) -> str:

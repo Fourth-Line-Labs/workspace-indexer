@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from workspace_indexer.mcp import ResultBudget
+from workspace_indexer.mcp.result_budget import anchor_tokens
 from workspace_indexer.models import DocumentType, SearchHit
 
 
@@ -185,3 +186,52 @@ def test_omitting_bodies_does_not_change_the_default_path() -> None:
 
     assert [r.model_dump() for r in explicit] == [r.model_dump() for r in default]
     assert all(r.text and not r.text_omitted for r in default)
+
+
+def test_packing_without_bodies_never_overshoots_the_budget() -> None:
+    """The guarantee the class exists for, on the path that nearly lost it.
+
+    The bodied path cannot overshoot because an oversized chunk is clipped to
+    exactly what is left. An anchor cannot be clipped, so the first version of
+    this mode appended a hit that did not fit and noticed only on the next
+    iteration -- spending up to a whole hit past the limit.
+
+    Costs are read through the packer's own cost function rather than
+    recomputed here: a test that re-implements the formula agrees with itself
+    no matter what the packer does.
+    """
+    hits = [_hit(i, 500) for i in range(20)]
+
+    for budget in (100, 130, 200, 500, 1000):
+        results, dropped = ResultBudget(budget).pack(hits, include_text=False)
+        spent = sum(anchor_tokens(r) for r in results)
+
+        assert len(results) + dropped == len(hits)
+        assert spent <= budget, f"overshot {budget} by {spent - budget}"
+
+
+def test_the_first_hit_still_goes_in_when_it_cannot_fit() -> None:
+    """The one permitted overshoot, and it is deliberate: returning nothing is
+    indistinguishable from "no matches", and the caller would go looking
+    elsewhere for something we actually found."""
+    results, dropped = ResultBudget(1).pack([_hit(i, 500) for i in range(3)], include_text=False)
+
+    assert len(results) == 1
+    assert dropped == 2
+    assert anchor_tokens(results[0]) > 1
+
+
+def test_serialized_results_are_costed_more_conservatively_than_prose() -> None:
+    """Field names, quotes and braces are mostly punctuation, which splits into
+    more tokens per character than words do.
+
+    The true ratio depends on the tokenizer of whichever model reads the
+    response and is not knowable here, so the only thing worth asserting is the
+    direction: an anchor must cost *more* than the four-characters-per-token
+    rate used for prose. Packing fewer anchors is recoverable; an over-long
+    response is not.
+    """
+    results, _ = ResultBudget(10_000).pack([_hit(0, 100)], include_text=False)
+    serialized = len(results[0].model_dump_json())
+
+    assert anchor_tokens(results[0]) > serialized // 4

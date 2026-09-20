@@ -55,6 +55,8 @@ you know *what* you want but not *where* it is.
   matches.
 - find_guidance -- specifications and design documents only. Reach for this
   before writing new code, especially when there is nothing yet to imitate.
+  Takes locations_only=true as well, to survey which documents govern a topic
+  before reading any of them.
 - get_file_context -- every indexed chunk of one file, in order.
 - list_document_types -- what kinds of document this workspace actually holds,
   with counts. A count of zero is a real answer: it means look at the code.
