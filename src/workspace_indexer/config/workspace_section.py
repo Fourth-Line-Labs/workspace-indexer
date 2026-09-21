@@ -24,7 +24,13 @@ class WorkspaceSection(Strict):
     possible.
     """
 
-    name: str
+    # Constrained because the name is interpolated into a filesystem path --
+    # `state_dir/{name}.sqlite3` -- and `Manifest` creates parent directories,
+    # so an unchecked name succeeds silently in the wrong place. `../x` writes
+    # outside `state_dir`, `a/b` manufactures directories nobody configured,
+    # and an empty name yields a dotfile. Must start alphanumeric, so `.` and
+    # `..` cannot be spelled at all.
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=64)
     roots: list[RootConfig] = Field(min_length=1)
     eval: EvalSection | None = None
     embedding: EmbeddingSection | None = None

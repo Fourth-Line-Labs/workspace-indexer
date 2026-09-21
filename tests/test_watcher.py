@@ -423,3 +423,61 @@ async def test_a_new_file_does_not_rebuild_the_watch(tmp_path: Path) -> None:
         await watcher.run()
 
     assert len(scopes) == 1
+
+
+async def test_a_reload_returning_several_workspaces_is_survived(tmp_path: Path) -> None:
+    """The watcher must not die on a config it cannot use.
+
+    Constructing the debouncer and the scope used to happen *after* the guard,
+    so a reload that loaded cleanly but produced an unusable config killed the
+    process. The case that reached it: a multi-workspace config, where
+    `config.workspace` raises because there is a choice nobody made. The old
+    config keeps running instead, which is the same trade the guard already
+    made for a half-saved file.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    config_file = tmp_path / "workspace.yaml"
+    config_file.write_text("initial", encoding="utf-8")
+
+    unusable = WorkspaceConfig.model_validate(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "workspaces": [
+                {"name": "alpha", "roots": [{"path": str(root)}]},
+                {"name": "beta", "roots": [{"path": str(root)}]},
+            ],
+        }
+    )
+    good = _config(root, debounce_ms=100)
+    reloads: list[int] = []
+
+    def reload() -> WorkspaceConfig:
+        reloads.append(1)
+        return unusable
+
+    watcher = Watcher(
+        good,
+        reindex=_noop,
+        config_path=config_file,
+        probe=FilesystemProbe(LOCAL_MOUNTS),
+        budget=InotifyBudget(limit=100_000),
+        reload_config=reload,
+    )
+    stop = asyncio.Event()
+    with structlog.testing.capture_logs() as logs:
+        task = asyncio.create_task(watcher.run(stop))
+        await asyncio.sleep(0.6)
+        config_file.write_text("changed", encoding="utf-8")
+
+        for _ in range(60):
+            if reloads:
+                break
+            await asyncio.sleep(0.1)
+        stop.set()
+        # The assertion that matters: the task finishes because it was asked
+        # to, not because it raised.
+        await asyncio.wait_for(task, timeout=10)
+
+    assert reloads, "the reload never fired, so this asserts nothing"
+    assert any(entry["event"] == "watch.config_invalid" for entry in logs)

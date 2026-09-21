@@ -243,11 +243,21 @@ class Watcher:
         if self._reload_config is None:
             return
         try:
-            self._config = self._reload_config()
+            reloaded = self._reload_config()
+            # Built inside the guard, not after it. The load succeeding does
+            # not mean the config can be used: a reload that returns several
+            # workspaces makes `config.workspace` raise, and constructing these
+            # two out here killed the watcher on the first save of
+            # workspace.yaml rather than logging and carrying on.
+            debouncer = ChangeDebouncer(reloaded, self._config_path)
+            scope = WatchScope(reloaded)
         except Exception as exc:
             # A half-saved YAML file is a normal thing to observe mid-write.
             # Keeping the old config beats dying on a transient parse error.
             log.error("watch.config_invalid", error=str(exc))
             return
-        self._debouncer = ChangeDebouncer(self._config, self._config_path)
-        self._scope = WatchScope(self._config)
+        # Swapped in together, so a failure above leaves the watcher on the
+        # config it was already using rather than half on a new one.
+        self._config = reloaded
+        self._debouncer = debouncer
+        self._scope = scope

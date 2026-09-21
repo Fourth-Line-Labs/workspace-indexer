@@ -41,6 +41,11 @@ workspaces:
   #   embedding:
   #     model: fastembed:BAAI/bge-small-en-v1.5
   #     dimensions: 384
+  #
+  # Uncommenting that block also needs `state_dir` set below — several
+  # workspaces cannot share one manifest. Something like:
+  #
+  #   state_dir: ./data/manifests
 
 # Where per-workspace manifests live, one file per workspace named after it.
 # Null means "use STATE_DB from .env", which is the single-workspace default and

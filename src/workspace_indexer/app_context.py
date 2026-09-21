@@ -68,20 +68,6 @@ class AppContext:
         return cls._from_config(load_workspace_config(config_path).select(workspace), role=role)
 
     @classmethod
-    def build_all(
-        cls, config_path: Path | None = None, role: str | None = None
-    ) -> list[AppContext]:
-        """One context per configured workspace, in config order.
-
-        For the commands that act on everything -- indexing, serving -- rather
-        than on a named one. Each context is fully independent: its own
-        manifest file, its own collection, and its own embedding settings if it
-        overrides them.
-        """
-        config = load_workspace_config(config_path)
-        return [cls._from_config(config.select(name), role=role) for name in config.workspace_names]
-
-    @classmethod
     def _from_config(cls, config: WorkspaceConfig, role: str | None = None) -> AppContext:
         settings = Settings()
         # Applied to the config itself, before anything reads it, so every

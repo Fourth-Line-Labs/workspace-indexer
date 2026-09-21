@@ -254,10 +254,14 @@ def test_every_command_that_takes_a_config_also_takes_a_workspace() -> None:
     this until it is threaded through, not until someone remembers a list.
     """
     import ast
-    from pathlib import Path as P
 
-    tree = ast.parse(P("src/workspace_indexer/cli.py").read_text(encoding="utf-8"))
-    missing: list[str] = []
+    # Anchored to this file rather than the working directory, like every other
+    # test that reads repo source. A CWD-relative path passes or fails on where
+    # pytest was invoked from.
+    source = Path(__file__).resolve().parents[1] / "src" / "workspace_indexer" / "cli.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    declared: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -268,9 +272,45 @@ def test_every_command_that_takes_a_config_also_takes_a_workspace() -> None:
             continue
         names = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
         if "config" in names and "workspace" not in names:
-            missing.append(node.name)
+            declared.append(node.name)
 
-    assert not missing, f"commands taking --config but not --workspace: {missing}"
+    assert not declared, f"commands taking --config but not --workspace: {declared}"
+
+
+def test_the_workspace_flag_is_passed_on_and_not_merely_accepted() -> None:
+    """Declaring the parameter is not using it.
+
+    A command that accepts `--workspace` and quietly ignores it is the failure
+    nearest the flag's promise: it would answer from the wrong workspace while
+    looking like it honoured the request. So every command body must mention
+    the name somewhere, not just its signature.
+    """
+    import ast
+
+    source = Path(__file__).resolve().parents[1] / "src" / "workspace_indexer" / "cli.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    unused: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if not any(
+            isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "command"
+            for d in node.decorator_list
+        ):
+            continue
+        names = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+        if "workspace" not in names:
+            continue
+        used = any(
+            isinstance(inner, ast.Name) and inner.id == "workspace"
+            for statement in node.body
+            for inner in ast.walk(statement)
+        )
+        if not used:
+            unused.append(node.name)
+
+    assert not unused, f"commands accepting --workspace without using it: {unused}"
 
 
 # ---- the separation holds through a real indexing run ----------------------
@@ -337,3 +377,110 @@ async def test_two_workspaces_sharing_a_root_label_keep_their_files_apart(
     assert contents["alpha"] == contents["beta"] == ["src/same_name.py"]
     assert (state / "ws-alpha.sqlite3").exists()
     assert (state / "ws-beta.sqlite3").exists()
+
+
+# ---- the fixes from review -------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["../escape", "nested/deep", "", ".hidden", "a b"])
+def test_a_workspace_name_that_would_escape_state_dir_is_refused(name: str) -> None:
+    """The name becomes a filename, and `Manifest` creates parent directories,
+    so an unchecked one succeeds silently in the wrong place rather than
+    failing."""
+    with pytest.raises(ValidationError):
+        Config.model_validate({"workspace": {"name": name, "roots": [{"path": "/a"}]}})
+
+
+def test_names_differing_only_in_case_are_refused() -> None:
+    """On Windows and macOS they are one file -- so this is the
+    two-workspaces-one-manifest collision `state_dir` exists to prevent,
+    arriving through the name instead of the root label."""
+    with pytest.raises(ValidationError, match="duplicate workspace names"):
+        Config.model_validate(
+            {
+                "state_dir": "/var/idx",
+                "workspaces": [
+                    {"name": "Alpha", "roots": [{"path": "/a"}]},
+                    {"name": "alpha", "roots": [{"path": "/b"}]},
+                ],
+            }
+        )
+
+
+def test_a_partial_eval_block_inherits_the_fields_it_does_not_name() -> None:
+    """Every `EvalSection` field has a default, so replacing the section
+    wholesale gives a workspace that only wanted different metrics the *class
+    default* dataset -- evaluating against a file nobody configured."""
+    config = Config.model_validate(
+        {
+            "state_dir": "/var/idx",
+            "eval": {"dataset": "/shared/eval.yaml"},
+            "workspaces": [
+                {
+                    "name": "alpha",
+                    "roots": [{"path": "/a"}],
+                    "eval": {"metrics": ["recall@5"]},
+                },
+                {"name": "beta", "roots": [{"path": "/b"}]},
+            ],
+        }
+    )
+
+    alpha = config.select("alpha").eval
+
+    assert alpha.metrics == ["recall@5"]
+    assert alpha.dataset == Path("/shared/eval.yaml")
+
+
+def test_an_embedding_model_without_its_dimensions_is_refused() -> None:
+    """Nothing cross-validates the pair at runtime: the space would claim the
+    inherited width while the backend returned another, and the mismatch
+    surfaces at the first embed batch, after tokens have been spent."""
+    with pytest.raises(ValidationError, match="dimensions"):
+        EmbeddingSection(model="fastembed:BAAI/bge-small-en-v1.5")
+
+
+def test_every_override_maps_onto_a_real_setting() -> None:
+    """The keys are built by an `embedding_` convention with one name that
+    breaks it, and `Settings` ignores extras -- so a key that stopped matching
+    would be dropped by the round trip with no error and no effect."""
+    settings = Settings()
+
+    applied = EmbeddingSection(
+        model="fastembed:BAAI/bge-small-en-v1.5",
+        dimensions=384,
+        quantization="int8",
+        sparse_model="Qdrant/bm25",
+        price_per_mtok=0.5,
+    ).applied_to(settings)
+
+    assert applied.embedding_model == "fastembed:BAAI/bge-small-en-v1.5"
+    assert applied.embedding_dimensions == 384
+    assert applied.embedding_quantization == "int8"
+    assert applied.sparse_model == "Qdrant/bm25"
+    assert applied.embedding_price_per_mtok == 0.5
+
+
+def test_other_workspaces_stay_excluded_after_the_rerank_overrides_are_applied() -> None:
+    """`with_rerank_overrides` rebuilds the config with `model_copy`, and the
+    cross-workspace dataset exclusion rides on private state that copy happens
+    to carry. If that ever changes, the exclusion dies silently and only on
+    machines that set `RERANK_*` -- so it is pinned on the public seam.
+    """
+    from workspace_indexer.app_context import with_rerank_overrides
+
+    config = Config.model_validate(
+        {
+            "state_dir": "/var/idx",
+            "workspaces": [
+                {"name": "alpha", "roots": [{"path": "/a"}], "eval": {"dataset": "/a/eval.yaml"}},
+                {"name": "beta", "roots": [{"path": "/b"}], "eval": {"dataset": "/b/eval.yaml"}},
+            ],
+        }
+    )
+
+    rebuilt = with_rerank_overrides(
+        config.select("alpha"), Settings(rerank_model="voyageai:rerank-2.5-lite")
+    )
+
+    assert Path("/b/eval.yaml") in rebuilt.excluded_paths

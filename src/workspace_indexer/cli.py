@@ -75,17 +75,21 @@ def _context(
         raise typer.Exit(code=2) from exc
 
 
-def _contexts(config: Path | None, role: str, workspace: str | None) -> list[AppContext]:
-    """Every configured workspace, or just the named one.
+def _workspace_names(config: Path | None, workspace: str | None) -> list[str]:
+    """Which workspaces a command should act on, as names rather than contexts.
 
-    For commands that act on the whole config. A single-workspace config gives
-    a one-element list, so the loop is not a special case anyone has to think
-    about.
+    Names, deliberately. Building every context up front opens every manifest
+    and every store at once -- and embedded Qdrant takes a single-process lock
+    on its path, so the second one fails outright on the default configuration.
+    The caller builds one at a time and closes it before the next.
     """
-    if workspace is not None:
-        return [_context(config, role, workspace)]
     try:
-        return AppContext.build_all(config, role)
+        loaded = load_workspace_config(config)
+        if workspace is None:
+            return loaded.workspace_names
+        # Resolved now rather than at the first use, so a mistyped name fails
+        # before any indexing happens.
+        return [loaded.select(workspace).workspace.name]
     except (ConfigError, WorkspaceChoiceError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
@@ -121,13 +125,32 @@ def index(
         # indexes, so this is a loop rather than one run over more roots --
         # each has its own manifest, its own collection, and possibly its own
         # embedding model.
-        contexts = _contexts(config, "index", workspace)
-        for ctx in contexts:
-            if len(contexts) > 1:
-                console.rule(f"[bold]{ctx.config.workspace.name}[/bold]")
-            await _index_one(
-                ctx, root=root, force=force, dry_run=dry_run, allow_deletes=allow_deletes
-            )
+        #
+        # Built one at a time. Building them all first would hold every store
+        # open at once, which embedded Qdrant refuses outright: it locks its
+        # storage folder to a single client.
+        names = _workspace_names(config, workspace)
+        for position, name in enumerate(names):
+            if len(names) > 1:
+                console.rule(f"[bold]{name}[/bold]")
+            try:
+                await _index_one(
+                    _context(config, "index", name),
+                    root=root,
+                    force=force,
+                    dry_run=dry_run,
+                    allow_deletes=allow_deletes,
+                )
+            except typer.Exit:
+                # The deletions brake, or a failure. Say what was not reached:
+                # the exit code is the same one a single-workspace run gives,
+                # so without this the untouched workspaces look indexed.
+                skipped = names[position + 1 :]
+                if skipped:
+                    console.print(
+                        f"[yellow]not attempted after {name} stopped: {', '.join(skipped)}[/yellow]"
+                    )
+                raise
 
     async def _index_one(
         ctx: AppContext, *, root: str | None, force: bool, dry_run: bool, allow_deletes: bool
@@ -795,7 +818,12 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
             ctx.config,
             reindex=reindex,
             config_path=resolved,
-            reload_config=lambda: load_workspace_config(resolved),
+            # Narrowed, like the initial context. An un-narrowed reload
+            # would hand ChangeDebouncer a config whose `workspace` property
+            # raises -- outside `_reload`'s guard, so the watcher dies on the
+            # first save of workspace.yaml. A select failure inside the lambda
+            # is caught by that guard, so torn-write recovery is unaffected.
+            reload_config=lambda: load_workspace_config(resolved).select(workspace),
         )
         for label, mode in watcher.plan().items():
             console.print(f"  {label}: [cyan]{mode.value}[/cyan]")

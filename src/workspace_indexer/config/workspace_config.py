@@ -76,13 +76,18 @@ class WorkspaceConfig(Strict):
 
     @model_validator(mode="after")
     def _workspaces_are_distinct(self) -> WorkspaceConfig:
-        names = [w.name for w in self.workspaces]
-        dupes = {name for name in names if names.count(name) > 1}
+        # Compared case-insensitively because the name becomes a filename, and
+        # on Windows and macOS `Alpha` and `alpha` are one file -- which is the
+        # two-workspaces-one-manifest collision `state_dir` exists to prevent,
+        # arriving through the name instead of the label.
+        folded = [w.name.casefold() for w in self.workspaces]
+        dupes = {name for name in folded if folded.count(name) > 1}
         if dupes:
             raise ValueError(
-                f"duplicate workspace names {sorted(dupes)}; the name keys the "
-                "collection and the manifest, so two workspaces sharing one would "
-                "overwrite each other"
+                f"duplicate workspace names {sorted(dupes)} (compared ignoring case, "
+                "because the name becomes a filename); the name keys the collection "
+                "and the manifest, so two workspaces sharing one would overwrite "
+                "each other"
             )
         self._dataset_paths = {w.eval.dataset for w in self.workspaces if w.eval} | {
             self.eval.dataset
@@ -134,7 +139,7 @@ class WorkspaceConfig(Strict):
                 raise WorkspaceChoiceError(name, self.workspace_names)
             chosen = found
         narrowed = self.model_copy(
-            update={"workspaces": [chosen], "eval": chosen.eval or self.eval}
+            update={"workspaces": [chosen], "eval": self._folded_eval(chosen)}
         )
         # Carried across explicitly. `model_copy` keeps private state, but the
         # set has to outlive the narrowing either way: after selecting one
@@ -142,6 +147,24 @@ class WorkspaceConfig(Strict):
         # indexed.
         narrowed._dataset_paths = set(self._dataset_paths)
         return narrowed
+
+    def _folded_eval(self, chosen: WorkspaceSection) -> EvalSection:
+        """The shared eval block with the workspace's stated fields on top.
+
+        Field by field rather than wholesale. Every `EvalSection` field has a
+        default, so replacing the section outright means a workspace that only
+        wanted different `metrics:` silently gets the *class default* dataset
+        instead of the shared one -- and then evaluates against a file nobody
+        configured, or fails late with a missing-file error.
+
+        `model_fields_set` is what distinguishes "stated" from "defaulted", and
+        re-validating rather than copying keeps the override on the same
+        footing as any other config value.
+        """
+        if chosen.eval is None:
+            return self.eval
+        stated = {name: getattr(chosen.eval, name) for name in chosen.eval.model_fields_set}
+        return EvalSection.model_validate({**self.eval.model_dump(), **stated})
 
     def manifest_path(self, state_db: Path) -> Path:
         """Where this workspace's manifest lives.

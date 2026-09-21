@@ -32,6 +32,20 @@ All commands accept `--config PATH` (default `config/workspace.yaml`). An MCP
 client or a systemd unit starts from its own working directory, so pass an
 absolute path there.
 
+They also accept `--workspace NAME` (`-w`), which matters only when the config
+holds several — see [2.1](#21-workspaces-and-state_dir). **The two behaviours
+differ, deliberately:**
+
+- `index` with no `--workspace` runs **every** workspace in sequence, each with
+  its own manifest and collection. If one stops early — the deletions brake,
+  say — the ones after it are not attempted, and the run says which.
+- every other command with no `--workspace` is an **error** naming the
+  configured workspaces. There is no safe default: answering from whichever was
+  listed first would serve one workspace's code to a question about another's,
+  silently, which is the thing separate workspaces exist to prevent.
+
+A config with one workspace never needs the flag.
+
 ### `index`
 
 Walk the configured roots and index what changed.
@@ -302,12 +316,39 @@ work for more than one client, one client's code may be barred from reaching a
 hosted API at all: that workspace embeds with a local `fastembed:` model while
 another uses a hosted one. A process-wide model cannot express that. Because the
 override changes the configuration hash, `eval --compare` will not pretend runs
-on different models are comparable, and the cost report prices each workspace at
-its own rate.
+on different models are comparable.
+
+**Cost reporting follows only what you override.** `price_per_mtok` is a
+separate key, so overriding `model` alone leaves that workspace priced at the
+`.env` rate — which is the rate of a different model. A local `fastembed:` model
+escapes this by reporting its own zero cost; a second hosted model does not, so
+override both.
+
+| `embedding` key | overrides | |
+|---|---|---|
+| `model` | `EMBEDDING_MODEL` | `provider:model`. **Requires `dimensions` alongside it** — inheriting the width from `.env` while changing the model gives a space whose size does not match the vectors, and that fails at the first embed batch rather than at config load. Refused at load instead. |
+| `dimensions` | `EMBEDDING_DIMENSIONS` | |
+| `quantization` | `EMBEDDING_QUANTIZATION` | `float32`, `int8` or `binary`. |
+| `sparse_model` | `SPARSE_MODEL` | Part of the collection name, so changing it is a separate space. |
+| `price_per_mtok` | `EMBEDDING_PRICE_PER_MTOK` | See above: without it the workspace is costed at another model's rate. |
 
 | key | default | |
 |---|---|---|
 | `state_dir` | `null` | Directory holding one manifest per workspace, named after it. `null` means use `STATE_DB` from `.env`, which is the single-workspace default and leaves an existing index where it is. **Required once there is more than one workspace** — see below. |
+
+**Setting it with one workspace relocates that manifest too.** The rule is
+"`state_dir` wins wherever it is set", not "wins once there are several" — so a
+single-workspace config that sets it in preparation starts addressing
+`state_dir/{name}.sqlite3` and stops seeing the database `STATE_DB` points at.
+Nothing is lost, but the next run re-indexes from empty and pays for the
+embeddings again. Move the existing file and rename it after the workspace, or
+leave `state_dir` unset until you actually add the second workspace.
+
+A workspace `name` is restricted to letters, digits, `.`, `-` and `_`, starting
+with a letter or digit, because it becomes that filename — an unchecked name
+would write outside `state_dir` or create directories nobody configured. Names
+are compared ignoring case for the same reason: on Windows and macOS `Alpha`
+and `alpha` are one file.
 
 `state_dir` is required for several workspaces rather than optional because the
 manifest has no workspace column: every table keys on `(root_label, rel_path)`.
