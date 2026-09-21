@@ -55,7 +55,7 @@ def test_every_workspace_option_is_documented(text: str) -> None:
         field
         for field in _leaf_fields(WorkspaceConfig)
         # `roots` is documented as a shape rather than leaf by leaf.
-        if not field.startswith("workspace.roots") and field.split(".")[-1] not in text
+        if not field.startswith("workspaces.roots") and field.split(".")[-1] not in text
     ]
     assert not missing, f"undocumented workspace.yaml options: {missing}"
 
