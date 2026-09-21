@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from workspace_indexer.app_context import AppContext
-from workspace_indexer.config import ConfigError, load_workspace_config
+from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
 from workspace_indexer.evaluation import (
     EvalComparison,
@@ -50,9 +50,15 @@ console = Console()
 watch_log = get_logger("workspace_indexer.cli.watch")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to workspace.yaml")]
+WorkspaceOption = Annotated[
+    str | None,
+    typer.Option("--workspace", "-w", help="Which workspace, when the config describes several"),
+]
 
 
-def _context(config: Path | None, role: str | None = None) -> AppContext:
+def _context(
+    config: Path | None, role: str | None = None, workspace: str | None = None
+) -> AppContext:
     """`role` is the command's own name, and keeps its log file separate.
 
     Passed explicitly by each command rather than sniffed from sys.argv: a
@@ -60,9 +66,31 @@ def _context(config: Path | None, role: str | None = None) -> AppContext:
     parameter, and this one is read in a traceback more often than written.
     """
     try:
-        return AppContext.build(config, role)
-    except ConfigError as exc:
-        # A config problem is a user problem, not a traceback.
+        return AppContext.build(config, role, workspace=workspace)
+    except (ConfigError, WorkspaceChoiceError) as exc:
+        # A config problem is a user problem, not a traceback. Naming an
+        # unconfigured workspace, or naming none where there is a choice, is
+        # the same kind of problem and gets the same treatment.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+
+def _workspace_names(config: Path | None, workspace: str | None) -> list[str]:
+    """Which workspaces a command should act on, as names rather than contexts.
+
+    Names, deliberately. Building every context up front opens every manifest
+    and every store at once -- and embedded Qdrant takes a single-process lock
+    on its path, so the second one fails outright on the default configuration.
+    The caller builds one at a time and closes it before the next.
+    """
+    try:
+        loaded = load_workspace_config(config)
+        if workspace is None:
+            return loaded.workspace_names
+        # Resolved now rather than at the first use, so a mistyped name fails
+        # before any indexing happens.
+        return [loaded.select(workspace).workspace.name]
+    except (ConfigError, WorkspaceChoiceError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
 
@@ -70,6 +98,7 @@ def _context(config: Path | None, role: str | None = None) -> AppContext:
 @app.command()
 def index(
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
     root: Annotated[str | None, typer.Option(help="Index only this root label")] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show the chunk plan and token estimate, no API calls")
@@ -92,7 +121,40 @@ def index(
     """
 
     async def run() -> None:
-        ctx = _context(config, "index")
+        # Every configured workspace unless one is named. They are separate
+        # indexes, so this is a loop rather than one run over more roots --
+        # each has its own manifest, its own collection, and possibly its own
+        # embedding model.
+        #
+        # Built one at a time. Building them all first would hold every store
+        # open at once, which embedded Qdrant refuses outright: it locks its
+        # storage folder to a single client.
+        names = _workspace_names(config, workspace)
+        for position, name in enumerate(names):
+            if len(names) > 1:
+                console.rule(f"[bold]{name}[/bold]")
+            try:
+                await _index_one(
+                    _context(config, "index", name),
+                    root=root,
+                    force=force,
+                    dry_run=dry_run,
+                    allow_deletes=allow_deletes,
+                )
+            except typer.Exit:
+                # The deletions brake, or a failure. Say what was not reached:
+                # the exit code is the same one a single-workspace run gives,
+                # so without this the untouched workspaces look indexed.
+                skipped = names[position + 1 :]
+                if skipped:
+                    console.print(
+                        f"[yellow]not attempted after {name} stopped: {', '.join(skipped)}[/yellow]"
+                    )
+                raise
+
+    async def _index_one(
+        ctx: AppContext, *, root: str | None, force: bool, dry_run: bool, allow_deletes: bool
+    ) -> None:
         try:
             stats = await ctx.indexer().run(
                 only_root=root, force=force, dry_run=dry_run, allow_deletes=allow_deletes
@@ -133,6 +195,7 @@ def index(
 def search(
     query: Annotated[str, typer.Argument(help="What to look for")],
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
     limit: Annotated[int | None, typer.Option("-n", "--limit")] = None,
     unit: Annotated[str | None, typer.Option(help="Only this repo or folder")] = None,
     lang: Annotated[str | None, typer.Option(help="Only this language")] = None,
@@ -147,7 +210,7 @@ def search(
     """Search the index."""
 
     async def run() -> None:
-        ctx = _context(config, "search")
+        ctx = _context(config, "search", workspace)
         try:
             hits = await ctx.search_service().search(
                 SearchRequest(
@@ -185,11 +248,11 @@ def search(
 
 
 @app.command()
-def status(config: ConfigOption = None) -> None:
+def status(config: ConfigOption = None, workspace: WorkspaceOption = None) -> None:
     """What is indexed, in which spaces, and what recent runs cost."""
 
     async def run() -> None:
-        ctx = _context(config, "status")
+        ctx = _context(config, "status", workspace)
         try:
             roots = Table(title="files by root")
             roots.add_column("root")
@@ -263,10 +326,10 @@ def status(config: ConfigOption = None) -> None:
 
 
 @app.command()
-def grounding(config: ConfigOption = None) -> None:
+def grounding(config: ConfigOption = None, workspace: WorkspaceOption = None) -> None:
     """Which repositories can explain why they are the way they are."""
 
-    ctx = _context(config, "grounding")
+    ctx = _context(config, "grounding", workspace)
     try:
         units = CoverageService(ctx.manifest).coverage()
     finally:
@@ -327,12 +390,13 @@ def _grounding_table(unit: UnitCoverage) -> Table:
 def explain(
     path: Annotated[Path, typer.Argument(help="File to chunk")],
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
 ) -> None:
     """Show the chunks a single file produces. The chunk-quality debugging tool."""
     from workspace_indexer.chunking import read_source
     from workspace_indexer.discovery import Walker
 
-    ctx = _context(config, "explain")
+    ctx = _context(config, "explain", workspace)
     try:
         target = path.expanduser().resolve()
         candidate = next(
@@ -398,6 +462,7 @@ def symbol_label(kind: str | None, path: str | None) -> str:
 def mirror(
     to: Annotated[str, typer.Option("--to", help="Target backend: qdrant | mongodb")],
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
     overwrite: Annotated[
         bool, typer.Option("--overwrite/--resume", help="Drop the target collection first")
     ] = False,
@@ -419,7 +484,7 @@ def mirror(
     """
 
     async def run() -> None:
-        ctx = _context(config, "mirror")
+        ctx = _context(config, "mirror", workspace)
         target_settings = ctx.settings.model_copy(update={"vector_store": to})
         if target_settings.vector_store == ctx.settings.vector_store:
             console.print(
@@ -467,11 +532,12 @@ def mirror(
 def reproject(
     dimensions: Annotated[int, typer.Option("--dimensions", "-d")],
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
 ) -> None:
     """Derive a narrower collection by Matryoshka truncation. No re-embedding."""
 
     async def run() -> None:
-        ctx = _context(config, "reproject")
+        ctx = _context(config, "reproject", workspace)
         try:
             target = await Reprojector(ctx.store, ctx.manifest).reproject(ctx.space, dimensions)
             console.print(
@@ -489,6 +555,7 @@ def reproject(
 @app.command("eval")
 def evaluate(
     config: ConfigOption = None,
+    workspace: WorkspaceOption = None,
     dataset: Annotated[Path | None, typer.Option("--dataset")] = None,
     limit: Annotated[int, typer.Option("-n", "--limit")] = 10,
     fusion: Annotated[str | None, typer.Option()] = None,
@@ -518,7 +585,7 @@ def evaluate(
     """
 
     async def run() -> None:
-        ctx = _context(config, "eval")
+        ctx = _context(config, "eval", workspace)
         try:
             cases = load_cases(dataset or ctx.config.eval.dataset)
             if group != "all":
@@ -663,7 +730,7 @@ def _print_comparison(comparison: EvalComparison) -> None:
 
 
 @app.command()
-def serve(config: ConfigOption = None) -> None:
+def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> None:
     """Run the MCP server so an agent can query the index mid-session.
 
     Speaks MCP over stdio: the client starts this process and talks to it down
@@ -681,7 +748,7 @@ def serve(config: ConfigOption = None) -> None:
     )
     from workspace_indexer.mcp.server_factory import preflight
 
-    ctx = _context(config, "serve")
+    ctx = _context(config, "serve", workspace)
     try:
         asyncio.run(preflight(ctx))
     except EmptyIndexError as exc:
@@ -700,7 +767,7 @@ def serve(config: ConfigOption = None) -> None:
 
 
 @app.command()
-def watch(config: ConfigOption = None) -> None:
+def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> None:
     """Watch the configured roots and reindex as files change.
 
     A trigger, not a second indexing path: every change ends up in the same
@@ -716,7 +783,7 @@ def watch(config: ConfigOption = None) -> None:
         )
         raise typer.Exit(code=2) from exc
 
-    ctx = _context(config, "watch")
+    ctx = _context(config, "watch", workspace)
     resolved = config or DEFAULT_CONFIG_PATH
 
     async def run() -> None:
@@ -751,7 +818,12 @@ def watch(config: ConfigOption = None) -> None:
             ctx.config,
             reindex=reindex,
             config_path=resolved,
-            reload_config=lambda: load_workspace_config(resolved),
+            # Narrowed, like the initial context. An un-narrowed reload
+            # would hand ChangeDebouncer a config whose `workspace` property
+            # raises -- outside `_reload`'s guard, so the watcher dies on the
+            # first save of workspace.yaml. A select failure inside the lambda
+            # is caught by that guard, so torn-write recovery is unaffected.
+            reload_config=lambda: load_workspace_config(resolved).select(workspace),
         )
         for label, mode in watcher.plan().items():
             console.print(f"  {label}: [cyan]{mode.value}[/cyan]")

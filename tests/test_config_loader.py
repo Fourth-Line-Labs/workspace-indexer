@@ -56,10 +56,17 @@ def test_non_mapping_is_rejected(tmp_path: Path) -> None:
 
 
 def test_validation_error_names_the_offending_key(tmp_path: Path) -> None:
-    """Pydantic's default rendering buries the key path in noise."""
+    """Pydantic's default rendering buries the key path in noise.
+
+    The path names the workspace by index (`workspaces.0.roots`) even when the
+    file used the singular `workspace:`, because the singular form normalises
+    into the list before validation. That is the right trade: with several
+    workspaces the index is the only thing that says *which* one is wrong, and
+    a reader of a one-workspace file can still see which key it means.
+    """
     path = tmp_path / "workspace.yaml"
     path.write_text("workspace:\n  name: labbox\n  roots: []\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match="workspace.roots"):
+    with pytest.raises(ConfigError, match=r"workspaces\.0\.roots"):
         load_workspace_config(path)
 
 

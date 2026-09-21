@@ -6,7 +6,7 @@ summary: >-
   storage backends and their differences, where reranking runs and which
   environments can run it, cluster sizing limits, and the indexing brakes.
 created: 2026-08-27
-updated: 2026-09-19
+updated: 2026-09-20
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
 source_ref: "main @ 402cd52"
@@ -31,6 +31,20 @@ Where a default deserves an explanation, it has one.
 All commands accept `--config PATH` (default `config/workspace.yaml`). An MCP
 client or a systemd unit starts from its own working directory, so pass an
 absolute path there.
+
+They also accept `--workspace NAME` (`-w`), which matters only when the config
+holds several — see [2.1](#21-workspaces-and-state_dir). **The two behaviours
+differ, deliberately:**
+
+- `index` with no `--workspace` runs **every** workspace in sequence, each with
+  its own manifest and collection. If one stops early — the deletions brake,
+  say — the ones after it are not attempted, and the run says which.
+- every other command with no `--workspace` is an **error** naming the
+  configured workspaces. There is no safe default: answering from whichever was
+  listed first would serve one workspace's code to a question about another's,
+  silently, which is the thing separate workspaces exist to prevent.
+
+A config with one workspace never needs the flag.
 
 ### `index`
 
@@ -273,12 +287,75 @@ between crashed, killed and still running.
 *What* to index. Safe to commit; its `roots` are paths, so prefer `~`-relative
 ones or keep a per-host file.
 
-### 2.1 `workspace`
+### 2.1 `workspaces` and `state_dir`
+
+`workspaces` is a list. `workspace:` (singular) means the same thing with one
+entry and still works unchanged, so no existing config needs editing — the two
+spellings cannot both appear in one file.
+
+Several entries are several **separate** indexes served by one process: each has
+its own collection and its own manifest, and a search never crosses between
+them. That is the point — reach for it when the trees must not mix, such as work
+for different clients, or a corpus large enough to shift your eval baselines.
+Unrelated repositories that *may* be searched together belong in one workspace
+as extra `roots`, which has always worked.
 
 | key | default | |
 |---|---|---|
-| `name` | **required** | Names the Qdrant collection: `{name}__{embedding-space}`. Two workspaces with different names get separate collections, which is how you keep a test corpus from shifting your baselines. |
+| `name` | **required** | Names the collection: `{name}__{embedding-space}`. Also names the manifest file under `state_dir`. |
 | `roots` | **required** | List of `{path, label?, recurse_into_children?}`. `label` defaults to the directory name and keys the manifest and the payload filter, so a collision would silently merge two roots. |
+| `eval` | inherited | Overrides the shared `eval` block for this workspace, so its baselines are its own. Every workspace's dataset is excluded from every index, not only its own. |
+| `embedding` | inherited | Overrides `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_QUANTIZATION`, `SPARSE_MODEL` and `EMBEDDING_PRICE_PER_MTOK` for this workspace. Anything omitted is inherited from `.env`. |
+
+Everything outside `workspaces` — excludes, chunking, search, watch, logging —
+is shared by all of them. Two workspaces on one machine have the same settings
+in practice, and saying so twice is how they drift apart.
+
+**`embedding` exists for a constraint, not for tuning.** On a machine holding
+work for more than one client, one client's code may be barred from reaching a
+hosted API at all: that workspace embeds with a local `fastembed:` model while
+another uses a hosted one. A process-wide model cannot express that. Because the
+override changes the configuration hash, `eval --compare` will not pretend runs
+on different models are comparable.
+
+**Cost reporting follows only what you override.** `price_per_mtok` is a
+separate key, so overriding `model` alone leaves that workspace priced at the
+`.env` rate — which is the rate of a different model. A local `fastembed:` model
+escapes this by reporting its own zero cost; a second hosted model does not, so
+override both.
+
+| `embedding` key | overrides | |
+|---|---|---|
+| `model` | `EMBEDDING_MODEL` | `provider:model`. **Requires `dimensions` alongside it** — inheriting the width from `.env` while changing the model gives a space whose size does not match the vectors, and that fails at the first embed batch rather than at config load. Refused at load instead. |
+| `dimensions` | `EMBEDDING_DIMENSIONS` | |
+| `quantization` | `EMBEDDING_QUANTIZATION` | `float32`, `int8` or `binary`. |
+| `sparse_model` | `SPARSE_MODEL` | Part of the collection name, so changing it is a separate space. |
+| `price_per_mtok` | `EMBEDDING_PRICE_PER_MTOK` | See above: without it the workspace is costed at another model's rate. |
+
+| key | default | |
+|---|---|---|
+| `state_dir` | `null` | Directory holding one manifest per workspace, named after it. `null` means use `STATE_DB` from `.env`, which is the single-workspace default and leaves an existing index where it is. **Required once there is more than one workspace** — see below. |
+
+**Setting it with one workspace relocates that manifest too.** The rule is
+"`state_dir` wins wherever it is set", not "wins once there are several" — so a
+single-workspace config that sets it in preparation starts addressing
+`state_dir/{name}.sqlite3` and stops seeing the database `STATE_DB` points at.
+Nothing is lost, but the next run re-indexes from empty and pays for the
+embeddings again. Move the existing file and rename it after the workspace, or
+leave `state_dir` unset until you actually add the second workspace.
+
+A workspace `name` is restricted to letters, digits, `.`, `-` and `_`, starting
+with a letter or digit, because it becomes that filename — an unchecked name
+would write outside `state_dir` or create directories nobody configured. Names
+are compared ignoring case for the same reason: on Windows and macOS `Alpha`
+and `alpha` are one file.
+
+`state_dir` is required for several workspaces rather than optional because the
+manifest has no workspace column: every table keys on `(root_label, rel_path)`.
+Two workspaces sharing one database would collide on any root label they happen
+to share, which under `recurse_into_children` means any two trees each holding a
+`docs/` or `src/`. The result would not be an error — it would be wrong files
+and wrong chunks.
 
 ### 2.2 `index`
 
@@ -521,6 +598,12 @@ which is what makes the `.mcp.json` `env` block work.
 | `LOGFIRE_TOKEN` | none | Read from the environment by the logfire SDK itself, not by this code. Declared here so it is documented and so an unknown key is not rejected. |
 
 ### `STATE_DB` is an environment variable, so `--config` cannot redirect it
+
+**Set `state_dir` in `workspace.yaml` instead and this stops applying** — each
+workspace then gets its own manifest named after it, from the config file, with
+no environment involved. The rest of this section describes what happens when
+two workspaces share one `STATE_DB`, which is still reachable by running two
+processes against two configs that do not set `state_dir`.
 
 Indexing a second workspace means passing `--config`, and it is natural to
 assume the second config brings its own manifest. It does not. `STATE_DB` is

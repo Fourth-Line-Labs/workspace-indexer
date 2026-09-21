@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import structlog
@@ -38,13 +39,32 @@ def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
+def _nested_model(annotation: object) -> type[BaseModel] | None:
+    """The config model inside an annotation, however it is wrapped.
+
+    A bare `SearchSection`, an optional `EvalSection | None`, and a
+    `list[WorkspaceSection]` all describe options a user can set, and the guard
+    has to see through all three. It used to check `isinstance(_, type)` only,
+    which silently stopped descending the moment `workspace: WorkspaceSection`
+    became `workspaces: list[WorkspaceSection]` -- and every per-workspace key
+    went unenforced without a single test failing.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    for argument in get_args(annotation):
+        found = _nested_model(argument)
+        if found is not None:
+            return found
+    return None
+
+
 def _leaf_fields(model: type[BaseModel], prefix: str = "") -> list[str]:
     """Dotted paths of every settable option, descending into nested models."""
     found: list[str] = []
     for name, field in model.model_fields.items():
-        annotation = field.annotation
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            found.extend(_leaf_fields(annotation, f"{prefix}{name}."))
+        nested = _nested_model(field.annotation)
+        if nested is not None:
+            found.extend(_leaf_fields(nested, f"{prefix}{name}."))
         else:
             found.append(f"{prefix}{name}")
     return found
@@ -55,7 +75,7 @@ def test_every_workspace_option_is_documented(text: str) -> None:
         field
         for field in _leaf_fields(WorkspaceConfig)
         # `roots` is documented as a shape rather than leaf by leaf.
-        if not field.startswith("workspace.roots") and field.split(".")[-1] not in text
+        if not field.startswith("workspaces.roots") and field.split(".")[-1] not in text
     ]
     assert not missing, f"undocumented workspace.yaml options: {missing}"
 
@@ -331,3 +351,28 @@ def test_the_quoted_log_line_shows_every_field_the_event_carries(text: str) -> N
     for field in _emitted_fields():
         assert f"{field}=" in block, f"the quoted log line omits {field}="
     assert "run_id=" in block, "contextvars binds run_id on every line of a run"
+
+
+def test_the_option_guard_descends_into_every_workspace_field() -> None:
+    """The guard has to be guarded.
+
+    `_leaf_fields` stopped descending the moment `workspace: WorkspaceSection`
+    became `workspaces: list[WorkspaceSection]`, because a `list[...]`
+    annotation is not a `type`. Nothing failed -- it emitted the bare path
+    `workspaces` and every per-workspace option went unchecked, so
+    `test_every_workspace_option_is_documented` passed by having nothing to
+    look at.
+
+    A guard whose failure mode is silently checking less needs something
+    asserting it still sees what it claims to.
+    """
+    fields = set(_leaf_fields(WorkspaceConfig))
+
+    for expected in (
+        "workspaces.name",
+        "workspaces.roots.path",
+        "workspaces.eval.dataset",
+        "workspaces.embedding.model",
+        "workspaces.embedding.dimensions",
+    ):
+        assert expected in fields, f"the option guard no longer sees {expected}"

@@ -3,19 +3,57 @@
 # This file is *what to index* and is safe to commit. Credentials and backend
 # selection live in .env — see .env.example.
 
-workspace:
-  name: labbox
-  roots:
-    # A workspace root holding a mix of git repos and plain folders. With
-    # recurse_into_children, each immediate subdirectory becomes its own "unit",
-    # so `--unit repo_two` works for plain folders as well as repos.
-    - path: ~/src
-      recurse_into_children: true
+# One entry is the ordinary case. `workspace:` (singular) still works and means
+# exactly this with one entry, so an older config needs no edit.
+#
+# Several entries are several *separate* indexes in one process: each gets its
+# own collection and its own manifest, and a search never crosses between them.
+# Reach for that when the trees must not mix — different clients, or a corpus
+# whose size would shift your eval baselines — rather than for unrelated repos,
+# which are better as extra `roots` under one workspace.
+workspaces:
+  - name: labbox
+    roots:
+      # A workspace root holding a mix of git repos and plain folders. With
+      # recurse_into_children, each immediate subdirectory becomes its own "unit",
+      # so `--unit repo_two` works for plain folders as well as repos.
+      - path: ~/src
+        recurse_into_children: true
 
-    # A specific directory indexed on its own. Hidden directories are fine —
-    # .claude is a primary target, not something to skip.
-    - path: ~/src/workspace-indexer/.claude
-      label: claude-config
+      # A specific directory indexed on its own. Hidden directories are fine —
+      # .claude is a primary target, not something to skip.
+      - path: ~/src/workspace-indexer/.claude
+        label: claude-config
+
+  # A second workspace. Everything below this block — excludes, chunking,
+  # search, watch — is shared by all of them; only these three keys vary.
+  #
+  # - name: other-client
+  #   roots:
+  #     - path: ~/src/other-client
+  #       recurse_into_children: true
+  #   # Its own eval dataset, so its baselines are its own.
+  #   eval:
+  #     dataset: ./config/other-client-eval.yaml
+  #   # Its own embedding model. The case this exists for is code that may not
+  #   # leave the machine: embed it locally while another workspace uses a
+  #   # hosted model. Anything omitted here is inherited from .env.
+  #   embedding:
+  #     model: fastembed:BAAI/bge-small-en-v1.5
+  #     dimensions: 384
+  #
+  # Uncommenting that block also needs `state_dir` set below — several
+  # workspaces cannot share one manifest. Something like:
+  #
+  #   state_dir: ./data/manifests
+
+# Where per-workspace manifests live, one file per workspace named after it.
+# Null means "use STATE_DB from .env", which is the single-workspace default and
+# leaves an existing index exactly where it is. Required once there is more than
+# one workspace, because STATE_DB names a single file and the manifest has no
+# workspace column — two workspaces sharing one would collide on any root label
+# they happen to share.
+state_dir: null
 
 index:
   respect_gitignore: true

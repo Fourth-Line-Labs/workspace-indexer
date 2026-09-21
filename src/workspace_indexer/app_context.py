@@ -50,13 +50,37 @@ class AppContext:
     classifier: DocumentClassifier
 
     @classmethod
-    def build(cls, config_path: Path | None = None, role: str | None = None) -> AppContext:
-        config = load_workspace_config(config_path)
+    def build(
+        cls,
+        config_path: Path | None = None,
+        role: str | None = None,
+        workspace: str | None = None,
+    ) -> AppContext:
+        """One workspace's worth of everything.
+
+        `workspace` may be omitted when the config describes only one, which is
+        every config written before workspaces became a list. Where there is a
+        choice and none was made, `select` raises rather than picking: the
+        workspaces are separate indexes precisely so their results do not mix,
+        and answering from whichever was listed first would defeat that
+        silently.
+        """
+        return cls._from_config(load_workspace_config(config_path).select(workspace), role=role)
+
+    @classmethod
+    def _from_config(cls, config: WorkspaceConfig, role: str | None = None) -> AppContext:
         settings = Settings()
         # Applied to the config itself, before anything reads it, so every
         # layer downstream sees one answer. Doing it per consumer is how
         # RERANK_MODEL came to be a documented setting that nothing read.
         config = with_rerank_overrides(config, settings)
+        # The workspace's embedding overrides land on `Settings` rather than
+        # being carried separately, so everything derived from it moves
+        # together -- the embedding space, the backend, the price, and
+        # `config_hash`, which decides whether two eval runs are comparable.
+        embedding = config.workspace.embedding
+        if embedding is not None:
+            settings = embedding.applied_to(settings)
 
         # Before anything else runs, so a failure during setup is still logged.
         # `role` names the command, and separates its log file from every
@@ -69,7 +93,10 @@ class AppContext:
             config=config,
             settings=settings,
             space=space,
-            manifest=Manifest(settings.state_db),
+            # From the config where `state_dir` is set, so several workspaces
+            # keep several manifests. Falls back to STATE_DB untouched, which
+            # is what a single-workspace setup has always used.
+            manifest=Manifest(config.manifest_path(settings.state_db)),
             registry=ChunkerRegistry(config.workspace.name),
             embeddings=build_embedding_service(settings),
             sparse=build_sparse_backend(settings),
