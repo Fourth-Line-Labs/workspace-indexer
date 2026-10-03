@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from workspace_indexer.app_context import AppContext
+from workspace_indexer.app_context import AppContext, configure_logging_for
 from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
 from workspace_indexer.evaluation import (
@@ -741,29 +741,56 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     """
     from workspace_indexer.mcp import (
         EmptyIndexError,
+        WorkspaceServices,
         build_grounding_service,
         build_impact_service,
         build_mcp_server,
         build_query_service,
     )
     from workspace_indexer.mcp.server_factory import preflight
+    from workspace_indexer.workspace_registry import WorkspaceRegistry
 
-    ctx = _context(config, "serve", workspace)
     try:
-        asyncio.run(preflight(ctx))
+        loaded = load_workspace_config(config)
+        # `--workspace` narrows the config before the registry sees it, so
+        # serving one of several is a registry holding exactly that one rather
+        # than a special case inside it.
+        loaded = loaded.select(workspace) if workspace is not None else loaded
+    except (ConfigError, WorkspaceChoiceError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    # Once for the process, not once per workspace -- and .env still wins
+    # over workspace.yaml, exactly as it does for every other command.
+    configure_logging_for(loaded, "serve")
+    registry = WorkspaceRegistry(loaded)
+
+    try:
+        # Every workspace, before serving any of them. A server that answered
+        # for one index and reported "nothing found" for another would be
+        # worse than one that refused to start: the agent believes the empty
+        # answer.
+        for name in registry.names:
+            asyncio.run(preflight(registry.context(name)))
     except EmptyIndexError as exc:
         console.print(f"[red]{exc}[/red]")
-        asyncio.run(ctx.close())
+        asyncio.run(registry.close())
         raise typer.Exit(code=2) from exc
 
     try:
         build_mcp_server(
-            build_query_service(ctx),
-            build_impact_service(ctx),
-            build_grounding_service(ctx),
+            {
+                name: WorkspaceServices(
+                    queries=build_query_service(registry.context(name)),
+                    impact=build_impact_service(registry.context(name)),
+                    grounding=build_grounding_service(registry.context(name)),
+                )
+                for name in registry.names
+            },
+            registry.describe(),
         ).run()
     finally:
-        asyncio.run(ctx.close())
+        asyncio.run(registry.close())
 
 
 @app.command()

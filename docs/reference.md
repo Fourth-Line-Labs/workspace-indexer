@@ -6,7 +6,7 @@ summary: >-
   storage backends and their differences, where reranking runs and which
   environments can run it, cluster sizing limits, and the indexing brakes.
 created: 2026-08-27
-updated: 2026-09-20
+updated: 2026-10-03
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
 source_ref: "main @ 402cd52"
@@ -226,6 +226,30 @@ Score retrieval against a dataset of query/expected-file pairs.
 ### `serve`
 
 Run the MCP server over stdio. See §4.
+
+**One server covers every configured workspace.** With several, each tool takes
+`workspace`, and the configured names — each with the roots it holds — are
+written into the server instructions so an agent reads them before its first
+call. `serve --workspace NAME` serves that one alone, which is the single-entry
+setup every existing deployment already has.
+
+They share one Qdrant client, because an embedded Qdrant locks its storage
+folder and refuses a second one. Embedding backends are shared by space rather
+than by workspace, so workspaces that inherit their embedding settings from
+`.env` — the ordinary case — load one dense and one sparse model between them
+however many workspaces there are. A workspace that overrides its model gets
+its own, which is the point of the override.
+
+Startup checks every workspace before serving any of them. A server that
+answered for one index and reported "nothing found" for another would be worse
+than one that refuses to start, because the agent believes the empty answer.
+
+**The taxonomy resource is only published for a single-workspace server.** A
+resource has a fixed URI and no arguments, so with several indexes it cannot
+say which one it describes. Changing its shape when there are several would be
+worse than withholding it — a payload whose schema depends on configuration is
+a trap — so a multi-workspace server exposes the same information through
+`list_document_types`, which says what it is answering for.
 
 ### `watch`
 
@@ -686,6 +710,8 @@ it from query text.
 | `path_prefix` | string | none | |
 | `include_tests` | boolean | `false` | Tests and generated files are excluded by default: a test naming a symbol twenty times otherwise outranks the file defining it. |
 | `locations_only` | boolean | `false` | Return file and line ranges without the code. Bodies are most of what a hit costs, so far more matches fit in one response. See **Surveying without reading** below. |
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
+| `worktree` | string | none | Which checkout you are working in: a worktree name or path, or `"none"` for the main checkout. Required only when the repository has worktrees. |
 
 **`find_guidance`** — specifications, design documents and guides only.
 
@@ -696,6 +722,8 @@ it from query text.
 | `repo` | string | none | |
 | `doc_type` | string | none | Narrow to one type. Accepts aliases (`spec`, `adr`, `architecture`, `readme`…). **An unrecognised value returns an error naming the valid types — never an empty result.** |
 | `locations_only` | boolean | `false` | Return file and line ranges without the code. Bodies are most of what a hit costs, so far more matches fit in one response. See **Surveying without reading** below. |
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
+| `worktree` | string | none | Which checkout you are working in: a worktree name or path, or `"none"` for the main checkout. Required only when the repository has worktrees. |
 
 Guidance covers `normative`, `design` **and `guide`**. The last is there on
 evidence: normative + design alone scored no better than plain search over the
@@ -732,9 +760,12 @@ body of a file you have already located.
 |---|---|---|---|
 | `rel_path` | string | required | A path from a search result, or a trailing portion of one. |
 | `limit` | integer 1–100 | `20` | |
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
+| `worktree` | string | none | Which checkout you are working in: a worktree name or path, or `"none"` for the main checkout. Required only when the repository has worktrees. |
 
-**`list_document_types`** — the taxonomy, with counts and example paths. No
-parameters. A type reported at **count 0** genuinely has none in this
+**`list_document_types`** — the taxonomy, with counts and example paths. Takes
+only `workspace`, and only when the server holds several. A type reported at
+**count 0** genuinely has none in this
 workspace: if `normative` is 0, read the implementation instead of hunting for
 specs.
 
@@ -745,6 +776,7 @@ manifest alone: no embedding call, no vector search.
 |---|---|---|---|
 | `rel_path` | string | required | A path from a search result, or a trailing portion of one. |
 | `limit` | integer 1–200 | `25` | Maximum edges **per direction**. |
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
 
 `called_by` and `calls` are the HTTP half: files that reach this one over a
 URL rather than by importing it, and the endpoints this one calls. They are
@@ -790,6 +822,7 @@ LLM.
 | parameter | type | default | |
 |---|---|---|---|
 | `repo` | string | all | Restrict to one repository, as named in a search result. |
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
 
 **Call this when `find_guidance` returns nothing, before concluding anything
 from that.** An empty search has two causes — the index missed it, or nobody

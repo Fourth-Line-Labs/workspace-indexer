@@ -60,7 +60,10 @@ def test_every_tool_is_named_in_the_server_instructions() -> None:
     sees before choosing one. A tool missing from it is a tool that exists and
     is never called."""
     source = (SRC / "mcp" / "server_factory.py").read_text(encoding="utf-8")
-    instructions = source.split('_INSTRUCTIONS = f"""')[1].split('"""')[0]
+    # The tool list is the static half of the instructions; the per-deployment
+    # half names the workspaces and is asserted against a built server in
+    # test_mcp_server.py.
+    instructions = source.split('_TOOLS = f"""')[1].split('"""')[0]
     missing = [name for name in registered_tool_names() if name not in instructions]
     assert not missing, f"tools absent from the server instructions: {missing}"
 

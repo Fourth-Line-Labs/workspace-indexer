@@ -65,29 +65,42 @@ class AppContext:
         and answering from whichever was listed first would defeat that
         silently.
         """
-        return cls._from_config(load_workspace_config(config_path).select(workspace), role=role)
-
-    @classmethod
-    def _from_config(cls, config: WorkspaceConfig, role: str | None = None) -> AppContext:
-        settings = Settings()
-        # Applied to the config itself, before anything reads it, so every
-        # layer downstream sees one answer. Doing it per consumer is how
-        # RERANK_MODEL came to be a documented setting that nothing read.
-        config = with_rerank_overrides(config, settings)
-        # The workspace's embedding overrides land on `Settings` rather than
-        # being carried separately, so everything derived from it moves
-        # together -- the embedding space, the backend, the price, and
-        # `config_hash`, which decides whether two eval runs are comparable.
-        embedding = config.workspace.embedding
-        if embedding is not None:
-            settings = embedding.applied_to(settings)
-
+        config = load_workspace_config(config_path).select(workspace)
         # Before anything else runs, so a failure during setup is still logged.
         # `role` names the command, and separates its log file from every
         # other command's. Two processes sharing a rotating file cannot both
         # roll it over on Windows -- see configure_logging.
-        configure_logging(_with_env_overrides(config, settings), role)
+        #
+        # Here rather than in `_from_config`, because a registry serving
+        # several workspaces builds many contexts and wants one log, not one
+        # per workspace. `logging` is a shared section, so there is only ever
+        # one answer to configure with.
+        configure_logging_for(config, role)
+        return cls.from_config(config)
 
+    @classmethod
+    def from_config(
+        cls,
+        config: WorkspaceConfig,
+        *,
+        store: VectorStore | None = None,
+        embeddings: EmbeddingService | None = None,
+        sparse: SparseBackend | None = None,
+    ) -> AppContext:
+        """One workspace, optionally over resources somebody else owns.
+
+        Public because `WorkspaceRegistry` is a real caller: it builds the
+        shared client and backends and then asks for a context over them.
+
+        The three optional arguments exist for serving several workspaces at
+        once. A Qdrant client cannot be built twice against embedded storage,
+        and loading the same local embedding model once per workspace wastes
+        memory for no benefit -- so a registry builds those once and hands them
+        in. Left out, each context builds its own, which is what every
+        single-workspace command does.
+        """
+        settings = settings_for(config)
+        config = with_rerank_overrides(config, settings)
         space = build_space(settings)
         return cls(
             config=config,
@@ -98,9 +111,9 @@ class AppContext:
             # is what a single-workspace setup has always used.
             manifest=Manifest(config.manifest_path(settings.state_db)),
             registry=ChunkerRegistry(config.workspace.name),
-            embeddings=build_embedding_service(settings),
-            sparse=build_sparse_backend(settings),
-            store=build_vector_store(settings, config.workspace.name),
+            embeddings=embeddings or build_embedding_service(settings),
+            sparse=sparse or build_sparse_backend(settings),
+            store=store or build_vector_store(settings, config.workspace.name),
             reranker=build_reranker(config.search.rerank, settings),
             classifier=RuleClassifier(),
         )
@@ -131,6 +144,33 @@ class AppContext:
     async def close(self) -> None:
         await self.store.close()
         self.manifest.close()
+
+
+def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> None:
+    """Set logging up once for a command, honouring .env over workspace.yaml.
+
+    Public because `serve` builds a registry rather than a single context and
+    still needs exactly this: one log for the process, not one per workspace.
+    `logging` is a shared section, so there is only ever one answer.
+    """
+    configure_logging(_with_env_overrides(config, Settings()), role)
+
+
+def settings_for(config: WorkspaceConfig) -> Settings:
+    """Environment settings with this workspace's embedding overrides applied.
+
+    Pulled out so a registry can derive the same settings -- and therefore the
+    same `EmbeddingSpace` -- without building a context, which is how it knows
+    whether two workspaces can share one backend.
+
+    The overrides land on `Settings` rather than being carried separately so
+    everything derived from it moves together: the space, the backend, the
+    price, and `config_hash`, which decides whether two eval runs are
+    comparable.
+    """
+    settings = Settings()
+    embedding = config.workspace.embedding
+    return embedding.applied_to(settings) if embedding else settings
 
 
 def with_rerank_overrides(config: WorkspaceConfig, settings: Settings) -> WorkspaceConfig:

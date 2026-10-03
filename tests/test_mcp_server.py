@@ -35,6 +35,7 @@ from workspace_indexer.mcp import (
     ImpactService,
     QueryService,
     TaxonomyService,
+    WorkspaceServices,
     build_mcp_server,
 )
 from workspace_indexer.mcp.server_factory import preflight
@@ -111,9 +112,13 @@ def server(queries: QueryService, tmp_path: Path) -> MCPServer:
     """
     manifest = Manifest(tmp_path / "manifest.sqlite3")
     return build_mcp_server(
-        queries,
-        ImpactService(manifest),
-        GroundingService(CoverageService(manifest)),
+        {
+            "labbox": WorkspaceServices(
+                queries=queries,
+                impact=ImpactService(manifest),
+                grounding=GroundingService(CoverageService(manifest)),
+            )
+        }
     )
 
 
@@ -376,3 +381,126 @@ async def test_the_server_instructions_advertise_locations_only_on_both(
     following = instructions.split(bullet, 1)[1].split("\n- ", 1)[0]
 
     assert "locations_only" in bullet + following
+
+
+# ---- several workspaces on one server (#99, part two) -----------------------
+
+
+def _two_workspace_server(queries: QueryService, tmp_path: Path) -> MCPServer:
+    """One server answering for two workspaces, over the same seeded store.
+
+    The same `QueryService` behind both: this is about dispatch and the
+    choice gate, and giving them different data would let a test pass because
+    the wrong index happened to be empty.
+    """
+    manifest = Manifest(tmp_path / "two.sqlite3")
+    services = GroundingService(CoverageService(manifest))
+    return build_mcp_server(
+        {
+            name: WorkspaceServices(
+                queries=queries, impact=ImpactService(manifest), grounding=services
+            )
+            for name in ("alpha", "beta")
+        },
+        ["alpha (repo-one)", "beta (repo-two)"],
+    )
+
+
+async def test_one_workspace_renders_the_instructions_it_always_did(
+    server: MCPServer, queries: QueryService, tmp_path: Path
+) -> None:
+    """A deployment that gained nothing from multi-workspace support must not
+    find its agent reading different instructions.
+
+    Asserted as "the extra block is absent, and everything else is the same
+    text the two-workspace server carries" -- so it holds without reaching for
+    the private constant, and it fails if the per-deployment paragraph ever
+    leaks into the single case.
+    """
+    one = server.instructions or ""
+    two = _two_workspace_server(queries, tmp_path).instructions or ""
+
+    assert "separate indexes" not in one
+    assert "workspace=<name>" not in one
+    # Same opening and same tool list; the two differ only by the inserted
+    # paragraph, which is what "unchanged for one workspace" means.
+    assert one.split("\n\n", 1)[0] == two.split("\n\n", 1)[0]
+    assert one.split("\n\n", 1)[1] == two.split("\n\n", 2)[2]
+
+
+async def test_several_workspaces_are_named_in_the_instructions(
+    queries: QueryService, tmp_path: Path
+) -> None:
+    """The names come from config, so the instructions cannot be a constant.
+    The agent reads this before its first call -- otherwise its only route to
+    the names is getting one wrong."""
+    instructions = _two_workspace_server(queries, tmp_path).instructions or ""
+
+    assert "2 separate indexes" in instructions
+    assert "alpha (repo-one), beta (repo-two)" in instructions
+    assert "workspace=<name>" in instructions
+    # The tool list still has to be there: the extra block is an addition.
+    for name in registered_tool_names():
+        assert name in instructions
+
+
+@pytest.mark.parametrize("tool", ["search_code", "find_guidance", "list_document_types"])
+async def test_every_search_tool_accepts_a_workspace(
+    queries: QueryService, tmp_path: Path, tool: str
+) -> None:
+    tools = {t.name: t for t in await _two_workspace_server(queries, tmp_path).list_tools()}
+    assert "workspace" in tools[tool].input_schema["properties"]
+
+
+async def test_naming_no_workspace_is_an_error_listing_them(
+    queries: QueryService, tmp_path: Path
+) -> None:
+    """There is no safe default: answering from whichever was listed first
+    would serve one index's code to a question about another's, silently."""
+    two = _two_workspace_server(queries, tmp_path)
+
+    with pytest.raises(ToolError) as caught:
+        await two.call_tool("search_code", {"query": "store"})
+
+    assert "alpha" in str(caught.value)
+    assert "beta" in str(caught.value)
+
+
+async def test_naming_an_unknown_workspace_lists_the_configured_ones(
+    queries: QueryService, tmp_path: Path
+) -> None:
+    two = _two_workspace_server(queries, tmp_path)
+
+    with pytest.raises(ToolError, match="alpha"):
+        await two.call_tool("search_code", {"query": "store", "workspace": "gamma"})
+
+
+async def test_naming_a_workspace_dispatches_rather_than_erroring(
+    queries: QueryService, tmp_path: Path
+) -> None:
+    two = _two_workspace_server(queries, tmp_path)
+
+    result = _payload(await two.call_tool("search_code", {"query": "store", "workspace": "beta"}))
+
+    assert result["results"], "the call returned nothing, so dispatch is unproven"
+
+
+async def test_a_lone_workspace_still_needs_no_name(server: MCPServer) -> None:
+    """Every config written before this existed has one workspace, and must
+    keep working with no parameter anywhere."""
+    result = _payload(await server.call_tool("search_code", {"query": "store"}))
+    assert result["results"]
+
+
+async def test_the_taxonomy_resource_is_withheld_when_there_is_a_choice(
+    queries: QueryService, tmp_path: Path, server: MCPServer
+) -> None:
+    """A resource has a fixed URI and no arguments, so with several indexes it
+    cannot say which it describes -- and its description claims to describe
+    "this workspace". Withheld rather than answering for whichever came first,
+    and rather than changing shape, which would make the payload's schema
+    depend on configuration."""
+    assert [str(r.uri) for r in await server.list_resources()] == [TAXONOMY_URI]
+
+    two = _two_workspace_server(queries, tmp_path)
+    assert await two.list_resources() == []

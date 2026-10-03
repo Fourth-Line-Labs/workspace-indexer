@@ -37,8 +37,15 @@ def build_qdrant_client(settings: Settings) -> AsyncQdrantClient:
     return AsyncQdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
 
-def build_vector_store(settings: Settings, workspace: str) -> VectorStore:
+def build_vector_store(
+    settings: Settings, workspace: str, *, client: AsyncQdrantClient | None = None
+) -> VectorStore:
     """No reranking argument: nothing reranks inside the store.
+
+    `client` is for serving several workspaces from one process: they share one
+    Qdrant client, because an embedded Qdrant locks its storage folder and
+    refuses a second one. A store handed a client does not own it, so closing
+    that store leaves the connection up for the others.
 
     Server-side reranking was retired in #73 -- `RerankConfig` refuses a
     `database:` model at config load, so no backend here has to know the
@@ -49,7 +56,8 @@ def build_vector_store(settings: Settings, workspace: str) -> VectorStore:
 
     embedded = settings.qdrant_mode == "embedded"
     return QdrantStore(
-        build_qdrant_client(settings),
+        client or build_qdrant_client(settings),
+        owns_client=client is None,
         workspace=workspace,
         on_disk_payload=settings.qdrant_on_disk_payload,
         # Local Qdrant ignores payload indexes and warns once per field.
