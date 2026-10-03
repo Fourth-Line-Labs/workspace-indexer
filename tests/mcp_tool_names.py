@@ -52,9 +52,16 @@ def registered_tool_parameters() -> dict[str, list[str]]:
         for decorator in node.decorator_list:
             target = decorator.func if isinstance(decorator, ast.Call) else decorator
             if isinstance(target, ast.Attribute) and target.attr == "tool":
-                found[node.name] = [
-                    argument.arg for argument in (*node.args.args, *node.args.kwonlyargs)
-                ]
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                # posonlyargs included deliberately: omitting them would drop a
+                # parameter from the dict, and the reference guard would then
+                # stop verifying it -- the guard-silently-checks-less shape
+                # this module exists to prevent.
+                found[node.name] = [argument.arg for argument in arguments]
     assert found, f"no @server.tool() functions found in {SERVER_FACTORY.name}"
     return found
 

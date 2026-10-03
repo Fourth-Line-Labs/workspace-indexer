@@ -484,3 +484,53 @@ def test_other_workspaces_stay_excluded_after_the_rerank_overrides_are_applied()
     )
 
     assert Path("/b/eval.yaml") in rebuilt.excluded_paths
+
+
+def test_an_embedding_override_does_not_discard_the_yaml_rerank_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.env` wins over workspace.yaml only for settings someone actually set.
+
+    `EmbeddingSection.applied_to` rebuilds `Settings` from a full
+    `model_dump()`, and pydantic takes `model_fields_set` from the input
+    dict's keys -- so afterwards every field counts as explicitly provided.
+    `with_rerank_overrides` gates on exactly that signal, which is the only
+    thing telling "the default" from "someone typed the default". Read off the
+    derived settings it overrides workspace.yaml every time, silently, because
+    the result is re-validated.
+
+    The workspace it hits hardest is the one the feature exists for: barred
+    from a hosted API, embedding locally, reranking deliberately off -- and
+    getting hosted reranking switched back on.
+    """
+    from workspace_indexer.app_context import AppContext
+
+    monkeypatch.chdir(tmp_path)
+    for key in ("RERANK_ENABLED", "RERANK_MODEL", "QDRANT_MODE", "QDRANT_PATH", "STATE_DB"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QDRANT_MODE", "embedded")
+    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
+    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+
+    config = Config.model_validate(
+        {
+            "workspace": {
+                "name": "walled",
+                "roots": [{"path": str(tmp_path)}],
+                "embedding": {"model": "voyageai:voyage-code-4", "dimensions": 256},
+            },
+            "search": {"rerank": {"enabled": False, "model": "local:some/model"}},
+        }
+    )
+
+    context = AppContext.from_config(config)
+    try:
+        assert context.config.search.rerank.enabled is False
+        assert context.config.search.rerank.model == "local:some/model"
+        # The embedding override still has to have landed, or this passes for
+        # the wrong reason -- by the override never being applied at all.
+        assert context.settings.embedding_dimensions == 256
+    finally:
+        import asyncio
+
+        asyncio.run(context.close())

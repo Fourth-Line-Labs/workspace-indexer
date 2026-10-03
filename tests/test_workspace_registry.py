@@ -9,12 +9,14 @@ while keeping separate what must stay separate.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from workspace_indexer.app_context import AppContext
 from workspace_indexer.config import WorkspaceChoiceError, WorkspaceConfig
 from workspace_indexer.workspace_registry import WorkspaceRegistry
 
@@ -85,7 +87,11 @@ async def test_each_workspace_keeps_its_own_collection_and_manifest(
     alpha, beta = registry.context("alpha"), registry.context("beta")
 
     assert alpha.store.collection_name(alpha.space) != beta.store.collection_name(beta.space)
-    assert alpha.manifest is not beta.manifest
+    # The *files*, not the objects. Two separately constructed `Manifest`s are
+    # always distinct objects even over one sqlite file, so identity here
+    # asserted nothing -- while the collision it claims to guard is exactly
+    # two workspaces sharing one database.
+    assert alpha.config.manifest_path(Path("/unused")) != beta.config.manifest_path(Path("/unused"))
 
 
 # ---- what is shared, and what decides it -----------------------------------
@@ -216,3 +222,109 @@ async def test_closing_is_safe_when_the_client_is_shared(tmp_path: Path) -> None
     assert await beta.store.count(beta.space) == 0
 
     await registry.close()
+
+
+# ---- failure paths ----------------------------------------------------------
+
+
+async def test_a_failure_partway_through_the_build_releases_what_it_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing holds a reference to a constructor that raised.
+
+    So the cleanup has to happen inside it or not at all. Asserted on the
+    manifests, which are the resource that genuinely persists: a closed one
+    raises when used, so the contexts built before the failure can be checked
+    directly. The shared client is deliberately not asserted on -- the local
+    Qdrant releases its lock when the object is collected, so a leak there is
+    invisible to a test and would make this pass either way.
+    """
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    real_context = registry_module.AppContext.from_config
+    built: list[AppContext] = []
+    calls: list[str] = []
+
+    def record(*args: Any, **kwargs: Any) -> AppContext:
+        context = real_context(*args, **kwargs)
+        built.append(context)
+        return context
+
+    def fail_on_the_second(*args: Any, **kwargs: Any) -> Any:
+        calls.append("x")
+        if len(calls) > 1:
+            raise RuntimeError("second store refused")
+        return real_store(*args, **kwargs)
+
+    monkeypatch.setattr(registry_module.AppContext, "from_config", record)
+    monkeypatch.setattr(registry_module, "build_vector_store", fail_on_the_second)
+    config = _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+
+    with pytest.raises(RuntimeError, match="second store refused"):
+        WorkspaceRegistry(config)
+
+    assert built, "nothing was built before the failure, so this asserts nothing"
+    for context in built:
+        # Already closed by the cleanup -- not closed here, which would make
+        # the assertion below true whatever the registry did.
+        with pytest.raises(sqlite3.ProgrammingError):
+            context.manifest.file_count()
+
+
+async def test_a_context_that_fails_to_close_does_not_strand_the_others(
+    tmp_path: Path,
+) -> None:
+    """`close` promises the failures are reported, not swallowed, and that one
+    bad context does not leak the rest. Its only failure-path logic, and it
+    had no test."""
+    import structlog.testing
+
+    registry = WorkspaceRegistry(
+        _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+    )
+
+    async def refuse() -> None:
+        raise RuntimeError("manifest is wedged")
+
+    object.__setattr__(registry.context("alpha").store, "close", refuse)
+
+    with structlog.testing.capture_logs() as logs:
+        await registry.close()
+
+    reported = [entry for entry in logs if entry["event"] == "registry.close_failed"]
+    assert reported, "the failure was swallowed"
+    assert any("manifest is wedged" in failure for failure in reported[0]["failures"])
+
+
+async def test_a_failing_client_close_does_not_discard_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client close runs after the contexts, so an exception there used to
+    escape before the collected failures were logged -- losing them, and in
+    `serve`'s `finally` replacing the traceback of whatever ended the session.
+    """
+    import structlog.testing
+    from qdrant_client import AsyncQdrantClient
+
+    registry = WorkspaceRegistry(
+        _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+    )
+
+    async def refuse_store() -> None:
+        raise RuntimeError("manifest is wedged")
+
+    async def refuse_client(self: AsyncQdrantClient) -> None:
+        raise RuntimeError("client will not close")
+
+    object.__setattr__(registry.context("alpha").store, "close", refuse_store)
+    monkeypatch.setattr(AsyncQdrantClient, "close", refuse_client)
+
+    with structlog.testing.capture_logs() as logs:
+        await registry.close()
+
+    reported = [entry for entry in logs if entry["event"] == "registry.close_failed"]
+    assert reported, "the client's failure discarded the whole report"
+    failures = " ".join(reported[0]["failures"])
+    assert "manifest is wedged" in failures
+    assert "client will not close" in failures

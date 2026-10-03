@@ -72,7 +72,16 @@ def _tool_sections(text: str, tools: list[str]) -> dict[str, str]:
     # The entry form specifically -- "**`name`** — description". A bare
     # mention of the tool in someone else's paragraph would otherwise start
     # the slice, and `get_file_context` is named in prose above its own entry.
-    marks = sorted((text.index(f"**`{tool}`** \u2014"), tool) for tool in tools)
+    #
+    # Located with an assertion rather than `index`, which raises "substring
+    # not found" naming nothing -- and would fire here first, so the friendly
+    # per-tool check above would never get to report the missing entry.
+    marks: list[tuple[int, str]] = []
+    for tool in tools:
+        needle = f"**`{tool}`** \u2014"
+        assert needle in text, f"{tool} has no reference entry of the form {needle!r}"
+        marks.append((text.index(needle), tool))
+    marks.sort()
     sections: dict[str, str] = {}
     for position, (start, tool) in enumerate(marks):
         end = marks[position + 1][0] if position + 1 < len(marks) else len(text)
@@ -126,7 +135,9 @@ def test_every_mcp_tool_and_its_parameters_are_documented(text: str) -> None:
         # else's paragraph is how a tool ends up "documented" with no
         # parameters listed -- which is what this test is for.
         assert f"**`{tool}`**" in text, tool
-    # Derived from the tools, and checked inside each tool's own section.
+    # Derived from the tools, checked inside each tool's own section, and
+    # matched as a table row rather than as a substring -- prose mentioning
+    # "workspace" inside a section would otherwise satisfy a deleted row.
     # Two weaknesses this closes. The list used to be a hand-typed tuple of
     # six names, so `workspace` could be added to every tool at once and go
     # unnoticed. And searching the whole page would pass on a word like
@@ -137,7 +148,7 @@ def test_every_mcp_tool_and_its_parameters_are_documented(text: str) -> None:
         f"{tool}.{parameter}"
         for tool, parameters in registered_tool_parameters().items()
         for parameter in parameters
-        if parameter not in sections[tool]
+        if f"| `{parameter}` |" not in sections[tool]
     )
     assert not undocumented, f"tool parameters missing from their own section: {undocumented}"
 

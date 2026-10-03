@@ -113,7 +113,7 @@ def build_query_service(ctx: AppContext) -> QueryService:
     )
 
 
-def _instructions(described: Sequence[str]) -> str:
+def _instructions(names: Sequence[str], described: Sequence[str]) -> str:
     """The tool list, plus what this particular deployment holds.
 
     A function rather than a constant because the workspace names come from
@@ -122,7 +122,8 @@ def _instructions(described: Sequence[str]) -> str:
     that gained nothing from this feature should not find its agent reading
     different instructions.
     """
-    if len(described) < 2:
+    # Gated on the workspaces that exist, not on the text describing them.
+    if len(names) < 2:
         return _TOOLS
     opening, rest = _TOOLS.split("\n\n", 1)
     listed = ", ".join(described)
@@ -159,8 +160,19 @@ def build_mcp_server(
     if not services:
         raise ValueError("a server with no workspaces can answer nothing")
     names = list(services)
+    # Labels only. Whether this server is multi-workspace is decided by the
+    # services it was given, never by the text describing them -- two sources
+    # for one fact means instructions that can contradict dispatch, saying a
+    # name is required while `_for` quietly answers anyway.
+    labels = list(described) if described is not None else names
+    if len(labels) != len(names):
+        raise ValueError(
+            f"{len(labels)} descriptions for {len(names)} workspaces; they label the "
+            "same set, so a mismatch would describe a workspace that cannot be "
+            "reached or hide one that can"
+        )
     resolver = DocumentTypeResolver()
-    server = MCPServer(name="workspace-indexer", instructions=_instructions(described or names))
+    server = MCPServer(name="workspace-indexer", instructions=_instructions(names, labels))
 
     def _for(name: str | None) -> WorkspaceServices:
         """The services for a named workspace, or the only one there is.
@@ -170,14 +182,20 @@ def build_mcp_server(
         whichever was listed first would serve one workspace's code to a
         question about another's without saying so. Only a ToolError carries
         its message back to the model.
+
+        The error lists the bare names, not the descriptions. The message is
+        read as an instruction -- the whole point is that it buys one round
+        trip -- so every value in it has to be one that dispatches. "alpha
+        (repo-one, repo-two)" does not; the roots belong in the instructions,
+        where nobody types them.
         """
         if name is None:
             if len(names) != 1:
-                raise ToolError(str(WorkspaceChoiceError(None, list(described or names))))
+                raise ToolError(str(WorkspaceChoiceError(None, names)))
             return services[names[0]]
         found = services.get(name)
         if found is None:
-            raise ToolError(str(WorkspaceChoiceError(name, list(described or names))))
+            raise ToolError(str(WorkspaceChoiceError(name, names)))
         return found
 
     @server.tool()
@@ -365,7 +383,7 @@ def build_mcp_server(
     # reported, and renaming `list_document_types` itself makes it reported
     # too -- so the exemption tracks the name, not the shape or the position.
     # What earns a name the exemption, I could not establish; the obvious
-    # candidates (the name appearing in _INSTRUCTIONS, elsewhere in src/, or in
+    # candidates (the name appearing in _TOOLS, elsewhere in src/, or in
     # a test's call_tool string) are all true of `grounding` as well.
     # Narrowed to the one rule rather than silenced, and left with this note so
     # the next person starts from what has already been ruled out.

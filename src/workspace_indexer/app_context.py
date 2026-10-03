@@ -71,7 +71,7 @@ class AppContext:
         # other command's. Two processes sharing a rotating file cannot both
         # roll it over on Windows -- see configure_logging.
         #
-        # Here rather than in `_from_config`, because a registry serving
+        # Here rather than in `from_config`, because a registry serving
         # several workspaces builds many contexts and wants one log, not one
         # per workspace. `logging` is a shared section, so there is only ever
         # one answer to configure with.
@@ -99,8 +99,20 @@ class AppContext:
         in. Left out, each context builds its own, which is what every
         single-workspace command does.
         """
-        settings = settings_for(config)
-        config = with_rerank_overrides(config, settings)
+        # Order matters, and getting it wrong is silent. `applied_to` rebuilds
+        # Settings from a full `model_dump()`, and pydantic sets
+        # `model_fields_set` from the input dict's keys -- so afterwards every
+        # one of its fields counts as explicitly provided. `with_rerank_overrides`
+        # gates on exactly that signal, because it is the only thing telling
+        # "the default" from "someone typed the default". Read off the derived
+        # settings, it therefore overrides a workspace.yaml `search.rerank`
+        # every time, re-validated so nothing errors -- and the workspace it
+        # hits hardest is one barred from a hosted API, which gets hosted
+        # reranking switched back on.
+        base = Settings()
+        config = with_rerank_overrides(config, base)
+        settings = settings_for(config, base)
+        name = config.workspace.name
         space = build_space(settings)
         return cls(
             config=config,
@@ -110,10 +122,14 @@ class AppContext:
             # keep several manifests. Falls back to STATE_DB untouched, which
             # is what a single-workspace setup has always used.
             manifest=Manifest(config.manifest_path(settings.state_db)),
-            registry=ChunkerRegistry(config.workspace.name),
-            embeddings=embeddings or build_embedding_service(settings),
-            sparse=sparse or build_sparse_backend(settings),
-            store=store or build_vector_store(settings, config.workspace.name),
+            registry=ChunkerRegistry(name),
+            # `is not None`, not truthiness: these name resources somebody
+            # else owns, and a store that one day grew `__len__` would read as
+            # absent while empty -- turning sharing off for one workspace and
+            # nothing else.
+            embeddings=embeddings if embeddings is not None else build_embedding_service(settings),
+            sparse=sparse if sparse is not None else build_sparse_backend(settings),
+            store=store if store is not None else build_vector_store(settings, name),
             reranker=build_reranker(config.search.rerank, settings),
             classifier=RuleClassifier(),
         )
@@ -156,7 +172,7 @@ def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> N
     configure_logging(_with_env_overrides(config, Settings()), role)
 
 
-def settings_for(config: WorkspaceConfig) -> Settings:
+def settings_for(config: WorkspaceConfig, base: Settings | None = None) -> Settings:
     """Environment settings with this workspace's embedding overrides applied.
 
     Pulled out so a registry can derive the same settings -- and therefore the
@@ -167,8 +183,13 @@ def settings_for(config: WorkspaceConfig) -> Settings:
     everything derived from it moves together: the space, the backend, the
     price, and `config_hash`, which decides whether two eval runs are
     comparable.
+
+    `base` lets a caller supply the pristine settings it has already read, so
+    anything that must be decided *before* the overrides land -- the rerank
+    precedence, which reads `model_fields_set` -- can be decided against the
+    same object rather than a second one.
     """
-    settings = Settings()
+    settings = base if base is not None else Settings()
     embedding = config.workspace.embedding
     return embedding.applied_to(settings) if embedding else settings
 

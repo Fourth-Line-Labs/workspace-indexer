@@ -39,6 +39,9 @@ differ, deliberately:**
 - `index` with no `--workspace` runs **every** workspace in sequence, each with
   its own manifest and collection. If one stops early — the deletions brake,
   say — the ones after it are not attempted, and the run says which.
+- `serve` with no `--workspace` serves **every** workspace from one MCP server,
+  and the choice moves to the agent: each tool takes a `workspace` argument.
+  See [§1 `serve`](#serve).
 - every other command with no `--workspace` is an **error** naming the
   configured workspaces. There is no safe default: answering from whichever was
   listed first would serve one workspace's code to a question about another's,
@@ -763,11 +766,13 @@ body of a file you have already located.
 | `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
 | `worktree` | string | none | Which checkout you are working in: a worktree name or path, or `"none"` for the main checkout. Required only when the repository has worktrees. |
 
-**`list_document_types`** — the taxonomy, with counts and example paths. Takes
-only `workspace`, and only when the server holds several. A type reported at
-**count 0** genuinely has none in this
-workspace: if `normative` is 0, read the implementation instead of hunting for
-specs.
+**`list_document_types`** — the taxonomy, with counts and example paths. A type
+reported at **count 0** genuinely has none in this workspace: if `normative` is
+0, read the implementation instead of hunting for specs.
+
+| parameter | type | default | |
+|---|---|---|---|
+| `workspace` | string | none | Which workspace to answer from. Required only when the server holds several: they are separate indexes and do not share results, so there is no safe default. Omitting it then returns an error listing the configured names. |
 
 **`impact_of`** — what one file imports, and what imports it. Answers from the
 manifest alone: no embedding call, no vector search.

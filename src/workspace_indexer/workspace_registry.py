@@ -14,6 +14,7 @@ fastembed model for every workspace that has not overridden it.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,10 +44,34 @@ class WorkspaceRegistry:
     def __init__(self, config: WorkspaceConfig) -> None:
         self._names = config.workspace_names
         self._client: AsyncQdrantClient | None = None
-        dense: dict[tuple[str, int], EmbeddingService] = {}
+        dense: dict[tuple[str, int, float | None], EmbeddingService] = {}
         sparse: dict[str, SparseBackend] = {}
         contexts: dict[str, AppContext] = {}
 
+        try:
+            self._build(config, contexts, dense, sparse)
+        except Exception:
+            # Nothing holds a reference to a constructor that raised, so the
+            # cleanup has to happen here or not at all -- and on embedded
+            # Qdrant the client holds the storage-folder lock.
+            self._abandon(contexts)
+            raise
+
+        self._contexts = contexts
+        log.info(
+            "registry.built",
+            workspaces=len(contexts),
+            dense_backends=len(dense),
+            sparse_backends=len(sparse),
+        )
+
+    def _build(
+        self,
+        config: WorkspaceConfig,
+        contexts: dict[str, AppContext],
+        dense: dict[tuple[str, int, float | None], EmbeddingService],
+        sparse: dict[str, SparseBackend],
+    ) -> None:
         for name in self._names:
             selected = config.select(name)
             settings = settings_for(selected)
@@ -54,7 +79,17 @@ class WorkspaceRegistry:
             # Every workspace inheriting its embedding settings from .env --
             # the ordinary case -- then shares one dense and one sparse
             # backend however many workspaces there are.
-            dense_key = (settings.embedding_model, settings.embedding_dimensions)
+            dense_key = (
+                settings.embedding_model,
+                settings.embedding_dimensions,
+                # The price too: `EmbeddingService` is built with a
+                # `TokenPricer` over it, and `price_per_mtok` is a
+                # per-workspace override. Two workspaces on one model at
+                # different rates would otherwise share the first one's
+                # pricer and both report at its rate -- the cross-workspace
+                # leak that field exists to prevent.
+                settings.embedding_price_per_mtok,
+            )
             if dense_key not in dense:
                 dense[dense_key] = build_embedding_service(settings)
             if settings.sparse_model not in sparse:
@@ -66,13 +101,24 @@ class WorkspaceRegistry:
                 sparse=sparse[settings.sparse_model],
             )
 
-        self._contexts = contexts
-        log.info(
-            "registry.built",
-            workspaces=len(contexts),
-            dense_backends=len(dense),
-            sparse_backends=len(sparse),
-        )
+    def _abandon(self, contexts: dict[str, AppContext]) -> None:
+        """Release what a failed build had already taken.
+
+        Manifests close synchronously, so they always go. The shared client's
+        close is a coroutine: it runs here when there is no loop to block --
+        which is the case for `serve`, the only caller -- and is otherwise
+        left to the interpreter, because blocking inside a running loop is
+        worse than a client that outlives a failed startup by a few seconds.
+        """
+        for ctx in contexts.values():
+            ctx.manifest.close()
+        if self._client is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._client.close())
+            self._client = None
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> WorkspaceRegistry:
@@ -144,7 +190,13 @@ class WorkspaceRegistry:
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(f"{name}: {type(exc).__name__}: {exc}")
         if self._client is not None:
-            await self._client.close()
+            try:
+                await self._client.close()
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                # Outside the try this would discard every failure collected
+                # above, and in `serve`'s `finally` it would replace the
+                # traceback of whatever actually ended the session.
+                failures.append(f"<shared client>: {type(exc).__name__}: {exc}")
             self._client = None
         if failures:
             log.warning("registry.close_failed", failures=failures)

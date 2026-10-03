@@ -763,15 +763,32 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     # Once for the process, not once per workspace -- and .env still wins
     # over workspace.yaml, exactly as it does for every other command.
     configure_logging_for(loaded, "serve")
-    registry = WorkspaceRegistry(loaded)
 
     try:
+        registry = WorkspaceRegistry(loaded)
+    except Exception as exc:  # noqa: BLE001 - a startup failure, reported as one
+        # A store that will not open, a model that will not load, an unknown
+        # rerank provider. Every other startup failure here prints red and
+        # exits 2; a raw traceback from the constructor would be the odd one
+        # out, and the registry has already released what it took.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    async def _preflight_all() -> None:
         # Every workspace, before serving any of them. A server that answered
         # for one index and reported "nothing found" for another would be
         # worse than one that refused to start: the agent believes the empty
         # answer.
+        #
+        # One loop for all of them, not one per workspace: they share a Qdrant
+        # client, and `asyncio.run` closes the loop it made -- so a pooled
+        # connection opened under the first workspace's loop would be reused,
+        # already dead, under the second's.
         for name in registry.names:
-            asyncio.run(preflight(registry.context(name)))
+            await preflight(registry.context(name))
+
+    try:
+        asyncio.run(_preflight_all())
     except EmptyIndexError as exc:
         console.print(f"[red]{exc}[/red]")
         asyncio.run(registry.close())
