@@ -46,7 +46,7 @@ class WorkspaceRegistry:
         self._client: AsyncQdrantClient | None = None
         # Stores built but not yet handed to a context, so a failure between
         # the two can still release them.
-        self._unowned: list[VectorStore] = []
+        self._unowned: list[tuple[str, VectorStore]] = []
         dense: dict[tuple[str, int, float | None], EmbeddingService] = {}
         sparse: dict[str, SparseBackend] = {}
         contexts: dict[str, AppContext] = {}
@@ -102,14 +102,14 @@ class WorkspaceRegistry:
             # not load -- and it releases only what it created itself, so
             # without this the store would be invisible to the cleanup.
             store = build_vector_store(settings, name, client=self._qdrant(settings))
-            self._unowned.append(store)
+            self._unowned.append((name, store))
             contexts[name] = AppContext.from_config(
                 selected,
                 store=store,
                 embeddings=dense[dense_key],
                 sparse=sparse[settings.sparse_model],
             )
-            self._unowned.remove(store)
+            self._unowned.remove((name, store))
 
     def _abandon(self, contexts: dict[str, AppContext]) -> None:
         """Release what a failed build had already taken.
@@ -138,10 +138,15 @@ class WorkspaceRegistry:
             failure = close_blocking(ctx.store.close)
             if failure is not None:
                 failures.append(f"{name} store: {failure}")
-        for index, store in enumerate(self._unowned):
+        for name, store in self._unowned:
+            # Named, not numbered. `_build` appends and removes inside one
+            # iteration, so an index here is structurally always 0 and says
+            # nothing -- while this is the only warning the in-flight case
+            # produces, and under mongodb it is the only record of whose
+            # client leaked.
             failure = close_blocking(store.close)
             if failure is not None:
-                failures.append(f"unowned store {index}: {failure}")
+                failures.append(f"{name} store (in flight): {failure}")
         self._unowned.clear()
         if self._client is not None:
             failure = close_blocking(self._client.close)

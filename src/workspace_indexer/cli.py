@@ -782,6 +782,12 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         stderr_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
 
+    # Bound as the loop advances, so a failure names the workspace that
+    # caused it. `watch` carries `root=` on its own failure for the same
+    # reason: on several indexes, "a store was unreachable" without saying
+    # which means rechecking all of them.
+    in_flight: list[str] = []
+
     async def _preflight_all() -> None:
         # Every workspace, before serving any of them. A server that answered
         # for one index and reported "nothing found" for another would be
@@ -793,7 +799,9 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # connection opened under the first workspace's loop would be reused,
         # already dead, under the second's.
         for name in registry.names:
+            in_flight[:] = [name]
             await preflight(registry.context(name))
+        in_flight.clear()
 
     try:
         asyncio.run(_preflight_all())
@@ -811,7 +819,11 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # genuine bug with no type name and no traceback anywhere -- while
         # logging is already configured. Same shape `watch` uses below.
         serve_log.error(
-            "serve.preflight_failed", error=str(exc), error_type=type(exc).__name__, exc_info=True
+            "serve.preflight_failed",
+            workspace=in_flight[0] if in_flight else None,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
         stderr_console.print(f"[red]{exc}[/red]")
         asyncio.run(registry.close())

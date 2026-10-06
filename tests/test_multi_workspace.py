@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from tests.isolated_env import isolate_context_env
 from workspace_indexer.config import EmbeddingSection, Settings, WorkspaceChoiceError
 from workspace_indexer.config import WorkspaceConfig as Config
 
@@ -506,28 +507,7 @@ def test_an_embedding_override_does_not_discard_the_yaml_rerank_config(
     """
     from workspace_indexer.app_context import AppContext
 
-    monkeypatch.chdir(tmp_path)
-    # The same list the registry tests clear. A narrower one lets a developer
-    # shell redirect this: an exported VECTOR_STORE=mongodb makes
-    # `build_vector_store` raise once chdir has moved off the repo `.env`, and
-    # an exported SPARSE_MODEL changes what gets built -- either way a rerank
-    # test quietly stops testing reranking.
-    for key in (
-        "EMBEDDING_MODEL",
-        "EMBEDDING_DIMENSIONS",
-        "SPARSE_MODEL",
-        "VOYAGE_API_KEY",
-        "VECTOR_STORE",
-        "RERANK_ENABLED",
-        "RERANK_MODEL",
-        "QDRANT_MODE",
-        "QDRANT_PATH",
-        "STATE_DB",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("QDRANT_MODE", "embedded")
-    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
-    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+    isolate_context_env(monkeypatch, tmp_path)
 
     config = Config.model_validate(
         {
@@ -566,29 +546,7 @@ def test_a_context_that_fails_to_build_closes_what_it_opened(
     import workspace_indexer.app_context as app_context
     from workspace_indexer.app_context import AppContext
 
-    monkeypatch.chdir(tmp_path)
-    # The same ten keys as the sibling test above. `from_config` builds the
-    # embedding service and applies the rerank overrides *before* the patched
-    # `build_reranker` is reached, so an exported EMBEDDING_MODEL,
-    # EMBEDDING_DIMENSIONS, VOYAGE_API_KEY or RERANK_MODEL can fail the
-    # construction this test needs to get through -- surfacing a different
-    # error before any manifest exists to assert on.
-    for key in (
-        "EMBEDDING_MODEL",
-        "EMBEDDING_DIMENSIONS",
-        "SPARSE_MODEL",
-        "VOYAGE_API_KEY",
-        "VECTOR_STORE",
-        "RERANK_ENABLED",
-        "RERANK_MODEL",
-        "QDRANT_MODE",
-        "QDRANT_PATH",
-        "STATE_DB",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("QDRANT_MODE", "embedded")
-    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
-    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+    isolate_context_env(monkeypatch, tmp_path)
 
     opened: list[Any] = []
     real_manifest = app_context.Manifest
@@ -625,23 +583,7 @@ def test_a_store_that_will_not_build_does_not_orphan_the_manifest(
     import workspace_indexer.app_context as app_context
     from workspace_indexer.app_context import AppContext
 
-    monkeypatch.chdir(tmp_path)
-    for key in (
-        "EMBEDDING_MODEL",
-        "EMBEDDING_DIMENSIONS",
-        "SPARSE_MODEL",
-        "VOYAGE_API_KEY",
-        "VECTOR_STORE",
-        "RERANK_ENABLED",
-        "RERANK_MODEL",
-        "QDRANT_MODE",
-        "QDRANT_PATH",
-        "STATE_DB",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("QDRANT_MODE", "embedded")
-    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
-    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+    isolate_context_env(monkeypatch, tmp_path)
 
     opened: list[Any] = []
     real_manifest = app_context.Manifest
@@ -665,3 +607,51 @@ def test_a_store_that_will_not_build_does_not_orphan_the_manifest(
     assert opened, "no manifest was opened, so this asserts nothing"
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].file_count()
+
+
+def test_a_store_that_will_not_close_during_context_cleanup_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`from_config`'s own cleanup reports what it could not release.
+
+    The same gap the registry had: the tests asserted the manifest was closed
+    and never drove a close to fail, so the reporting could be reverted with
+    the suite green -- and an owned store that will not close is exactly the
+    leak with no other record.
+    """
+    import structlog.testing
+
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    real_store = app_context.build_vector_store
+
+    def wedged(*args: Any, **kwargs: Any) -> Any:
+        store = real_store(*args, **kwargs)
+
+        async def refuse() -> None:
+            raise RuntimeError("store will not close")
+
+        object.__setattr__(store, "close", refuse)
+        return store
+
+    def refuse_reranker(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("unknown rerank provider 'nonesuch'")
+
+    monkeypatch.setattr(app_context, "build_vector_store", wedged)
+    monkeypatch.setattr(app_context, "build_reranker", refuse_reranker)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(ValueError, match="unknown rerank provider"),
+    ):
+        AppContext.from_config(config)
+
+    reported = [entry for entry in logs if entry["event"] == "context.abandon_failed"]
+    assert reported, "the store close failure was swallowed"
+    assert reported[0]["workspace"] == "w"
+    assert any("store will not close" in problem for problem in reported[0]["problems"])

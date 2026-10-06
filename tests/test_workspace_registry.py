@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from tests.isolated_env import isolate_context_env
 from workspace_indexer.app_context import AppContext
 from workspace_indexer.config import WorkspaceChoiceError, WorkspaceConfig
 from workspace_indexer.workspace_registry import WorkspaceRegistry
@@ -27,22 +28,7 @@ def _isolate_env(  # pyright: ignore[reportUnusedFunction]
 ) -> None:
     """`Settings` reads `.env` from the working directory, which would
     otherwise point these at the developer's real Qdrant and credentials."""
-    monkeypatch.chdir(tmp_path)
-    for key in (
-        "EMBEDDING_MODEL",
-        "EMBEDDING_DIMENSIONS",
-        "SPARSE_MODEL",
-        "VOYAGE_API_KEY",
-        "VECTOR_STORE",
-        "QDRANT_MODE",
-        "QDRANT_PATH",
-        "STATE_DB",
-        "RERANK_ENABLED",
-        "RERANK_MODEL",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("QDRANT_MODE", "embedded")
-    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
+    isolate_context_env(monkeypatch, tmp_path)
 
 
 def _config(tmp_path: Path, *workspaces: dict[str, Any]) -> WorkspaceConfig:
@@ -457,3 +443,138 @@ def test_a_store_orphaned_between_building_and_owning_is_released(
 
     # alpha through `contexts`, beta through `_unowned` -- the branch under test.
     assert closed == ["alpha", "beta"]
+
+
+def test_a_store_that_will_not_close_during_abandonment_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report, not just the attempt.
+
+    Every other abandon test asserts the closes *happen*. None of them drives
+    one to fail, so the whole reporting path could be reverted to
+    fire-and-forget with the suite green -- reintroducing the quiet leak it
+    exists for: under mongodb a wedged store close drops a live client with no
+    signal, while the sqlite handle beside it gets a warning.
+    """
+    import structlog.testing
+
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    calls: list[str] = []
+
+    def wedge_the_first(settings: Any, name: str, **kwargs: Any) -> Any:
+        calls.append(name)
+        if len(calls) > 1:
+            raise RuntimeError("second store refused")
+        store = real_store(settings, name, **kwargs)
+
+        async def refuse() -> None:
+            raise RuntimeError("store will not close")
+
+        object.__setattr__(store, "close", refuse)
+        return store
+
+    monkeypatch.setattr(registry_module, "build_vector_store", wedge_the_first)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(RuntimeError, match="second store refused"),
+    ):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )
+
+    reported = [entry for entry in logs if entry["event"] == "registry.abandon_failed"]
+    assert reported, "the store close failure was swallowed"
+    failures = " ".join(reported[0]["failures"])
+    assert "alpha store" in failures
+    assert "store will not close" in failures
+
+
+async def test_abandoning_inside_a_running_loop_reports_the_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`close_blocking` does nothing while a loop is running, which is the
+    common case -- six commands reach `from_config` from inside
+    `asyncio.run`. Reported rather than pretended away, so a store left open
+    leaves a record. This test is async precisely to put a loop there.
+    """
+    import structlog.testing
+
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    calls: list[str] = []
+
+    def fail_on_the_second(*args: Any, **kwargs: Any) -> Any:
+        calls.append("x")
+        if len(calls) > 1:
+            raise RuntimeError("second store refused")
+        return real_store(*args, **kwargs)
+
+    monkeypatch.setattr(registry_module, "build_vector_store", fail_on_the_second)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(RuntimeError, match="second store refused"),
+    ):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )
+
+    reported = [entry for entry in logs if entry["event"] == "registry.abandon_failed"]
+    assert reported, "the skipped close left no record"
+    assert any("event loop is already running" in f for f in reported[0]["failures"])
+
+
+def test_an_in_flight_store_that_will_not_close_is_named_in_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one warning this path produces has to say whose store leaked.
+
+    It used to read `unowned store 0` -- an index that is structurally always
+    zero, because `_build` appends and removes inside one iteration. Under
+    mongodb this is the only record that a live client was left open, and
+    beside sibling entries that do name their workspace.
+    """
+    import structlog.testing
+
+    import workspace_indexer.app_context as app_context
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    real_reranker = app_context.build_reranker
+    seen: list[str] = []
+
+    def wedge_the_second(settings: Any, name: str, **kwargs: Any) -> Any:
+        store = real_store(settings, name, **kwargs)
+        if name == "beta":
+
+            async def refuse() -> None:
+                raise RuntimeError("store will not close")
+
+            object.__setattr__(store, "close", refuse)
+        return store
+
+    def fail_the_second_context(*args: Any, **kwargs: Any) -> Any:
+        seen.append("x")
+        if len(seen) > 1:
+            raise ValueError("unknown rerank provider 'nonesuch'")
+        return real_reranker(*args, **kwargs)
+
+    monkeypatch.setattr(registry_module, "build_vector_store", wedge_the_second)
+    monkeypatch.setattr(app_context, "build_reranker", fail_the_second_context)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(ValueError, match="unknown rerank provider"),
+    ):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )
+
+    reported = [entry for entry in logs if entry["event"] == "registry.abandon_failed"]
+    assert reported, "the in-flight store's failure was swallowed"
+    failures = " ".join(reported[0]["failures"])
+    assert "beta store (in flight)" in failures
