@@ -6,8 +6,12 @@ future MCP server gets the same construction for free.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from workspace_indexer.chunking import ChunkerRegistry
 from workspace_indexer.classification import DocumentClassifier, RuleClassifier
@@ -114,25 +118,44 @@ class AppContext:
         settings = settings_for(config, base)
         name = config.workspace.name
         space = build_space(settings)
-        return cls(
-            config=config,
-            settings=settings,
-            space=space,
-            # From the config where `state_dir` is set, so several workspaces
-            # keep several manifests. Falls back to STATE_DB untouched, which
-            # is what a single-workspace setup has always used.
-            manifest=Manifest(config.manifest_path(settings.state_db)),
-            registry=ChunkerRegistry(name),
-            # `is not None`, not truthiness: these name resources somebody
-            # else owns, and a store that one day grew `__len__` would read as
-            # absent while empty -- turning sharing off for one workspace and
-            # nothing else.
-            embeddings=embeddings if embeddings is not None else build_embedding_service(settings),
-            sparse=sparse if sparse is not None else build_sparse_backend(settings),
-            store=store if store is not None else build_vector_store(settings, name),
-            reranker=build_reranker(config.search.rerank, settings),
-            classifier=RuleClassifier(),
-        )
+        # Opened before the things that can fail, so they are named here and
+        # released below rather than orphaned. `build_reranker` rejecting an
+        # unknown provider, or a local model refusing to load, both happen
+        # after the manifest's sqlite handle and the store's client exist.
+        #
+        # From the config where `state_dir` is set, so several workspaces keep
+        # several manifests. Falls back to STATE_DB untouched, which is what a
+        # single-workspace setup has always used.
+        manifest = Manifest(config.manifest_path(settings.state_db))
+        # `is not None`, not truthiness: these name resources somebody else
+        # owns, and a store that one day grew `__len__` would read as absent
+        # while empty -- turning sharing off for one workspace and nothing else.
+        owned = store is None
+        resolved_store = build_vector_store(settings, name) if owned else store
+        assert resolved_store is not None
+        try:
+            return cls(
+                config=config,
+                settings=settings,
+                space=space,
+                manifest=manifest,
+                registry=ChunkerRegistry(name),
+                embeddings=embeddings
+                if embeddings is not None
+                else build_embedding_service(settings),
+                sparse=sparse if sparse is not None else build_sparse_backend(settings),
+                store=resolved_store,
+                reranker=build_reranker(config.search.rerank, settings),
+                classifier=RuleClassifier(),
+            )
+        except Exception:
+            # A half-built context is nobody's to close: the caller never gets
+            # a reference. Only what this call created is released -- an
+            # injected store belongs to whoever passed it in.
+            manifest.close()
+            if owned:
+                close_blocking(resolved_store.close)
+            raise
 
     def indexer(self) -> Indexer:
         return Indexer(
@@ -160,6 +183,26 @@ class AppContext:
     async def close(self) -> None:
         await self.store.close()
         self.manifest.close()
+
+
+def close_blocking(close: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """Run an async `close` from synchronous code, when that is possible.
+
+    Takes the coroutine function rather than the object, so one guarded path
+    covers a store and a bare client alike. The places that need this -- a
+    constructor about to raise, a registry abandoning a half-built set -- are
+    synchronous, and a close that itself fails must not replace the error that
+    caused the cleanup, so failures are suppressed.
+
+    It runs when no loop is already going, which is the case for every
+    command; inside a running loop it is skipped, because blocking there is
+    worse than a client that outlives a failed startup by seconds.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with suppress(Exception):
+            asyncio.run(close())
 
 
 def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> None:

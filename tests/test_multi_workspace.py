@@ -13,6 +13,7 @@ existed uses it.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -506,7 +507,23 @@ def test_an_embedding_override_does_not_discard_the_yaml_rerank_config(
     from workspace_indexer.app_context import AppContext
 
     monkeypatch.chdir(tmp_path)
-    for key in ("RERANK_ENABLED", "RERANK_MODEL", "QDRANT_MODE", "QDRANT_PATH", "STATE_DB"):
+    # The same list the registry tests clear. A narrower one lets a developer
+    # shell redirect this: an exported VECTOR_STORE=mongodb makes
+    # `build_vector_store` raise once chdir has moved off the repo `.env`, and
+    # an exported SPARSE_MODEL changes what gets built -- either way a rerank
+    # test quietly stops testing reranking.
+    for key in (
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "SPARSE_MODEL",
+        "VOYAGE_API_KEY",
+        "VECTOR_STORE",
+        "RERANK_ENABLED",
+        "RERANK_MODEL",
+        "QDRANT_MODE",
+        "QDRANT_PATH",
+        "STATE_DB",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("QDRANT_MODE", "embedded")
     monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
@@ -534,3 +551,47 @@ def test_an_embedding_override_does_not_discard_the_yaml_rerank_config(
         import asyncio
 
         asyncio.run(context.close())
+
+
+def test_a_context_that_fails_to_build_closes_what_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest opens before the things that can fail.
+
+    `build_reranker` rejecting an unknown provider happens after the sqlite
+    handle exists, and the caller never receives the half-built context -- so
+    the handle would be orphaned with nobody able to close it. Synchronous
+    because the store half of the cleanup is skipped inside a running loop.
+    """
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    monkeypatch.chdir(tmp_path)
+    for key in ("VECTOR_STORE", "QDRANT_MODE", "QDRANT_PATH", "STATE_DB", "SPARSE_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QDRANT_MODE", "embedded")
+    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
+    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+
+    opened: list[Any] = []
+    real_manifest = app_context.Manifest
+
+    def record(path: Path) -> Any:
+        manifest = real_manifest(path)
+        opened.append(manifest)
+        return manifest
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("unknown rerank provider 'nonesuch'")
+
+    monkeypatch.setattr(app_context, "Manifest", record)
+    monkeypatch.setattr(app_context, "build_reranker", refuse)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with pytest.raises(ValueError, match="unknown rerank provider"):
+        AppContext.from_config(config)
+
+    assert opened, "no manifest was opened, so this asserts nothing"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].file_count()

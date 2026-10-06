@@ -164,6 +164,13 @@ def build_mcp_server(
     # services it was given, never by the text describing them -- two sources
     # for one fact means instructions that can contradict dispatch, saying a
     # name is required while `_for` quietly answers anyway.
+    if isinstance(described, str):
+        # `Sequence[str]` accepts a bare string, and `list("ab")` is
+        # `["a", "b"]` -- so a two-character name would clear the count check
+        # below and render per-character labels while dispatch still keys on
+        # the real names. Refused rather than typed away, because the
+        # annotation alone does not stop a caller at runtime.
+        raise TypeError("described must be a list of labels, not a single string")
     labels = list(described) if described is not None else names
     if len(labels) != len(names):
         raise ValueError(

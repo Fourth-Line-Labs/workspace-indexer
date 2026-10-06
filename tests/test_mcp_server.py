@@ -559,3 +559,11 @@ async def test_describing_a_different_number_of_workspaces_is_refused() -> None:
     and then answers anyway, or one that hides a workspace entirely."""
     with pytest.raises(ValueError, match="descriptions for"):
         build_mcp_server({"alpha": cast(Any, None)}, ["alpha", "beta"])
+
+
+async def test_a_bare_string_of_labels_is_refused() -> None:
+    """`Sequence[str]` accepts a plain string and `list("ab")` is `["a", "b"]`,
+    so a two-character label would clear the count check and render
+    per-character labels while dispatch still keys on the real names."""
+    with pytest.raises(TypeError, match="not a single string"):
+        build_mcp_server({"ab": cast(Any, None)}, "ab")

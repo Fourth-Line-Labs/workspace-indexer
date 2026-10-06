@@ -295,6 +295,10 @@ async def test_a_context_that_fails_to_close_does_not_strand_the_others(
     reported = [entry for entry in logs if entry["event"] == "registry.close_failed"]
     assert reported, "the failure was swallowed"
     assert any("manifest is wedged" in failure for failure in reported[0]["failures"])
+    # The half the name promises, and the half the report alone cannot show:
+    # stopping at alpha would produce exactly the same single-entry report.
+    with pytest.raises(sqlite3.ProgrammingError):
+        registry.context("beta").manifest.file_count()
 
 
 async def test_a_failing_client_close_does_not_discard_the_report(
@@ -328,3 +332,79 @@ async def test_a_failing_client_close_does_not_discard_the_report(
     failures = " ".join(reported[0]["failures"])
     assert "manifest is wedged" in failures
     assert "client will not close" in failures
+
+
+def test_an_abandoned_build_closes_stores_as_well_as_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manifests are not the only thing a built context holds.
+
+    Under `VECTOR_STORE=mongodb` nothing is shared and every store owns a live
+    client, so a cleanup that closed only manifests would release nothing at
+    all. Asserted here through a recording store rather than by configuring
+    Mongo, since the behaviour under test is the registry's, not the driver's.
+    """
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    closed: list[str] = []
+    calls: list[str] = []
+
+    def recording(settings: Any, name: str, **kwargs: Any) -> Any:
+        calls.append(name)
+        if len(calls) > 1:
+            raise RuntimeError("second store refused")
+        store = real_store(settings, name, **kwargs)
+        original = store.close
+
+        async def record() -> None:
+            closed.append(name)
+            await original()
+
+        object.__setattr__(store, "close", record)
+        return store
+
+    monkeypatch.setattr(registry_module, "build_vector_store", recording)
+
+    with pytest.raises(RuntimeError, match="second store refused"):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )
+
+    assert closed == ["alpha"]
+
+
+def test_a_cleanup_that_fails_does_not_replace_the_build_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_abandon` runs inside an `except` block, so an unguarded failure there
+    escapes instead of the error that caused it -- handing the user a sqlite
+    complaint about tidying up in place of "unknown rerank provider"."""
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    real_context = registry_module.AppContext.from_config
+    calls: list[str] = []
+
+    def wedge_the_manifest(*args: Any, **kwargs: Any) -> AppContext:
+        context = real_context(*args, **kwargs)
+
+        def refuse() -> None:
+            raise RuntimeError("manifest will not close")
+
+        object.__setattr__(context.manifest, "close", refuse)
+        return context
+
+    def fail_on_the_second(*args: Any, **kwargs: Any) -> Any:
+        calls.append("x")
+        if len(calls) > 1:
+            raise RuntimeError("the real build error")
+        return real_store(*args, **kwargs)
+
+    monkeypatch.setattr(registry_module.AppContext, "from_config", wedge_the_manifest)
+    monkeypatch.setattr(registry_module, "build_vector_store", fail_on_the_second)
+
+    with pytest.raises(RuntimeError, match="the real build error"):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )

@@ -33,7 +33,7 @@ client or a systemd unit starts from its own working directory, so pass an
 absolute path there.
 
 They also accept `--workspace NAME` (`-w`), which matters only when the config
-holds several — see [2.1](#21-workspaces-and-state_dir). **The two behaviours
+holds several — see [2.1](#21-workspaces-and-state_dir). **The behaviours
 differ, deliberately:**
 
 - `index` with no `--workspace` runs **every** workspace in sequence, each with

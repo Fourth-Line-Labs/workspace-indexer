@@ -44,6 +44,11 @@ app = typer.Typer(
     help="Semantic + keyword index over a multi-repo workspace.",
 )
 console = Console()
+# serve only. Its stdout is the MCP protocol channel and nothing else may
+# touch it -- a prose line there reaches the client's JSON-RPC parser, not a
+# human. stderr is where an MCP client collects logs, so that is where a
+# failure to start belongs.
+stderr_console = Console(stderr=True)
 
 # Named for the command it serves, so a JSONL reader can tell a watcher's own
 # failures from the indexer failures it triggers.
@@ -740,7 +745,6 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     file is unaffected either way.
     """
     from workspace_indexer.mcp import (
-        EmptyIndexError,
         WorkspaceServices,
         build_grounding_service,
         build_impact_service,
@@ -771,7 +775,7 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # rerank provider. Every other startup failure here prints red and
         # exits 2; a raw traceback from the constructor would be the odd one
         # out, and the registry has already released what it took.
-        console.print(f"[red]{exc}[/red]")
+        stderr_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
 
     async def _preflight_all() -> None:
@@ -789,8 +793,15 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
 
     try:
         asyncio.run(_preflight_all())
-    except EmptyIndexError as exc:
-        console.print(f"[red]{exc}[/red]")
+    except Exception as exc:  # noqa: BLE001 - a startup failure, reported as one
+        # Not only `EmptyIndexError`. The store does not really open until
+        # something asks it a question: `AsyncQdrantClient(url=...)` does no
+        # I/O when built, so a Qdrant that refuses connections surfaces here,
+        # as a transport error from `count()`. Letting that escape would skip
+        # `registry.close()` -- the `finally` below covers only the serving
+        # block -- and hand the user a traceback where every neighbouring
+        # failure prints a line.
+        stderr_console.print(f"[red]{exc}[/red]")
         asyncio.run(registry.close())
         raise typer.Exit(code=2) from exc
 

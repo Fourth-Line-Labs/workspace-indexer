@@ -14,13 +14,12 @@ fastembed model for every workspace that has not overridden it.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from qdrant_client import AsyncQdrantClient
 
-from workspace_indexer.app_context import AppContext, settings_for
+from workspace_indexer.app_context import AppContext, close_blocking, settings_for
 from workspace_indexer.config import (
     Settings,
     WorkspaceChoiceError,
@@ -34,6 +33,7 @@ from workspace_indexer.storage import build_qdrant_client, build_vector_store
 if TYPE_CHECKING:
     from workspace_indexer.embedding.embedding_service import EmbeddingService
     from workspace_indexer.embedding.sparse_backend import SparseBackend
+    from workspace_indexer.storage.vector_store import VectorStore
 
 log = get_logger("workspace_indexer.registry")
 
@@ -44,6 +44,9 @@ class WorkspaceRegistry:
     def __init__(self, config: WorkspaceConfig) -> None:
         self._names = config.workspace_names
         self._client: AsyncQdrantClient | None = None
+        # Stores built but not yet handed to a context, so a failure between
+        # the two can still release them.
+        self._unowned: list[VectorStore] = []
         dense: dict[tuple[str, int, float | None], EmbeddingService] = {}
         sparse: dict[str, SparseBackend] = {}
         contexts: dict[str, AppContext] = {}
@@ -94,31 +97,48 @@ class WorkspaceRegistry:
                 dense[dense_key] = build_embedding_service(settings)
             if settings.sparse_model not in sparse:
                 sparse[settings.sparse_model] = build_sparse_backend(settings)
+            # Held while it has no owner. `from_config` can raise after this
+            # store exists -- an unknown rerank provider, a model that will
+            # not load -- and it releases only what it created itself, so
+            # without this the store would be invisible to the cleanup.
+            store = build_vector_store(settings, name, client=self._qdrant(settings))
+            self._unowned.append(store)
             contexts[name] = AppContext.from_config(
                 selected,
-                store=build_vector_store(settings, name, client=self._qdrant(settings)),
+                store=store,
                 embeddings=dense[dense_key],
                 sparse=sparse[settings.sparse_model],
             )
+            self._unowned.remove(store)
 
     def _abandon(self, contexts: dict[str, AppContext]) -> None:
         """Release what a failed build had already taken.
 
-        Manifests close synchronously, so they always go. The shared client's
-        close is a coroutine: it runs here when there is no loop to block --
-        which is the case for `serve`, the only caller -- and is otherwise
-        left to the interpreter, because blocking inside a running loop is
-        worse than a client that outlives a failed startup by a few seconds.
+        Every close is guarded individually, for the reason `close` states and
+        this used to ignore: a raising close must not strand the rest. Here it
+        matters twice over, because this runs inside an `except` block -- an
+        unguarded failure would replace the build error the user needs to see
+        (an unknown rerank provider, say) with a sqlite error about tidying up.
+
+        Stores as well as manifests. With `VECTOR_STORE=mongodb` nothing is
+        shared and every store owns a live client, so closing only the shared
+        Qdrant client would release nothing at all.
         """
-        for ctx in contexts.values():
-            ctx.manifest.close()
-        if self._client is None:
-            return
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self._client.close())
+        failures: list[str] = []
+        for name, ctx in contexts.items():
+            try:
+                ctx.manifest.close()
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                failures.append(f"{name} manifest: {type(exc).__name__}: {exc}")
+            close_blocking(ctx.store.close)
+        for store in self._unowned:
+            close_blocking(store.close)
+        self._unowned.clear()
+        if self._client is not None:
+            close_blocking(self._client.close)
             self._client = None
+        if failures:
+            log.warning("registry.abandon_failed", failures=failures)
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> WorkspaceRegistry:
