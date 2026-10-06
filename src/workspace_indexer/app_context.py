@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +29,7 @@ from workspace_indexer.embedding import (
 from workspace_indexer.embedding.embedding_service import EmbeddingService
 from workspace_indexer.embedding.sparse_backend import SparseBackend
 from workspace_indexer.models import EmbeddingSpace
-from workspace_indexer.obs.logging import configure_logging
+from workspace_indexer.obs.logging import configure_logging, get_logger
 from workspace_indexer.pipeline import Indexer
 from workspace_indexer.rerank import build_reranker
 from workspace_indexer.rerank.reranker import Reranker
@@ -38,6 +37,8 @@ from workspace_indexer.search import SearchService
 from workspace_indexer.state import Manifest
 from workspace_indexer.storage import build_vector_store
 from workspace_indexer.storage.vector_store import VectorStore
+
+log = get_logger("workspace_indexer.app_context")
 
 
 @dataclass(slots=True)
@@ -126,14 +127,23 @@ class AppContext:
         # From the config where `state_dir` is set, so several workspaces keep
         # several manifests. Falls back to STATE_DB untouched, which is what a
         # single-workspace setup has always used.
-        manifest = Manifest(config.manifest_path(settings.state_db))
         # `is not None`, not truthiness: these name resources somebody else
         # owns, and a store that one day grew `__len__` would read as absent
         # while empty -- turning sharing off for one workspace and nothing else.
         owned = store is None
-        resolved_store = build_vector_store(settings, name) if owned else store
-        assert resolved_store is not None
+        opened: Manifest | None = None
+        built: VectorStore | None = None
         try:
+            # Inside the guard, not before it. `build_vector_store` is itself a
+            # thing that can fail -- mongodb with no connection string, an
+            # embedded Qdrant whose storage folder is already held -- and with
+            # it outside, that failure orphaned the manifest opened a line
+            # earlier, which is exactly the case the cleanup claims to cover.
+            opened = Manifest(config.manifest_path(settings.state_db))
+            built = build_vector_store(settings, name) if owned else store
+            assert built is not None
+            manifest = opened
+            resolved_store = built
             return cls(
                 config=config,
                 settings=settings,
@@ -152,9 +162,23 @@ class AppContext:
             # A half-built context is nobody's to close: the caller never gets
             # a reference. Only what this call created is released -- an
             # injected store belongs to whoever passed it in.
-            manifest.close()
-            if owned:
-                close_blocking(resolved_store.close)
+            #
+            # Each close guarded separately, for the reason `_abandon` states:
+            # this runs inside an `except`, so an unguarded failure here would
+            # strand the rest of the cleanup and escape in place of the error
+            # the user needs to see.
+            problems: list[str] = []
+            if opened is not None:
+                try:
+                    opened.close()
+                except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                    problems.append(f"manifest: {type(exc).__name__}: {exc}")
+            if owned and built is not None:
+                failure = close_blocking(built.close)
+                if failure is not None:
+                    problems.append(f"store: {failure}")
+            if problems:
+                log.warning("context.abandon_failed", workspace=name, problems=problems)
             raise
 
     def indexer(self) -> Indexer:
@@ -185,24 +209,36 @@ class AppContext:
         self.manifest.close()
 
 
-def close_blocking(close: Callable[[], Coroutine[Any, Any, None]]) -> None:
+def close_blocking(close: Callable[[], Coroutine[Any, Any, None]]) -> str | None:
     """Run an async `close` from synchronous code, when that is possible.
 
-    Takes the coroutine function rather than the object, so one guarded path
-    covers a store and a bare client alike. The places that need this -- a
-    constructor about to raise, a registry abandoning a half-built set -- are
-    synchronous, and a close that itself fails must not replace the error that
-    caused the cleanup, so failures are suppressed.
+    Returns None when the close ran, and otherwise a description of what
+    stopped it -- reported by the caller rather than raised, because every
+    caller is already handling an error and a failure to tidy up must not
+    replace it. Silently suppressing instead would hide the case this exists
+    for: under `VECTOR_STORE=mongodb` a wedged store close leaks a live client
+    with no signal anywhere, while the sqlite handle beside it gets a warning.
 
-    It runs when no loop is already going, which is the case for every
-    command; inside a running loop it is skipped, because blocking there is
-    worse than a client that outlives a failed startup by seconds.
+    Takes the coroutine function rather than the object, so one path covers a
+    store and a bare client alike.
+
+    **It does nothing inside a running loop**, and that is the common case,
+    not the rare one: `serve` and the registry are synchronous, but `index`,
+    `search`, `status`, `mirror`, `reproject` and `eval` all reach
+    `from_config` from inside `asyncio.run(run())`. Blocking there is worse
+    than a client that outlives a failing command by seconds -- those commands
+    exit immediately afterwards -- but the skip is reported rather than
+    pretended away.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        with suppress(Exception):
+        try:
             asyncio.run(close())
+        except Exception as exc:  # noqa: BLE001 - returned, not swallowed
+            return f"{type(exc).__name__}: {exc}"
+        return None
+    return "not closed: an event loop is already running"
 
 
 def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> None:

@@ -562,8 +562,14 @@ async def test_describing_a_different_number_of_workspaces_is_refused() -> None:
 
 
 async def test_a_bare_string_of_labels_is_refused() -> None:
-    """`Sequence[str]` accepts a plain string and `list("ab")` is `["a", "b"]`,
-    so a two-character label would clear the count check and render
-    per-character labels while dispatch still keys on the real names."""
+    """`Sequence[str]` accepts a plain string and `list("ab")` is `["a", "b"]`.
+
+    Two workspaces against a two-character string, deliberately: that is the
+    shape the guard exists for, because the character count matches the
+    workspace count and the length check lets it through. Absent the guard
+    this builds a working server labelled "a" and "b" while dispatch still
+    keys on "alpha" and "beta". A one-workspace version would be refused by
+    the count check anyway and would pin nothing.
+    """
     with pytest.raises(TypeError, match="not a single string"):
-        build_mcp_server({"ab": cast(Any, None)}, "ab")
+        build_mcp_server({"alpha": cast(Any, None), "beta": cast(Any, None)}, "ab")

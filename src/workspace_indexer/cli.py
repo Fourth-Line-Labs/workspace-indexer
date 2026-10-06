@@ -53,6 +53,7 @@ stderr_console = Console(stderr=True)
 # Named for the command it serves, so a JSONL reader can tell a watcher's own
 # failures from the indexer failures it triggers.
 watch_log = get_logger("workspace_indexer.cli.watch")
+serve_log = get_logger("workspace_indexer.cli.serve")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to workspace.yaml")]
 WorkspaceOption = Annotated[
@@ -761,7 +762,10 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # than a special case inside it.
         loaded = loaded.select(workspace) if workspace is not None else loaded
     except (ConfigError, WorkspaceChoiceError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        # stderr, like every other failure in this command. `serve --workspace
+        # typo` is the likeliest first contact with the flag, and on stdout its
+        # diagnosis meets the client's JSON-RPC parser instead of a reader.
+        stderr_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
 
     # Once for the process, not once per workspace -- and .env still wins
@@ -801,6 +805,14 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # `registry.close()` -- the `finally` below covers only the serving
         # block -- and hand the user a traceback where every neighbouring
         # failure prints a line.
+        #
+        # Logged as well as printed. The catch is broad enough to take a
+        # `TypeError` from store internals, and `str(exc)` alone leaves a
+        # genuine bug with no type name and no traceback anywhere -- while
+        # logging is already configured. Same shape `watch` uses below.
+        serve_log.error(
+            "serve.preflight_failed", error=str(exc), error_type=type(exc).__name__, exc_info=True
+        )
         stderr_console.print(f"[red]{exc}[/red]")
         asyncio.run(registry.close())
         raise typer.Exit(code=2) from exc

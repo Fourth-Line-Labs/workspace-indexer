@@ -123,6 +123,11 @@ class WorkspaceRegistry:
         Stores as well as manifests. With `VECTOR_STORE=mongodb` nothing is
         shared and every store owns a live client, so closing only the shared
         Qdrant client would release nothing at all.
+
+        Store and client failures are reported alongside manifest ones. They
+        used to be suppressed, which made the Mongo case the quiet one: a
+        wedged store close leaked a live client with no signal anywhere while
+        a wedged sqlite handle got a warning.
         """
         failures: list[str] = []
         for name, ctx in contexts.items():
@@ -130,12 +135,18 @@ class WorkspaceRegistry:
                 ctx.manifest.close()
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(f"{name} manifest: {type(exc).__name__}: {exc}")
-            close_blocking(ctx.store.close)
-        for store in self._unowned:
-            close_blocking(store.close)
+            failure = close_blocking(ctx.store.close)
+            if failure is not None:
+                failures.append(f"{name} store: {failure}")
+        for index, store in enumerate(self._unowned):
+            failure = close_blocking(store.close)
+            if failure is not None:
+                failures.append(f"unowned store {index}: {failure}")
         self._unowned.clear()
         if self._client is not None:
-            close_blocking(self._client.close)
+            failure = close_blocking(self._client.close)
+            if failure is not None:
+                failures.append(f"<shared client>: {failure}")
             self._client = None
         if failures:
             log.warning("registry.abandon_failed", failures=failures)

@@ -567,7 +567,24 @@ def test_a_context_that_fails_to_build_closes_what_it_opened(
     from workspace_indexer.app_context import AppContext
 
     monkeypatch.chdir(tmp_path)
-    for key in ("VECTOR_STORE", "QDRANT_MODE", "QDRANT_PATH", "STATE_DB", "SPARSE_MODEL"):
+    # The same ten keys as the sibling test above. `from_config` builds the
+    # embedding service and applies the rerank overrides *before* the patched
+    # `build_reranker` is reached, so an exported EMBEDDING_MODEL,
+    # EMBEDDING_DIMENSIONS, VOYAGE_API_KEY or RERANK_MODEL can fail the
+    # construction this test needs to get through -- surfacing a different
+    # error before any manifest exists to assert on.
+    for key in (
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "SPARSE_MODEL",
+        "VOYAGE_API_KEY",
+        "VECTOR_STORE",
+        "RERANK_ENABLED",
+        "RERANK_MODEL",
+        "QDRANT_MODE",
+        "QDRANT_PATH",
+        "STATE_DB",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("QDRANT_MODE", "embedded")
     monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
@@ -590,6 +607,59 @@ def test_a_context_that_fails_to_build_closes_what_it_opened(
     config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
 
     with pytest.raises(ValueError, match="unknown rerank provider"):
+        AppContext.from_config(config)
+
+    assert opened, "no manifest was opened, so this asserts nothing"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].file_count()
+
+
+def test_a_store_that_will_not_build_does_not_orphan_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`build_vector_store` is itself a thing that can fail -- mongodb with no
+    connection string, an embedded Qdrant whose storage folder is already
+    held. It used to run before the guarded window, so its failure left the
+    sqlite handle opened a line earlier with nobody able to close it.
+    """
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    monkeypatch.chdir(tmp_path)
+    for key in (
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "SPARSE_MODEL",
+        "VOYAGE_API_KEY",
+        "VECTOR_STORE",
+        "RERANK_ENABLED",
+        "RERANK_MODEL",
+        "QDRANT_MODE",
+        "QDRANT_PATH",
+        "STATE_DB",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QDRANT_MODE", "embedded")
+    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant"))
+    monkeypatch.setenv("STATE_DB", str(tmp_path / "manifest.sqlite3"))
+
+    opened: list[Any] = []
+    real_manifest = app_context.Manifest
+
+    def record(path: Path) -> Any:
+        manifest = real_manifest(path)
+        opened.append(manifest)
+        return manifest
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("VECTOR_STORE=mongodb needs MONGODB_CONNECTION_STRING")
+
+    monkeypatch.setattr(app_context, "Manifest", record)
+    monkeypatch.setattr(app_context, "build_vector_store", refuse)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with pytest.raises(ValueError, match="MONGODB_CONNECTION_STRING"):
         AppContext.from_config(config)
 
     assert opened, "no manifest was opened, so this asserts nothing"

@@ -408,3 +408,52 @@ def test_a_cleanup_that_fails_does_not_replace_the_build_error(
         WorkspaceRegistry(
             _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
         )
+
+
+def test_a_store_orphaned_between_building_and_owning_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window `_unowned` exists for, which nothing else reaches.
+
+    The other abandon tests fail at `build_vector_store` itself, which happens
+    *before* the store is recorded -- so the list is empty at every cleanup
+    they run and its loop never executes. Here the second workspace's store is
+    built successfully and `from_config` then raises, which is the case the
+    comment describes: the store exists, no context owns it, and `from_config`
+    will not close it because the registry passed it in.
+    """
+    import workspace_indexer.app_context as app_context
+    import workspace_indexer.workspace_registry as registry_module
+
+    real_store = registry_module.build_vector_store
+    real_reranker = app_context.build_reranker
+    closed: list[str] = []
+    seen: list[str] = []
+
+    def recording(settings: Any, name: str, **kwargs: Any) -> Any:
+        store = real_store(settings, name, **kwargs)
+        original = store.close
+
+        async def record() -> None:
+            closed.append(name)
+            await original()
+
+        object.__setattr__(store, "close", record)
+        return store
+
+    def fail_the_second_context(*args: Any, **kwargs: Any) -> Any:
+        seen.append("x")
+        if len(seen) > 1:
+            raise ValueError("unknown rerank provider 'nonesuch'")
+        return real_reranker(*args, **kwargs)
+
+    monkeypatch.setattr(registry_module, "build_vector_store", recording)
+    monkeypatch.setattr(app_context, "build_reranker", fail_the_second_context)
+
+    with pytest.raises(ValueError, match="unknown rerank provider"):
+        WorkspaceRegistry(
+            _config(tmp_path, _workspace(tmp_path, "alpha"), _workspace(tmp_path, "beta"))
+        )
+
+    # alpha through `contexts`, beta through `_unowned` -- the branch under test.
+    assert closed == ["alpha", "beta"]
