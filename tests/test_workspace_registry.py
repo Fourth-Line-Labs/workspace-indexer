@@ -525,7 +525,17 @@ async def test_abandoning_inside_a_running_loop_reports_the_skip(
 
     reported = [entry for entry in logs if entry["event"] == "registry.abandon_failed"]
     assert reported, "the skipped close left no record"
-    assert any("event loop is already running" in f for f in reported[0]["failures"])
+    failures = reported[0]["failures"]
+    # Named, because this scenario produces two entries ending in the same
+    # message -- the store's and the shared client's. `any` over the joined
+    # text is satisfied by either, so the store-side reporting this test is
+    # about could be reverted with the assertion still green.
+    assert any(
+        f.startswith("alpha store:") and "event loop is already running" in f for f in failures
+    )
+    assert any(
+        f.startswith("<shared client>:") and "event loop is already running" in f for f in failures
+    )
 
 
 def test_an_in_flight_store_that_will_not_close_is_named_in_the_report(
