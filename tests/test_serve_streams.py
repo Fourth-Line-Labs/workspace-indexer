@@ -152,3 +152,15 @@ def test_a_registry_that_cannot_be_built_also_reports_on_stderr(
     assert result.exit_code == 2
     assert result.stderr.strip(), "the constructor failure was reported nowhere"
     assert result.stdout == "", f"prose on the protocol channel: {result.stdout!r}"
+    # Which site failed, not merely that one did. Exit 2, a red line on stderr
+    # and an empty stdout are exactly what the *preflight* handler produces
+    # too, so without this the test would stay green as a duplicate of the
+    # preflight one if the embedded client ever stopped refusing a file path
+    # at construction -- and the constructor site would lose its only cover.
+    #
+    # Filtered rather than asserting the log is empty: `build_qdrant_client`
+    # logs `store.embedded_mode` before the client call raises, so the file
+    # exists and has entries in it.
+    assert not [e for e in _serve_log(tmp_path) if e["event"] == "serve.preflight_failed"], (
+        "preflight ran, so this is no longer the constructor site"
+    )
