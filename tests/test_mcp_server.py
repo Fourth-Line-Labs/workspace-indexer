@@ -35,6 +35,7 @@ from workspace_indexer.mcp import (
     ImpactService,
     QueryService,
     TaxonomyService,
+    WorkspaceServices,
     build_mcp_server,
 )
 from workspace_indexer.mcp.server_factory import preflight
@@ -111,9 +112,13 @@ def server(queries: QueryService, tmp_path: Path) -> MCPServer:
     """
     manifest = Manifest(tmp_path / "manifest.sqlite3")
     return build_mcp_server(
-        queries,
-        ImpactService(manifest),
-        GroundingService(CoverageService(manifest)),
+        {
+            "labbox": WorkspaceServices(
+                queries=queries,
+                impact=ImpactService(manifest),
+                grounding=GroundingService(CoverageService(manifest)),
+            )
+        }
     )
 
 
@@ -376,3 +381,195 @@ async def test_the_server_instructions_advertise_locations_only_on_both(
     following = instructions.split(bullet, 1)[1].split("\n- ", 1)[0]
 
     assert "locations_only" in bullet + following
+
+
+# ---- several workspaces on one server (#99, part two) -----------------------
+
+
+@pytest.fixture
+async def two_workspaces(tmp_path: Path) -> AsyncIterator[MCPServer]:
+    """One server over two workspaces holding *different* documents.
+
+    Different on purpose. Seeding both from one store would let the dispatch
+    tests pass while `_for` returned the first workspace for every name --
+    there would be nothing to tell the two answers apart. Each workspace holds
+    exactly one file, named after it, so a wrong route is visible in the
+    result rather than inferred.
+    """
+    client = AsyncQdrantClient(path=str(tmp_path / "two-qdrant"))
+    sparse = FakeSparseBackend()
+    services: dict[str, WorkspaceServices] = {}
+    for name in ("alpha", "beta"):
+        store = QdrantStore(client, workspace=name, payload_indexes=False, owns_client=False)
+        text = f"store the {name} thing"
+        source = make_source(
+            text,
+            kind=FileKind.CODE,
+            language="python",
+            rel_path=f"{name}/only.py",
+            unit="repo",
+        )
+        chunk = build_chunk(
+            source,
+            name,
+            source_text=text,
+            start_line=1,
+            end_line=1,
+            chunker="text",
+            version=1,
+            chunk_index=0,
+        )
+        await store.upsert(SPACE, [chunk], [[1.0, 0, 0, 0]], sparse.encode_documents([text]))
+        manifest = Manifest(tmp_path / f"{name}.sqlite3")
+        services[name] = WorkspaceServices(
+            queries=QueryService(
+                search=SearchService(
+                    store=store,
+                    embeddings=EmbeddingService(FakeEmbeddingBackend(dimensions=4)),
+                    sparse=FakeSparseBackend(),
+                    reranker=NoopReranker(),
+                    config=SearchSection(rerank=RerankConfig(enabled=False, model="fake:m")),
+                    space=SPACE,
+                ),
+                taxonomy=TaxonomyService(store, SPACE),
+                check_staleness=False,
+            ),
+            impact=ImpactService(manifest),
+            grounding=GroundingService(CoverageService(manifest)),
+        )
+    yield build_mcp_server(services, ["alpha (repo-one)", "beta (repo-two)"])
+    await client.close()
+
+
+async def test_one_workspace_renders_the_instructions_it_always_did(
+    server: MCPServer, two_workspaces: MCPServer
+) -> None:
+    """A deployment that gained nothing from multi-workspace support must not
+    find its agent reading different instructions.
+
+    Asserted as "the extra block is absent, and everything else is the same
+    text the two-workspace server carries" -- so it holds without reaching for
+    the private constant, and it fails if the per-deployment paragraph ever
+    leaks into the single case.
+    """
+    one = server.instructions or ""
+    two = two_workspaces.instructions or ""
+
+    assert "separate indexes" not in one
+    assert "workspace=<name>" not in one
+    assert one.split("\n\n", 1)[0] == two.split("\n\n", 1)[0]
+    assert one.split("\n\n", 1)[1] == two.split("\n\n", 2)[2]
+
+
+async def test_several_workspaces_are_named_in_the_instructions(
+    two_workspaces: MCPServer,
+) -> None:
+    """The names come from config, so the instructions cannot be a constant.
+    The agent reads this before its first call -- otherwise its only route to
+    the names is getting one wrong."""
+    instructions = two_workspaces.instructions or ""
+
+    assert "2 separate indexes" in instructions
+    assert "alpha (repo-one), beta (repo-two)" in instructions
+    assert "workspace=<name>" in instructions
+    for name in registered_tool_names():
+        assert name in instructions
+
+
+@pytest.mark.parametrize("tool", registered_tool_names())
+async def test_every_tool_accepts_a_workspace(two_workspaces: MCPServer, tool: str) -> None:
+    """Every tool, not a hand-picked three. Dropping the parameter from one of
+    the others used to break no test, which is the drift this PR is stamping
+    out elsewhere."""
+    tools = {t.name: t for t in await two_workspaces.list_tools()}
+    assert "workspace" in tools[tool].input_schema["properties"]
+
+
+async def test_naming_no_workspace_is_an_error_listing_them(
+    two_workspaces: MCPServer,
+) -> None:
+    """There is no safe default: answering from whichever was listed first
+    would serve one index's code to a question about another's, silently."""
+    with pytest.raises(ToolError) as caught:
+        await two_workspaces.call_tool("search_code", {"query": "store"})
+
+    assert "alpha" in str(caught.value)
+    assert "beta" in str(caught.value)
+
+
+async def test_the_error_names_values_that_actually_dispatch(
+    two_workspaces: MCPServer,
+) -> None:
+    """The message is read as an instruction -- it exists to buy one round
+    trip. Listing the described form, "alpha (repo-one)", spends that round
+    trip on a value the lookup rejects."""
+    with pytest.raises(ToolError) as caught:
+        await two_workspaces.call_tool("search_code", {"query": "store"})
+
+    message = str(caught.value)
+    assert "(repo-one)" not in message
+    # Every name the message offers must be one the server will accept.
+    for name in ("alpha", "beta"):
+        assert name in message
+        _payload(await two_workspaces.call_tool("search_code", {"query": "x", "workspace": name}))
+
+
+async def test_naming_an_unknown_workspace_lists_the_configured_ones(
+    two_workspaces: MCPServer,
+) -> None:
+    with pytest.raises(ToolError, match="alpha"):
+        await two_workspaces.call_tool("search_code", {"query": "store", "workspace": "gamma"})
+
+
+async def test_each_name_dispatches_to_its_own_index(two_workspaces: MCPServer) -> None:
+    """The assertion that would catch a `_for` returning the first workspace
+    for every valid name: each workspace holds one file, named after it."""
+    for name, other in (("alpha", "beta"), ("beta", "alpha")):
+        result = _payload(
+            await two_workspaces.call_tool("search_code", {"query": "store", "workspace": name})
+        )
+        paths = [hit["rel_path"] for hit in result["results"]]
+
+        assert paths == [f"{name}/only.py"], f"{name} answered with {paths}"
+        assert not any(other in path for path in paths)
+
+
+async def test_a_lone_workspace_still_needs_no_name(server: MCPServer) -> None:
+    """Every config written before this existed has one workspace, and must
+    keep working with no parameter anywhere."""
+    result = _payload(await server.call_tool("search_code", {"query": "store"}))
+    assert result["results"]
+
+
+async def test_the_taxonomy_resource_is_withheld_when_there_is_a_choice(
+    two_workspaces: MCPServer, server: MCPServer
+) -> None:
+    """A resource has a fixed URI and no arguments, so with several indexes it
+    cannot say which it describes -- and its description claims to describe
+    "this workspace". Withheld rather than answering for whichever came first,
+    and rather than changing shape, which would make the payload's schema
+    depend on configuration."""
+    assert [str(r.uri) for r in await server.list_resources()] == [TAXONOMY_URI]
+    assert await two_workspaces.list_resources() == []
+
+
+async def test_describing_a_different_number_of_workspaces_is_refused() -> None:
+    """Two sources for one fact. Instructions built from the labels while
+    dispatch reads the services means a server that says a name is required
+    and then answers anyway, or one that hides a workspace entirely."""
+    with pytest.raises(ValueError, match="descriptions for"):
+        build_mcp_server({"alpha": cast(Any, None)}, ["alpha", "beta"])
+
+
+async def test_a_bare_string_of_labels_is_refused() -> None:
+    """`Sequence[str]` accepts a plain string and `list("ab")` is `["a", "b"]`.
+
+    Two workspaces against a two-character string, deliberately: that is the
+    shape the guard exists for, because the character count matches the
+    workspace count and the length check lets it through. Absent the guard
+    this builds a working server labelled "a" and "b" while dispatch still
+    keys on "alpha" and "beta". A one-workspace version would be refused by
+    the count check anyway and would pin nothing.
+    """
+    with pytest.raises(TypeError, match="not a single string"):
+        build_mcp_server({"alpha": cast(Any, None), "beta": cast(Any, None)}, "ab")

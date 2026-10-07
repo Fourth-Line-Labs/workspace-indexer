@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from workspace_indexer.app_context import AppContext
+from workspace_indexer.app_context import AppContext, configure_logging_for
 from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
 from workspace_indexer.evaluation import (
@@ -44,10 +44,16 @@ app = typer.Typer(
     help="Semantic + keyword index over a multi-repo workspace.",
 )
 console = Console()
+# serve only. Its stdout is the MCP protocol channel and nothing else may
+# touch it -- a prose line there reaches the client's JSON-RPC parser, not a
+# human. stderr is where an MCP client collects logs, so that is where a
+# failure to start belongs.
+stderr_console = Console(stderr=True)
 
 # Named for the command it serves, so a JSONL reader can tell a watcher's own
 # failures from the indexer failures it triggers.
 watch_log = get_logger("workspace_indexer.cli.watch")
+serve_log = get_logger("workspace_indexer.cli.serve")
 
 ConfigOption = Annotated[Path | None, typer.Option("--config", "-c", help="Path to workspace.yaml")]
 WorkspaceOption = Annotated[
@@ -740,30 +746,103 @@ def serve(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     file is unaffected either way.
     """
     from workspace_indexer.mcp import (
-        EmptyIndexError,
+        WorkspaceServices,
         build_grounding_service,
         build_impact_service,
         build_mcp_server,
         build_query_service,
     )
     from workspace_indexer.mcp.server_factory import preflight
+    from workspace_indexer.workspace_registry import WorkspaceRegistry
 
-    ctx = _context(config, "serve", workspace)
     try:
-        asyncio.run(preflight(ctx))
-    except EmptyIndexError as exc:
-        console.print(f"[red]{exc}[/red]")
-        asyncio.run(ctx.close())
+        loaded = load_workspace_config(config)
+        # `--workspace` narrows the config before the registry sees it, so
+        # serving one of several is a registry holding exactly that one rather
+        # than a special case inside it.
+        loaded = loaded.select(workspace) if workspace is not None else loaded
+    except (ConfigError, WorkspaceChoiceError) as exc:
+        # stderr, like every other failure in this command. `serve --workspace
+        # typo` is the likeliest first contact with the flag, and on stdout its
+        # diagnosis meets the client's JSON-RPC parser instead of a reader.
+        stderr_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    # Once for the process, not once per workspace -- and .env still wins
+    # over workspace.yaml, exactly as it does for every other command.
+    configure_logging_for(loaded, "serve")
+
+    try:
+        registry = WorkspaceRegistry(loaded)
+    except Exception as exc:  # noqa: BLE001 - a startup failure, reported as one
+        # A store that will not open, a model that will not load, an unknown
+        # rerank provider. Every other startup failure here prints red and
+        # exits 2; a raw traceback from the constructor would be the odd one
+        # out, and the registry has already released what it took.
+        stderr_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    # Bound as the loop advances, so a failure names the workspace that
+    # caused it. `watch` carries `root=` on its own failure for the same
+    # reason: on several indexes, "a store was unreachable" without saying
+    # which means rechecking all of them.
+    in_flight: list[str] = []
+
+    async def _preflight_all() -> None:
+        # Every workspace, before serving any of them. A server that answered
+        # for one index and reported "nothing found" for another would be
+        # worse than one that refused to start: the agent believes the empty
+        # answer.
+        #
+        # One loop for all of them, not one per workspace: they share a Qdrant
+        # client, and `asyncio.run` closes the loop it made -- so a pooled
+        # connection opened under the first workspace's loop would be reused,
+        # already dead, under the second's.
+        for name in registry.names:
+            in_flight[:] = [name]
+            await preflight(registry.context(name))
+        in_flight.clear()
+
+    try:
+        asyncio.run(_preflight_all())
+    except Exception as exc:  # noqa: BLE001 - a startup failure, reported as one
+        # Not only `EmptyIndexError`. The store does not really open until
+        # something asks it a question: `AsyncQdrantClient(url=...)` does no
+        # I/O when built, so a Qdrant that refuses connections surfaces here,
+        # as a transport error from `count()`. Letting that escape would skip
+        # `registry.close()` -- the `finally` below covers only the serving
+        # block -- and hand the user a traceback where every neighbouring
+        # failure prints a line.
+        #
+        # Logged as well as printed. The catch is broad enough to take a
+        # `TypeError` from store internals, and `str(exc)` alone leaves a
+        # genuine bug with no type name and no traceback anywhere -- while
+        # logging is already configured. Same shape `watch` uses below.
+        serve_log.error(
+            "serve.preflight_failed",
+            workspace=in_flight[0] if in_flight else None,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        stderr_console.print(f"[red]{exc}[/red]")
+        asyncio.run(registry.close())
         raise typer.Exit(code=2) from exc
 
     try:
         build_mcp_server(
-            build_query_service(ctx),
-            build_impact_service(ctx),
-            build_grounding_service(ctx),
+            {
+                name: WorkspaceServices(
+                    queries=build_query_service(registry.context(name)),
+                    impact=build_impact_service(registry.context(name)),
+                    grounding=build_grounding_service(registry.context(name)),
+                )
+                for name in registry.names
+            },
+            registry.describe(),
         ).run()
     finally:
-        asyncio.run(ctx.close())
+        asyncio.run(registry.close())
 
 
 @app.command()

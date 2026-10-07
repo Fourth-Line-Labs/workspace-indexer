@@ -36,6 +36,36 @@ def registered_tool_names() -> list[str]:
     return found
 
 
+def registered_tool_parameters() -> dict[str, list[str]]:
+    """Every tool's parameter names, read the same way as the names.
+
+    Derived rather than listed, for the reason this module exists: the
+    reference guard used to compare against a hand-typed tuple of six
+    parameters, so a tool could gain one -- `workspace` did, on six tools at
+    once -- and the guard that exists to catch undocumented parameters would
+    not notice. A hand-written copy is a copy that drifts.
+    """
+    found: dict[str, list[str]] = {}
+    for node in ast.walk(ast.parse(SERVER_FACTORY.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if isinstance(target, ast.Attribute) and target.attr == "tool":
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                # posonlyargs included deliberately: omitting them would drop a
+                # parameter from the dict, and the reference guard would then
+                # stop verifying it -- the guard-silently-checks-less shape
+                # this module exists to prevent.
+                found[node.name] = [argument.arg for argument in arguments]
+    assert found, f"no @server.tool() functions found in {SERVER_FACTORY.name}"
+    return found
+
+
 def cli_command_names() -> list[str]:
     """Typer commands, read out of the CLI module.
 

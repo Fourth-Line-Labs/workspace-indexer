@@ -43,6 +43,7 @@ class QdrantStore:
         upsert_batch_size: int = 256,
         payload_indexes: bool = True,
         location: str = "qdrant",
+        owns_client: bool = True,
     ) -> None:
         self._client = client
         self._workspace = workspace
@@ -51,6 +52,12 @@ class QdrantStore:
         # it works for embedded and silently returns nothing for server -- an
         # error message that omits the URL when the URL is the whole problem.
         self._location = location
+        # False when the client was handed in and is shared with other stores.
+        # Several workspaces served from one process share one client -- an
+        # embedded Qdrant locks its storage folder to a single client, so a
+        # second one is refused outright -- and the first store to close would
+        # otherwise take the connection away from the rest.
+        self._owns_client = owns_client
         self._on_disk_payload = on_disk_payload
         # Payload indexes are a no-op in embedded mode, and asking for them
         # emits a warning per field. Passed in rather than sniffed off the
@@ -481,7 +488,8 @@ class QdrantStore:
         self._ensured.discard(name)
 
     async def close(self) -> None:
-        await self._client.close()
+        if self._owns_client:
+            await self._client.close()
 
 
 def _as_vector_map(vectors: object) -> dict[str, Any] | None:

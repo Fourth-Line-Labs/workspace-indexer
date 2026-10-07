@@ -26,6 +26,7 @@ from workspace_indexer.mcp.tool_call_recorder import ToolCallRecorder
 from workspace_indexer.mcp.tool_call_sink import ToolCallSink
 from workspace_indexer.mcp.unknown_document_type_error import UnknownDocumentTypeError
 from workspace_indexer.mcp.unknown_repository_error import UnknownRepositoryError
+from workspace_indexer.mcp.workspace_services import WorkspaceServices
 
 __all__ = [
     "ALIASES",
@@ -50,6 +51,7 @@ __all__ = [
     "ToolCallRecorder",
     "ToolCallSink",
     "UnknownDocumentTypeError",
+    "WorkspaceServices",
     "UnknownRepositoryError",
     "build_grounding_service",
     "build_impact_service",

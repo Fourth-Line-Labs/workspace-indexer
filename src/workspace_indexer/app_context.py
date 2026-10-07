@@ -6,8 +6,11 @@ future MCP server gets the same construction for free.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from workspace_indexer.chunking import ChunkerRegistry
 from workspace_indexer.classification import DocumentClassifier, RuleClassifier
@@ -26,7 +29,7 @@ from workspace_indexer.embedding import (
 from workspace_indexer.embedding.embedding_service import EmbeddingService
 from workspace_indexer.embedding.sparse_backend import SparseBackend
 from workspace_indexer.models import EmbeddingSpace
-from workspace_indexer.obs.logging import configure_logging
+from workspace_indexer.obs.logging import configure_logging, get_logger
 from workspace_indexer.pipeline import Indexer
 from workspace_indexer.rerank import build_reranker
 from workspace_indexer.rerank.reranker import Reranker
@@ -34,6 +37,8 @@ from workspace_indexer.search import SearchService
 from workspace_indexer.state import Manifest
 from workspace_indexer.storage import build_vector_store
 from workspace_indexer.storage.vector_store import VectorStore
+
+log = get_logger("workspace_indexer.app_context")
 
 
 @dataclass(slots=True)
@@ -65,45 +70,116 @@ class AppContext:
         and answering from whichever was listed first would defeat that
         silently.
         """
-        return cls._from_config(load_workspace_config(config_path).select(workspace), role=role)
-
-    @classmethod
-    def _from_config(cls, config: WorkspaceConfig, role: str | None = None) -> AppContext:
-        settings = Settings()
-        # Applied to the config itself, before anything reads it, so every
-        # layer downstream sees one answer. Doing it per consumer is how
-        # RERANK_MODEL came to be a documented setting that nothing read.
-        config = with_rerank_overrides(config, settings)
-        # The workspace's embedding overrides land on `Settings` rather than
-        # being carried separately, so everything derived from it moves
-        # together -- the embedding space, the backend, the price, and
-        # `config_hash`, which decides whether two eval runs are comparable.
-        embedding = config.workspace.embedding
-        if embedding is not None:
-            settings = embedding.applied_to(settings)
-
+        config = load_workspace_config(config_path).select(workspace)
         # Before anything else runs, so a failure during setup is still logged.
         # `role` names the command, and separates its log file from every
         # other command's. Two processes sharing a rotating file cannot both
         # roll it over on Windows -- see configure_logging.
-        configure_logging(_with_env_overrides(config, settings), role)
+        #
+        # Here rather than in `from_config`, because a registry serving
+        # several workspaces builds many contexts and wants one log, not one
+        # per workspace. `logging` is a shared section, so there is only ever
+        # one answer to configure with.
+        configure_logging_for(config, role)
+        return cls.from_config(config)
 
+    @classmethod
+    def from_config(
+        cls,
+        config: WorkspaceConfig,
+        *,
+        store: VectorStore | None = None,
+        embeddings: EmbeddingService | None = None,
+        sparse: SparseBackend | None = None,
+    ) -> AppContext:
+        """One workspace, optionally over resources somebody else owns.
+
+        Public because `WorkspaceRegistry` is a real caller: it builds the
+        shared client and backends and then asks for a context over them.
+
+        The three optional arguments exist for serving several workspaces at
+        once. A Qdrant client cannot be built twice against embedded storage,
+        and loading the same local embedding model once per workspace wastes
+        memory for no benefit -- so a registry builds those once and hands them
+        in. Left out, each context builds its own, which is what every
+        single-workspace command does.
+        """
+        # Order matters, and getting it wrong is silent. `applied_to` rebuilds
+        # Settings from a full `model_dump()`, and pydantic sets
+        # `model_fields_set` from the input dict's keys -- so afterwards every
+        # one of its fields counts as explicitly provided. `with_rerank_overrides`
+        # gates on exactly that signal, because it is the only thing telling
+        # "the default" from "someone typed the default". Read off the derived
+        # settings, it therefore overrides a workspace.yaml `search.rerank`
+        # every time, re-validated so nothing errors -- and the workspace it
+        # hits hardest is one barred from a hosted API, which gets hosted
+        # reranking switched back on.
+        base = Settings()
+        config = with_rerank_overrides(config, base)
+        settings = settings_for(config, base)
+        name = config.workspace.name
         space = build_space(settings)
-        return cls(
-            config=config,
-            settings=settings,
-            space=space,
-            # From the config where `state_dir` is set, so several workspaces
-            # keep several manifests. Falls back to STATE_DB untouched, which
-            # is what a single-workspace setup has always used.
-            manifest=Manifest(config.manifest_path(settings.state_db)),
-            registry=ChunkerRegistry(config.workspace.name),
-            embeddings=build_embedding_service(settings),
-            sparse=build_sparse_backend(settings),
-            store=build_vector_store(settings, config.workspace.name),
-            reranker=build_reranker(config.search.rerank, settings),
-            classifier=RuleClassifier(),
-        )
+        # Opened before the things that can fail, so they are named here and
+        # released below rather than orphaned. `build_reranker` rejecting an
+        # unknown provider, or a local model refusing to load, both happen
+        # after the manifest's sqlite handle and the store's client exist.
+        #
+        # From the config where `state_dir` is set, so several workspaces keep
+        # several manifests. Falls back to STATE_DB untouched, which is what a
+        # single-workspace setup has always used.
+        # `is not None`, not truthiness: these name resources somebody else
+        # owns, and a store that one day grew `__len__` would read as absent
+        # while empty -- turning sharing off for one workspace and nothing else.
+        owned = store is None
+        opened: Manifest | None = None
+        built: VectorStore | None = None
+        try:
+            # Inside the guard, not before it. `build_vector_store` is itself a
+            # thing that can fail -- mongodb with no connection string, an
+            # embedded Qdrant whose storage folder is already held -- and with
+            # it outside, that failure orphaned the manifest opened a line
+            # earlier, which is exactly the case the cleanup claims to cover.
+            opened = Manifest(config.manifest_path(settings.state_db))
+            built = build_vector_store(settings, name) if owned else store
+            assert built is not None
+            manifest = opened
+            resolved_store = built
+            return cls(
+                config=config,
+                settings=settings,
+                space=space,
+                manifest=manifest,
+                registry=ChunkerRegistry(name),
+                embeddings=embeddings
+                if embeddings is not None
+                else build_embedding_service(settings),
+                sparse=sparse if sparse is not None else build_sparse_backend(settings),
+                store=resolved_store,
+                reranker=build_reranker(config.search.rerank, settings),
+                classifier=RuleClassifier(),
+            )
+        except Exception:
+            # A half-built context is nobody's to close: the caller never gets
+            # a reference. Only what this call created is released -- an
+            # injected store belongs to whoever passed it in.
+            #
+            # Each close guarded separately, for the reason `_abandon` states:
+            # this runs inside an `except`, so an unguarded failure here would
+            # strand the rest of the cleanup and escape in place of the error
+            # the user needs to see.
+            problems: list[str] = []
+            if opened is not None:
+                try:
+                    opened.close()
+                except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                    problems.append(f"manifest: {type(exc).__name__}: {exc}")
+            if owned and built is not None:
+                failure = close_blocking(built.close)
+                if failure is not None:
+                    problems.append(f"store: {failure}")
+            if problems:
+                log.warning("context.abandon_failed", workspace=name, problems=problems)
+            raise
 
     def indexer(self) -> Indexer:
         return Indexer(
@@ -131,6 +207,70 @@ class AppContext:
     async def close(self) -> None:
         await self.store.close()
         self.manifest.close()
+
+
+def close_blocking(close: Callable[[], Coroutine[Any, Any, None]]) -> str | None:
+    """Run an async `close` from synchronous code, when that is possible.
+
+    Returns None when the close ran, and otherwise a description of what
+    stopped it -- reported by the caller rather than raised, because every
+    caller is already handling an error and a failure to tidy up must not
+    replace it. Silently suppressing instead would hide the case this exists
+    for: under `VECTOR_STORE=mongodb` a wedged store close leaks a live client
+    with no signal anywhere, while the sqlite handle beside it gets a warning.
+
+    Takes the coroutine function rather than the object, so one path covers a
+    store and a bare client alike.
+
+    **It does nothing inside a running loop**, and that is the common case,
+    not the rare one: `serve` and the registry are synchronous, but `index`,
+    `search`, `status`, `mirror`, `reproject` and `eval` all reach
+    `from_config` from inside `asyncio.run(run())`. Blocking there is worse
+    than a client that outlives a failing command by seconds -- those commands
+    exit immediately afterwards -- but the skip is reported rather than
+    pretended away.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(close())
+        except Exception as exc:  # noqa: BLE001 - returned, not swallowed
+            return f"{type(exc).__name__}: {exc}"
+        return None
+    return "not closed: an event loop is already running"
+
+
+def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> None:
+    """Set logging up once for a command, honouring .env over workspace.yaml.
+
+    Public because `serve` builds a registry rather than a single context and
+    still needs exactly this: one log for the process, not one per workspace.
+    `logging` is a shared section, so there is only ever one answer.
+    """
+    configure_logging(_with_env_overrides(config, Settings()), role)
+
+
+def settings_for(config: WorkspaceConfig, base: Settings | None = None) -> Settings:
+    """Environment settings with this workspace's embedding overrides applied.
+
+    Pulled out so a registry can derive the same settings -- and therefore the
+    same `EmbeddingSpace` -- without building a context, which is how it knows
+    whether two workspaces can share one backend.
+
+    The overrides land on `Settings` rather than being carried separately so
+    everything derived from it moves together: the space, the backend, the
+    price, and `config_hash`, which decides whether two eval runs are
+    comparable.
+
+    `base` lets a caller supply the pristine settings it has already read, so
+    anything that must be decided *before* the overrides land -- the rerank
+    precedence, which reads `model_fields_set` -- can be decided against the
+    same object rather than a second one.
+    """
+    settings = base if base is not None else Settings()
+    embedding = config.workspace.embedding
+    return embedding.applied_to(settings) if embedding else settings
 
 
 def with_rerank_overrides(config: WorkspaceConfig, settings: Settings) -> WorkspaceConfig:

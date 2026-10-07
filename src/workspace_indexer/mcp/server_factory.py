@@ -9,6 +9,7 @@ leaves you wondering whether `mcp.server` is ours or the SDK's.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -16,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from workspace_indexer.app_context import AppContext
+from workspace_indexer.config import WorkspaceChoiceError
 from workspace_indexer.grounding import CoverageService
 from workspace_indexer.mcp.document_type_resolver import DocumentTypeResolver
 from workspace_indexer.mcp.empty_index_error import EmptyIndexError
@@ -30,6 +32,7 @@ from workspace_indexer.mcp.taxonomy_service import TaxonomyService
 from workspace_indexer.mcp.tool_call_recorder import ToolCallRecorder
 from workspace_indexer.mcp.unknown_document_type_error import UnknownDocumentTypeError
 from workspace_indexer.mcp.unknown_repository_error import UnknownRepositoryError
+from workspace_indexer.mcp.workspace_services import WorkspaceServices
 from workspace_indexer.models import DocumentType
 from workspace_indexer.worktrees import (
     WorktreeChoiceError,
@@ -42,9 +45,26 @@ TAXONOMY_URI = "workspace-indexer://taxonomy"
 # Spliced into the tool descriptions. The types have to be in context *before*
 # the agent picks one: a round trip to discover the vocabulary is a round trip
 # it will usually skip, and then it guesses.
+# Static, like the `worktree` parameter it mirrors. The configured names
+# cannot be interpolated here: `from __future__ import annotations` defers
+# every annotation to a string that FastMCP resolves against module globals,
+# so a value built per server is not in scope by then -- verified, it raises
+# NameError at registration. The names reach the agent through the server
+# instructions and through the error, which is exactly how `worktree` already
+# handles the same problem.
+WorkspaceOption = Annotated[
+    str | None,
+    Field(
+        description="Which workspace to answer from. Required only when the server "
+        "holds several: they are separate indexes and do not share results. The "
+        "configured names are in the server instructions, and omitting this when "
+        "there is a choice returns an error listing them."
+    ),
+]
+
 _TYPE_LIST = ", ".join(t.value for t in DocumentType)
 
-_INSTRUCTIONS = f"""\
+_TOOLS = f"""\
 A semantic + keyword index over this workspace. Use it instead of grepping when
 you know *what* you want but not *where* it is.
 
@@ -93,22 +113,97 @@ def build_query_service(ctx: AppContext) -> QueryService:
     )
 
 
+def _instructions(names: Sequence[str], described: Sequence[str]) -> str:
+    """The tool list, plus what this particular deployment holds.
+
+    A function rather than a constant because the workspace names come from
+    config, which is not known at import time. With one workspace it renders
+    exactly what it rendered before workspaces were a list -- a deployment
+    that gained nothing from this feature should not find its agent reading
+    different instructions.
+    """
+    # Gated on the workspaces that exist, not on the text describing them.
+    if len(names) < 2:
+        return _TOOLS
+    opening, rest = _TOOLS.split("\n\n", 1)
+    listed = ", ".join(described)
+    return (
+        f"{opening}\n\n"
+        f"This machine holds {len(described)} separate indexes: {listed}.\n"
+        "They are indexed apart and do not share results, so every tool below\n"
+        "takes workspace=<name>. Omitting it is an error naming the choices,\n"
+        "not a default -- answering from the wrong one would be silent.\n\n"
+        f"{rest}"
+    )
+
+
 def build_mcp_server(
-    queries: QueryService, impact: ImpactService, grounding_service: GroundingService
+    services: Mapping[str, WorkspaceServices], described: Sequence[str] | None = None
 ) -> MCPServer:
-    """Wrap the services in the protocol.
+    """Wrap the services in the protocol, one entry per workspace.
 
     Takes the services rather than the AppContext so a test can build the real
     server -- real tool schemas, real dispatch -- over a store it seeded
-    itself, without constructing every layer of the application.
+    itself, without constructing every layer of the application. A mapping
+    rather than three arguments because one server now answers for several
+    workspaces, and a single-workspace server is that with one entry.
 
-    `impact` and `grounding_service` are required rather than defaulted to
-    None. A tool that exists only when someone remembered to wire it is worse
-    than no tool: the agent cannot tell a missing capability from a negative
-    answer, and neither can the person reading the code.
+    Each `WorkspaceServices` carries all three. A tool that exists only when
+    someone remembered to wire it is worse than no tool: the agent cannot tell
+    a missing capability from a negative answer, and neither can the person
+    reading the code.
+
+    `described` is what the agent is told each workspace covers, defaulting to
+    the bare names. Bare names say *that* several indexes exist but not which
+    holds what, so a caller that can describe them should.
     """
+    if not services:
+        raise ValueError("a server with no workspaces can answer nothing")
+    names = list(services)
+    # Labels only. Whether this server is multi-workspace is decided by the
+    # services it was given, never by the text describing them -- two sources
+    # for one fact means instructions that can contradict dispatch, saying a
+    # name is required while `_for` quietly answers anyway.
+    if isinstance(described, str):
+        # `Sequence[str]` accepts a bare string, and `list("ab")` is
+        # `["a", "b"]` -- so a two-character name would clear the count check
+        # below and render per-character labels while dispatch still keys on
+        # the real names. Refused rather than typed away, because the
+        # annotation alone does not stop a caller at runtime.
+        raise TypeError("described must be a list of labels, not a single string")
+    labels = list(described) if described is not None else names
+    if len(labels) != len(names):
+        raise ValueError(
+            f"{len(labels)} descriptions for {len(names)} workspaces; they label the "
+            "same set, so a mismatch would describe a workspace that cannot be "
+            "reached or hide one that can"
+        )
     resolver = DocumentTypeResolver()
-    server = MCPServer(name="workspace-indexer", instructions=_INSTRUCTIONS)
+    server = MCPServer(name="workspace-indexer", instructions=_instructions(names, labels))
+
+    def _for(name: str | None) -> WorkspaceServices:
+        """The services for a named workspace, or the only one there is.
+
+        Raises a ToolError rather than returning something: with several
+        indexes configured there is no safe default, and answering from
+        whichever was listed first would serve one workspace's code to a
+        question about another's without saying so. Only a ToolError carries
+        its message back to the model.
+
+        The error lists the bare names, not the descriptions. The message is
+        read as an instruction -- the whole point is that it buys one round
+        trip -- so every value in it has to be one that dispatches. "alpha
+        (repo-one, repo-two)" does not; the roots belong in the instructions,
+        where nobody types them.
+        """
+        if name is None:
+            if len(names) != 1:
+                raise ToolError(str(WorkspaceChoiceError(None, names)))
+            return services[names[0]]
+        found = services.get(name)
+        if found is None:
+            raise ToolError(str(WorkspaceChoiceError(name, names)))
+        return found
 
     @server.tool()
     async def search_code(
@@ -143,6 +238,7 @@ def build_mcp_server(
                 "repository has worktrees."
             ),
         ] = None,
+        workspace: WorkspaceOption = None,
     ) -> SearchResponse:
         """Search implementation code and documentation by meaning.
 
@@ -151,7 +247,7 @@ def build_mcp_server(
         file that defines it. Every result is anchored as path:start-end.
         """
         try:
-            return await queries.search_code(
+            return await _for(workspace).queries.search_code(
                 query,
                 limit=limit,
                 repo=repo,
@@ -192,6 +288,7 @@ def build_mcp_server(
                 "repository has worktrees."
             ),
         ] = None,
+        workspace: WorkspaceOption = None,
     ) -> SearchResponse:
         """Find the specs, conventions and design documents governing a topic.
 
@@ -213,7 +310,7 @@ def build_mcp_server(
             # ToolError carries its message through to the agent.
             raise ToolError(str(exc)) from exc
         try:
-            return await queries.find_guidance(
+            return await _for(workspace).queries.find_guidance(
                 query,
                 limit=limit,
                 repo=repo,
@@ -238,6 +335,7 @@ def build_mcp_server(
                 "repository has worktrees."
             ),
         ] = None,
+        workspace: WorkspaceOption = None,
     ) -> SearchResponse:
         """Return every indexed chunk of one file, in file order.
 
@@ -245,12 +343,14 @@ def build_mcp_server(
         function, this returns the rest of the file as it was indexed.
         """
         try:
-            return await queries.get_file_context(rel_path, limit=limit, worktree=worktree)
+            return await _for(workspace).queries.get_file_context(
+                rel_path, limit=limit, worktree=worktree
+            )
         except WorktreeChoiceError as exc:
             raise ToolError(str(exc)) from exc
 
     @server.tool()
-    async def list_document_types() -> Taxonomy:
+    async def list_document_types(workspace: WorkspaceOption = None) -> Taxonomy:
         """List the document types in this workspace, with counts and examples.
 
         Counts describe this index, not the code's vocabulary. A type reported
@@ -258,7 +358,7 @@ def build_mcp_server(
         `normative` is 0, this workspace has no written standards and you
         should read the implementation instead of hunting for specs.
         """
-        return await queries.taxonomy()
+        return await _for(workspace).queries.taxonomy()
 
     @server.tool()
     async def impact_of(
@@ -267,6 +367,7 @@ def build_mcp_server(
             Field(description="Path from a search result, or a trailing portion of one."),
         ],
         limit: Annotated[int, Field(description="Maximum edges per direction.", ge=1, le=200)] = 25,
+        workspace: WorkspaceOption = None,
     ) -> ImpactReport:
         """What one file imports, and what imports it.
 
@@ -280,7 +381,7 @@ def build_mcp_server(
         this file are spelled in a way we cannot resolve to a path -- neither
         of which means nothing depends on it.
         """
-        return impact.impact_of(rel_path, limit=limit)
+        return _for(workspace).impact.impact_of(rel_path, limit=limit)
 
     # The suppression below is not decoration, and it is not understood. Every
     # tool above is registered by decorator and never called by name, exactly
@@ -289,7 +390,7 @@ def build_mcp_server(
     # reported, and renaming `list_document_types` itself makes it reported
     # too -- so the exemption tracks the name, not the shape or the position.
     # What earns a name the exemption, I could not establish; the obvious
-    # candidates (the name appearing in _INSTRUCTIONS, elsewhere in src/, or in
+    # candidates (the name appearing in _TOOLS, elsewhere in src/, or in
     # a test's call_tool string) are all true of `grounding` as well.
     # Narrowed to the one rule rather than silenced, and left with this note so
     # the next person starts from what has already been ruled out.
@@ -299,6 +400,7 @@ def build_mcp_server(
             str | None,
             Field(description="Restrict to one repository, as named in a search result."),
         ] = None,
+        workspace: WorkspaceOption = None,
     ) -> GroundingReport:
         """Whether a repository records *why* it is the way it is.
 
@@ -321,21 +423,34 @@ def build_mcp_server(
         empty result, because empty here reads as "records no reasons".
         """
         try:
-            return grounding_service.grounding(repo)
+            return _for(workspace).grounding.grounding(repo)
         except UnknownRepositoryError as exc:
             # Same boundary conversion as find_guidance: only a ToolError
             # carries its message to the model.
             raise ToolError(str(exc)) from exc
 
-    @server.resource(
-        TAXONOMY_URI,
-        name="Document taxonomy",
-        description="Document types in this workspace, with counts and example paths.",
-        mime_type="application/json",
-    )
-    async def taxonomy_resource() -> str:
-        taxonomy = await queries.taxonomy()
-        return json.dumps(taxonomy.model_dump(), indent=2)
+    # Registered only for a single-workspace server, deliberately. A resource
+    # has a fixed URI and no arguments, so with several indexes it cannot say
+    # which one it describes -- and its description, "document types in this
+    # workspace", would be answering for whichever happened to be first.
+    # Returning a different shape when there are several would be worse: a
+    # payload whose schema depends on configuration is a trap. Agents on a
+    # multi-workspace server use list_document_types(workspace=...), which
+    # says what it is answering for.
+    if len(names) == 1:
+        only = services[names[0]]
+
+        @server.resource(
+            TAXONOMY_URI,
+            name="Document taxonomy",
+            description="Document types in this workspace, with counts and example paths.",
+            mime_type="application/json",
+        )
+        async def taxonomy_resource() -> str:
+            taxonomy = await only.queries.taxonomy()
+            return json.dumps(taxonomy.model_dump(), indent=2)
+
+        _ = taxonomy_resource
 
     # Registered by decoration; naming them here keeps the linter honest about
     # the fact that these are the server's public surface.
@@ -345,7 +460,6 @@ def build_mcp_server(
         get_file_context,
         list_document_types,
         impact_of,
-        taxonomy_resource,
     )
     return server
 

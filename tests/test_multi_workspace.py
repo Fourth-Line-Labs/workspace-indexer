@@ -13,12 +13,14 @@ existed uses it.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from tests.isolated_env import isolate_context_env
 from workspace_indexer.config import EmbeddingSection, Settings, WorkspaceChoiceError
 from workspace_indexer.config import WorkspaceConfig as Config
 
@@ -484,3 +486,172 @@ def test_other_workspaces_stay_excluded_after_the_rerank_overrides_are_applied()
     )
 
     assert Path("/b/eval.yaml") in rebuilt.excluded_paths
+
+
+def test_an_embedding_override_does_not_discard_the_yaml_rerank_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.env` wins over workspace.yaml only for settings someone actually set.
+
+    `EmbeddingSection.applied_to` rebuilds `Settings` from a full
+    `model_dump()`, and pydantic takes `model_fields_set` from the input
+    dict's keys -- so afterwards every field counts as explicitly provided.
+    `with_rerank_overrides` gates on exactly that signal, which is the only
+    thing telling "the default" from "someone typed the default". Read off the
+    derived settings it overrides workspace.yaml every time, silently, because
+    the result is re-validated.
+
+    The workspace it hits hardest is the one the feature exists for: barred
+    from a hosted API, embedding locally, reranking deliberately off -- and
+    getting hosted reranking switched back on.
+    """
+    from workspace_indexer.app_context import AppContext
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    config = Config.model_validate(
+        {
+            "workspace": {
+                "name": "walled",
+                "roots": [{"path": str(tmp_path)}],
+                "embedding": {"model": "voyageai:voyage-code-4", "dimensions": 256},
+            },
+            "search": {"rerank": {"enabled": False, "model": "local:some/model"}},
+        }
+    )
+
+    context = AppContext.from_config(config)
+    try:
+        assert context.config.search.rerank.enabled is False
+        assert context.config.search.rerank.model == "local:some/model"
+        # The embedding override still has to have landed, or this passes for
+        # the wrong reason -- by the override never being applied at all.
+        assert context.settings.embedding_dimensions == 256
+    finally:
+        import asyncio
+
+        asyncio.run(context.close())
+
+
+def test_a_context_that_fails_to_build_closes_what_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest opens before the things that can fail.
+
+    `build_reranker` rejecting an unknown provider happens after the sqlite
+    handle exists, and the caller never receives the half-built context -- so
+    the handle would be orphaned with nobody able to close it. Synchronous
+    because the store half of the cleanup is skipped inside a running loop.
+    """
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    opened: list[Any] = []
+    real_manifest = app_context.Manifest
+
+    def record(path: Path) -> Any:
+        manifest = real_manifest(path)
+        opened.append(manifest)
+        return manifest
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("unknown rerank provider 'nonesuch'")
+
+    monkeypatch.setattr(app_context, "Manifest", record)
+    monkeypatch.setattr(app_context, "build_reranker", refuse)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with pytest.raises(ValueError, match="unknown rerank provider"):
+        AppContext.from_config(config)
+
+    assert opened, "no manifest was opened, so this asserts nothing"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].file_count()
+
+
+def test_a_store_that_will_not_build_does_not_orphan_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`build_vector_store` is itself a thing that can fail -- mongodb with no
+    connection string, an embedded Qdrant whose storage folder is already
+    held. It used to run before the guarded window, so its failure left the
+    sqlite handle opened a line earlier with nobody able to close it.
+    """
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    opened: list[Any] = []
+    real_manifest = app_context.Manifest
+
+    def record(path: Path) -> Any:
+        manifest = real_manifest(path)
+        opened.append(manifest)
+        return manifest
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("VECTOR_STORE=mongodb needs MONGODB_CONNECTION_STRING")
+
+    monkeypatch.setattr(app_context, "Manifest", record)
+    monkeypatch.setattr(app_context, "build_vector_store", refuse)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with pytest.raises(ValueError, match="MONGODB_CONNECTION_STRING"):
+        AppContext.from_config(config)
+
+    assert opened, "no manifest was opened, so this asserts nothing"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].file_count()
+
+
+def test_a_store_that_will_not_close_during_context_cleanup_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`from_config`'s own cleanup reports what it could not release.
+
+    The same gap the registry had: the tests asserted the manifest was closed
+    and never drove a close to fail, so the reporting could be reverted with
+    the suite green -- and an owned store that will not close is exactly the
+    leak with no other record.
+    """
+    import structlog.testing
+
+    import workspace_indexer.app_context as app_context
+    from workspace_indexer.app_context import AppContext
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    real_store = app_context.build_vector_store
+
+    def wedged(*args: Any, **kwargs: Any) -> Any:
+        store = real_store(*args, **kwargs)
+
+        async def refuse() -> None:
+            raise RuntimeError("store will not close")
+
+        object.__setattr__(store, "close", refuse)
+        return store
+
+    def refuse_reranker(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("unknown rerank provider 'nonesuch'")
+
+    monkeypatch.setattr(app_context, "build_vector_store", wedged)
+    monkeypatch.setattr(app_context, "build_reranker", refuse_reranker)
+
+    config = Config.model_validate({"workspace": {"name": "w", "roots": [{"path": str(tmp_path)}]}})
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(ValueError, match="unknown rerank provider"),
+    ):
+        AppContext.from_config(config)
+
+    reported = [entry for entry in logs if entry["event"] == "context.abandon_failed"]
+    assert reported, "the store close failure was swallowed"
+    assert reported[0]["workspace"] == "w"
+    assert any("store will not close" in problem for problem in reported[0]["problems"])
