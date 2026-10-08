@@ -6,7 +6,7 @@ summary: >-
   storage backends and their differences, where reranking runs and which
   environments can run it, cluster sizing limits, and the indexing brakes.
 created: 2026-08-27
-updated: 2026-10-03
+updated: 2026-10-08
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
 source_ref: "main @ 402cd52"
@@ -42,6 +42,8 @@ differ, deliberately:**
 - `serve` with no `--workspace` serves **every** workspace from one MCP server,
   and the choice moves to the agent: each tool takes a `workspace` argument.
   See [§1 `serve`](#serve).
+- `watch` with no `--workspace` watches **every** workspace at once, one
+  watcher each. See [§1 `watch`](#watch).
 - every other command with no `--workspace` is an **error** naming the
   configured workspaces. There is no safe default: answering from whichever was
   listed first would serve one workspace's code to a question about another's,
@@ -258,6 +260,27 @@ a trap — so a multi-workspace server exposes the same information through
 
 Watch the roots and reindex as files change. A trigger, not a second indexing
 path: every change goes through the same `index --root` the CLI performs.
+
+**Several workspaces are watched by several watchers, one each.** Each covers
+only its own roots and reindexes only its own collection and manifest, so
+nothing in the watching layer has to know workspaces exist. Two consequences
+worth knowing:
+
+- **A tree in two workspaces is watched twice, and a save there reindexes
+  both.** That is correct rather than wasteful — the file is in both indexes,
+  so leaving one unbuilt would make it quietly stale. It does mean a save in a
+  shared repository costs two reindexes, and the embeddings are paid for twice.
+  If that bites, the shared tree is the thing to move into a workspace of its
+  own.
+- **Reindexes do not overlap.** The stores are independent, so concurrent
+  writes would be safe, but concurrent embedding calls are not free: one save
+  in a shared repository would fire several API requests at once, which makes
+  the cost of a keystroke unpredictable. Whichever workspace triggered first
+  goes first.
+
+The inotify budget is counted across all of them. The kernel limit is per
+*user*, not per watch, so a per-workspace figure would always be too small —
+and watching a shared tree twice uses twice the watches.
 
 **The watch is placed on exactly the directories the index looks in.** The
 Rust watcher underneath accepts no exclusion of any kind — its whole

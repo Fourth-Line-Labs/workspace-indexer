@@ -38,6 +38,7 @@ class InotifyBudget:
         the one its constructor cannot express.
         """
         self._limit = limit
+        self._reserved = 0
 
     @classmethod
     def detect(cls) -> InotifyBudget:
@@ -75,13 +76,27 @@ class InotifyBudget:
                 stack.append(entry)
         return total
 
+    @property
+    def reserved(self) -> int:
+        """Directories accounted for so far, across every `check` on this object."""
+        return self._reserved
+
     def check(self, needed: int) -> bool:
         """Log the headroom. Returns False when the watch will not fit.
 
         Reported rather than enforced: a watcher that refuses to start is worse
         than one that starts and says it is short, because the second at least
         tells you which directory to exclude.
+
+        **Cumulative.** The kernel limit is per *user*, not per watch, so what
+        matters is everything this process will watch -- and `watch` runs one
+        watcher per workspace. Each call adds to a running total and reports
+        against that, so the last caller sees the real figure and any caller
+        that crosses the threshold says so. With a single watcher, which is
+        every other caller, the total is its own number and nothing changes.
         """
+        self._reserved += needed
+        needed = self._reserved
         if self._limit is None:
             log.debug("watch.budget_unknown", needed=needed)
             return True
