@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import typer
 from rich.console import Console
@@ -37,6 +37,13 @@ from workspace_indexer.models import EmbeddingSpace, FileKind, RunStats, SearchF
 from workspace_indexer.obs.logging import get_logger
 from workspace_indexer.search import Reprojector, SearchRequest
 from workspace_indexer.storage import StoreMirror, build_vector_store
+
+if TYPE_CHECKING:
+    # watchfiles is an optional extra, so the watching package is imported
+    # for real only inside the commands that need it -- these are for the
+    # annotations alone.
+    from workspace_indexer.watching import Watcher
+    from workspace_indexer.watching.inotify_budget import InotifyBudget
 
 app = typer.Typer(
     add_completion=False,
@@ -862,13 +869,140 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         )
         raise typer.Exit(code=2) from exc
 
-    ctx = _context(config, "watch", workspace)
+    from workspace_indexer.watching.inotify_budget import InotifyBudget
+    from workspace_indexer.workspace_registry import WorkspaceRegistry
+
+    try:
+        loaded = load_workspace_config(config)
+        # `--workspace` narrows before the registry sees it, so watching one of
+        # several is a registry holding exactly that one.
+        loaded = loaded.select(workspace) if workspace is not None else loaded
+    except (ConfigError, WorkspaceChoiceError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    configure_logging_for(loaded, "watch")
+    try:
+        registry = WorkspaceRegistry(loaded)
+    except Exception as exc:  # noqa: BLE001 - a startup failure, reported as one
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
     resolved = config or DEFAULT_CONFIG_PATH
 
     async def run() -> None:
-        indexer = ctx.indexer()
+        # Everything inside the try, construction included. `ctx.indexer()`,
+        # building a Watcher and `plan()` can all raise -- the filesystem probe
+        # on an exotic mount, say -- and unwinding before the `finally` was
+        # armed would leak every manifest, every store and the embedded-Qdrant
+        # storage lock while logging nothing, which is the outcome this
+        # handler exists to prevent.
+        try:
+            # One watcher per workspace, each over the single-workspace config
+            # it already expects. Nothing in the watching package knows
+            # workspaces exist -- and where two workspaces cover the same tree,
+            # both watchers see the save and each reindexes its own index,
+            # which is what has to happen: the file is in both.
+            #
+            # Reindexes are serialised through one lock. The stores are
+            # independent, so concurrent writes would be safe, but concurrent
+            # *embedding* calls are not free: one save in a shared repository
+            # would fire several API requests at once, which makes the cost of
+            # a keystroke unpredictable.
+            reindexing = asyncio.Lock()
+            # One budget, because inotify's limit is per user rather than per
+            # watch: a budget each would have every watcher report a fraction
+            # and nobody see the total.
+            budget = InotifyBudget.detect()
+            watchers = [
+                _build_watcher(Watcher, registry.context(name), name, resolved, reindexing, budget)
+                for name in registry.names
+            ]
 
-        async def reindex(root: str | None) -> None:
+            for name, watcher in zip(registry.names, watchers, strict=True):
+                if len(watchers) > 1:
+                    console.rule(f"[bold]{name}[/bold]")
+                for label, mode in watcher.plan().items():
+                    console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
+            console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
+
+            # A TaskGroup rather than `gather`. `gather` propagates the first
+            # failure and leaves its siblings *running* -- measured -- so the
+            # `finally` below would close the registry underneath watchers that
+            # are still live, and their next reindex would fail against a
+            # closed manifest and log `watch.reindex_failed`: confident,
+            # entirely spurious entries sitting beside the one real crash, in
+            # the JSONL that is the only record of an unattended run. A
+            # TaskGroup cancels the siblings and waits for them first.
+            async with asyncio.TaskGroup() as group:
+                for name, watcher in zip(registry.names, watchers, strict=True):
+                    group.create_task(_run_watcher(name, watcher))
+        except* Exception:
+            # Each watcher has already logged its own `watch.crashed` with its
+            # workspace attached, which is the thing a reader needs; re-raised
+            # so the command still exits non-zero.
+            raise
+        else:
+            watch_log.info("watch.stopped", reason="completed")
+        finally:
+            await registry.close()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        # Caught out here, not inside `run`. `asyncio.gather` turns a task's
+        # KeyboardInterrupt into a CancelledError at the await site and lets
+        # the interrupt escape `asyncio.run` instead -- measured, not assumed
+        # -- so a handler inside the coroutine never sees it, and Ctrl-C would
+        # end the one way this command is meant to end as an untrapped
+        # traceback.
+        watch_log.info("watch.stopped", reason="interrupted")
+
+
+async def _run_watcher(name: str, watcher: Watcher) -> None:
+    """Run one workspace's watcher, naming it if it dies.
+
+    The workspace is known here and nowhere above: a TaskGroup reports an
+    exception group, and the operator reading the JSONL afterwards would
+    otherwise have to recheck every workspace to find which one failed. Same
+    reason `watch.reindex_failed` and `serve.preflight_failed` carry theirs.
+    """
+    try:
+        await watcher.run()
+    except Exception as exc:
+        # Anything raised outside the per-root reindex -- a bad path, a lock, a
+        # failure inside the watcher itself. Previously this left the JSONL
+        # ending at `watch.start` with nothing after it while the process
+        # visibly died, so the only evidence was on screen.
+        watch_log.error(
+            "watch.crashed",
+            workspace=name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        console.print(f"[red]{name}: watch failed: {exc}[/red]")
+        raise
+
+
+def _build_watcher(
+    watcher_class: type[Watcher],
+    ctx: AppContext,
+    name: str,
+    resolved: Path,
+    reindexing: asyncio.Lock,
+    budget: InotifyBudget,
+) -> Watcher:
+    """One workspace's watcher, with its reindex bound to its own indexer.
+
+    Takes the class rather than importing it, because `watchfiles` is an
+    optional extra: the import stays inside `watch`, where its failure becomes
+    the message telling you which extra to install.
+    """
+    indexer = ctx.indexer()
+
+    async def reindex(root: str | None) -> None:
+        async with reindexing:
             try:
                 stats = await indexer.run(only_root=root)
             except Exception as exc:
@@ -881,55 +1015,31 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
                 # is the one nobody was looking at.
                 watch_log.error(
                     "watch.reindex_failed",
+                    workspace=name,
                     root=root,
                     error=str(exc),
                     error_type=type(exc).__name__,
                     exc_info=True,
                 )
-                console.print(f"[red]reindex of {root} failed: {exc}[/red]")
+                console.print(f"[red]{name}: reindex of {root} failed: {exc}[/red]")
                 return
             console.print(
-                f"[dim]{root}: {stats.files_changed} changed, "
+                f"[dim]{name} {root}: {stats.files_changed} changed, "
                 f"{stats.chunks_upserted} written, {stats.chunks_deleted} removed[/dim]"
             )
 
-        watcher = Watcher(
-            ctx.config,
-            reindex=reindex,
-            config_path=resolved,
-            # Narrowed, like the initial context. An un-narrowed reload
-            # would hand ChangeDebouncer a config whose `workspace` property
-            # raises -- outside `_reload`'s guard, so the watcher dies on the
-            # first save of workspace.yaml. A select failure inside the lambda
-            # is caught by that guard, so torn-write recovery is unaffected.
-            reload_config=lambda: load_workspace_config(resolved).select(workspace),
-        )
-        for label, mode in watcher.plan().items():
-            console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
-        console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
-        try:
-            await watcher.run()
-        except KeyboardInterrupt:
-            watch_log.info("watch.stopped", reason="interrupted")
-        except Exception as exc:
-            # Anything raised outside the per-root reindex -- a bad path, a
-            # lock, a failure inside the watcher itself. Previously this left
-            # the JSONL ending at `watch.start` with nothing after it while the
-            # process visibly died, so the only evidence was on screen.
-            watch_log.error(
-                "watch.crashed",
-                error=str(exc),
-                error_type=type(exc).__name__,
-                exc_info=True,
-            )
-            console.print(f"[red]watch failed: {exc}[/red]")
-            raise
-        else:
-            watch_log.info("watch.stopped", reason="completed")
-        finally:
-            await ctx.close()
-
-    asyncio.run(run())
+    return watcher_class(
+        ctx.config,
+        reindex=reindex,
+        config_path=resolved,
+        budget=budget,
+        # Narrowed to this watcher's own workspace. An un-narrowed reload
+        # would hand ChangeDebouncer a config whose `workspace` property
+        # raises -- outside `_reload`'s guard, so the watcher dies on the
+        # first save of workspace.yaml. A select failure inside the lambda
+        # is caught by that guard, so torn-write recovery is unaffected.
+        reload_config=lambda: load_workspace_config(resolved).select(name),
+    )
 
 
 def _print_tool_calls(ctx: AppContext) -> None:
