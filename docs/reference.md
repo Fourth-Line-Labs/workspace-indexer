@@ -9,7 +9,7 @@ created: 2026-08-27
 updated: 2026-10-08
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
-source_ref: "main @ 402cd52"
+source_ref: "main @ 2053f81"
 confidential: false
 audience: "someone looking up a command, flag or default -- human or LLM"
 ---
@@ -280,7 +280,15 @@ worth knowing:
 
 The inotify budget is counted across all of them. The kernel limit is per
 *user*, not per watch, so a per-workspace figure would always be too small —
-and watching a shared tree twice uses twice the watches.
+and watching a shared tree twice uses twice the watches. The budget events
+report both numbers: `needed` is that workspace's own, `reserved` the running
+total.
+
+They also share one Qdrant client, as `serve` does and for the same reason: an
+embedded Qdrant locks its storage folder to a single client and refuses a
+second. One `watch` process covering several workspaces is therefore fine; a
+second `watch` alongside it, or a `serve` next to it, is not — that needs
+`QDRANT_MODE=server`.
 
 **The watch is placed on exactly the directories the index looks in.** The
 Rust watcher underneath accepts no exclusion of any kind — its whole

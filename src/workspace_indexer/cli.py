@@ -891,47 +891,56 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     resolved = config or DEFAULT_CONFIG_PATH
 
     async def run() -> None:
-        # One watcher per workspace, each over the single-workspace config it
-        # already expects. Nothing in the watching package knows workspaces
-        # exist -- and where two workspaces cover the same tree, both watchers
-        # see the save and each reindexes its own index, which is what has to
-        # happen: the file is in both.
-        #
-        # Reindexes are serialised. The stores are independent, so concurrent
-        # writes would be safe, but concurrent *embedding* calls are not free:
-        # one save in a shared repository would fire several API requests at
-        # once, which makes the cost of a keystroke unpredictable.
-        reindexing = asyncio.Lock()
-        # Shared, so the headroom reported is the headroom actually taken.
-        # inotify's limit is per user, not per watch, so N independent checks
-        # would each report a fraction and none would see the total.
-        budget = InotifyBudget.detect()
-        watchers = [
-            _build_watcher(Watcher, registry.context(name), name, resolved, reindexing, budget)
-            for name in registry.names
-        ]
-
-        for name, watcher in zip(registry.names, watchers, strict=True):
-            if len(watchers) > 1:
-                console.rule(f"[bold]{name}[/bold]")
-            for label, mode in watcher.plan().items():
-                console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
-        console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
-
+        # Everything inside the try, construction included. `ctx.indexer()`,
+        # building a Watcher and `plan()` can all raise -- the filesystem probe
+        # on an exotic mount, say -- and unwinding before the `finally` was
+        # armed would leak every manifest, every store and the embedded-Qdrant
+        # storage lock while logging nothing, which is the outcome this
+        # handler exists to prevent.
         try:
-            await asyncio.gather(*(watcher.run() for watcher in watchers))
-        except Exception as exc:
-            # Anything raised outside the per-root reindex -- a bad path, a
-            # lock, a failure inside the watcher itself. Previously this left
-            # the JSONL ending at `watch.start` with nothing after it while the
-            # process visibly died, so the only evidence was on screen.
-            watch_log.error(
-                "watch.crashed",
-                error=str(exc),
-                error_type=type(exc).__name__,
-                exc_info=True,
-            )
-            console.print(f"[red]watch failed: {exc}[/red]")
+            # One watcher per workspace, each over the single-workspace config
+            # it already expects. Nothing in the watching package knows
+            # workspaces exist -- and where two workspaces cover the same tree,
+            # both watchers see the save and each reindexes its own index,
+            # which is what has to happen: the file is in both.
+            #
+            # Reindexes are serialised through one lock. The stores are
+            # independent, so concurrent writes would be safe, but concurrent
+            # *embedding* calls are not free: one save in a shared repository
+            # would fire several API requests at once, which makes the cost of
+            # a keystroke unpredictable.
+            reindexing = asyncio.Lock()
+            # One budget, because inotify's limit is per user rather than per
+            # watch: a budget each would have every watcher report a fraction
+            # and nobody see the total.
+            budget = InotifyBudget.detect()
+            watchers = [
+                _build_watcher(Watcher, registry.context(name), name, resolved, reindexing, budget)
+                for name in registry.names
+            ]
+
+            for name, watcher in zip(registry.names, watchers, strict=True):
+                if len(watchers) > 1:
+                    console.rule(f"[bold]{name}[/bold]")
+                for label, mode in watcher.plan().items():
+                    console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
+            console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
+
+            # A TaskGroup rather than `gather`. `gather` propagates the first
+            # failure and leaves its siblings *running* -- measured -- so the
+            # `finally` below would close the registry underneath watchers that
+            # are still live, and their next reindex would fail against a
+            # closed manifest and log `watch.reindex_failed`: confident,
+            # entirely spurious entries sitting beside the one real crash, in
+            # the JSONL that is the only record of an unattended run. A
+            # TaskGroup cancels the siblings and waits for them first.
+            async with asyncio.TaskGroup() as group:
+                for name, watcher in zip(registry.names, watchers, strict=True):
+                    group.create_task(_run_watcher(name, watcher))
+        except* Exception:
+            # Each watcher has already logged its own `watch.crashed` with its
+            # workspace attached, which is the thing a reader needs; re-raised
+            # so the command still exits non-zero.
             raise
         else:
             watch_log.info("watch.stopped", reason="completed")
@@ -948,6 +957,32 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # end the one way this command is meant to end as an untrapped
         # traceback.
         watch_log.info("watch.stopped", reason="interrupted")
+
+
+async def _run_watcher(name: str, watcher: Watcher) -> None:
+    """Run one workspace's watcher, naming it if it dies.
+
+    The workspace is known here and nowhere above: a TaskGroup reports an
+    exception group, and the operator reading the JSONL afterwards would
+    otherwise have to recheck every workspace to find which one failed. Same
+    reason `watch.reindex_failed` and `serve.preflight_failed` carry theirs.
+    """
+    try:
+        await watcher.run()
+    except Exception as exc:
+        # Anything raised outside the per-root reindex -- a bad path, a lock, a
+        # failure inside the watcher itself. Previously this left the JSONL
+        # ending at `watch.start` with nothing after it while the process
+        # visibly died, so the only evidence was on screen.
+        watch_log.error(
+            "watch.crashed",
+            workspace=name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        console.print(f"[red]{name}: watch failed: {exc}[/red]")
+        raise
 
 
 def _build_watcher(

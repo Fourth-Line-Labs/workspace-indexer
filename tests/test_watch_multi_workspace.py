@@ -63,7 +63,11 @@ def _watchers_built(monkeypatch: pytest.MonkeyPatch, config: Path, *args: str) -
         built.append(self)
 
     monkeypatch.setattr(watcher_module.Watcher, "run", record)
-    CliRunner().invoke(app, ["watch", "--config", str(config), *args])
+    result = CliRunner().invoke(app, ["watch", "--config", str(config), *args])
+    # Checked here, so a failure during workspace selection or registry
+    # construction says what went wrong instead of surfacing later as a
+    # confusing assertion about how many watchers were built.
+    assert result.exit_code == 0, result.output
     return built
 
 
@@ -107,11 +111,9 @@ def test_a_shared_tree_is_watched_by_both_workspaces(
 
     built = _watchers_built(monkeypatch, _config(tmp_path, shared=True))
 
-    assert len(built) == 2
-    # Both plans name the shared root, which is what makes both watchers react
-    # to a save there.
-    for watcher in built:
-        assert "common" in watcher.plan()
+    # Stated exactly rather than as a membership check: "common is in both
+    # plans" also holds if both watchers wrongly covered every root.
+    assert [sorted(w.plan()) for w in built] == [["alpha", "common"], ["beta", "common"]]
 
 
 def test_the_inotify_budget_is_shared_across_workspaces(
@@ -138,49 +140,135 @@ def test_the_inotify_budget_is_shared_across_workspaces(
     assert shared.check(400) is False
 
 
-async def test_reindexes_do_not_overlap_across_workspaces(tmp_path: Path) -> None:
-    """Separate collections make concurrent writes safe, but concurrent
-    embedding calls are not free: one save in a shared repository would fire
-    several API requests at once, which makes the cost of a keystroke
-    unpredictable."""
-    from workspace_indexer.cli import _build_watcher  # pyright: ignore[reportPrivateUsage]
+def test_the_cli_shares_one_lock_and_one_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both wirings, driven through the real `run()`.
 
-    overlapped = False
+    Neither was pinned before: the serialisation test built its own lock and
+    called the private `_build_watcher`, and the budget test exercised
+    `InotifyBudget` in isolation -- so moving `asyncio.Lock()` or
+    `InotifyBudget.detect()` inside the per-watcher comprehension passed the
+    entire suite.
+
+    `Watcher` is replaced on the module the CLI resolves it from at call time,
+    so this goes through the real command: real registry, real reindex
+    closures, real `TaskGroup`.
+    """
+    import workspace_indexer.watching as watching_module
+    from workspace_indexer.app_context import AppContext
+    from workspace_indexer.config.watch_mode import WatchMode
+
+    isolate_context_env(monkeypatch, tmp_path)
+
     running = 0
+    overlapped = False
+    budgets: list[Any] = []
+
+    class Stats:
+        files_changed = 0
+        chunks_upserted = 0
+        chunks_deleted = 0
 
     class SlowIndexer:
-        async def run(self, only_root: str | None = None) -> Any:
-            nonlocal overlapped, running
+        async def run(self, only_root: str | None = None, **kwargs: Any) -> Stats:
+            nonlocal running, overlapped
             running += 1
             overlapped = overlapped or running > 1
             await asyncio.sleep(0.05)
             running -= 1
-            raise RuntimeError("stop here; the reindex itself is not under test")
-
-    class FakeContext:
-        config = None
-
-        def indexer(self) -> SlowIndexer:
-            return SlowIndexer()
-
-    captured: list[Any] = []
+            return Stats()
 
     class FakeWatcher:
         def __init__(self, _config: Any, **kwargs: Any) -> None:
-            captured.append(kwargs["reindex"])
+            self._reindex = kwargs["reindex"]
+            self._budget = kwargs["budget"]
+            budgets.append(self._budget)
 
-    lock = asyncio.Lock()
-    for name in ("alpha", "beta"):
-        _build_watcher(
-            FakeWatcher,  # pyright: ignore[reportArgumentType]
-            FakeContext(),  # pyright: ignore[reportArgumentType]
-            name,
-            tmp_path / "workspace.yaml",
-            lock,
-            None,  # pyright: ignore[reportArgumentType]
-        )
+        def plan(self) -> dict[str, WatchMode]:
+            return {"r": WatchMode.NATIVE}
 
-    await asyncio.gather(*(reindex("root") for reindex in captured))
+        async def run(self, stop: object = None) -> None:
+            # What a real watcher does on start, and then on one change.
+            self._budget.check(2)
+            await self._reindex("r")
 
-    assert len(captured) == 2
+    def slow_indexer(_self: AppContext) -> SlowIndexer:
+        return SlowIndexer()
+
+    monkeypatch.setattr(AppContext, "indexer", slow_indexer)
+    monkeypatch.setattr(watching_module, "Watcher", FakeWatcher)
+
+    result = CliRunner().invoke(app, ["watch", "--config", _config(tmp_path).as_posix()])
+
+    assert result.exit_code == 0, result.output
+    assert len(budgets) == 2
+    # The lock: two watchers reindexing at once would have overlapped.
     assert not overlapped, "two workspaces reindexed at the same time"
+    # The budget: a budget each would leave both reading 2.
+    assert budgets[0].reserved == 4
+
+
+def test_a_crash_in_one_watcher_names_it_and_cancels_the_others_before_closing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown with more than one watcher, which nothing covered.
+
+    Two claims. The crash names the workspace, or an operator reading the JSONL
+    of an unattended run has to recheck every one.
+
+    And the siblings are cancelled *before* the registry closes. `gather`
+    propagates the first failure and leaves its siblings running, so the close
+    would happen underneath live watchers and their next reindex would fail
+    against a closed manifest -- spurious `watch.reindex_failed` entries beside
+    the one real crash. Asserted as an **order**, because that is the claim:
+    merely observing that the sibling ended says nothing, since `asyncio.run`
+    cancels whatever is left at the very end either way.
+    """
+    import json
+
+    import workspace_indexer.watching as watching_module
+    from workspace_indexer.config.watch_mode import WatchMode
+    from workspace_indexer.workspace_registry import WorkspaceRegistry
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    order: list[str] = []
+    real_close = WorkspaceRegistry.close
+
+    async def recording_close(self: WorkspaceRegistry) -> None:
+        order.append("registry closed")
+        await real_close(self)
+
+    class FakeWatcher:
+        def __init__(self, config: Any, **kwargs: Any) -> None:
+            self._name = config.workspace.name
+
+        def plan(self) -> dict[str, WatchMode]:
+            return {"r": WatchMode.NATIVE}
+
+        async def run(self, stop: object = None) -> None:
+            if self._name == "alpha":
+                raise RuntimeError("the file cannot be accessed by the system")
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                order.append("sibling cancelled")
+                raise
+
+    monkeypatch.setattr(WorkspaceRegistry, "close", recording_close)
+    monkeypatch.setattr(watching_module, "Watcher", FakeWatcher)
+
+    result = CliRunner().invoke(app, ["watch", "--config", _config(tmp_path).as_posix()])
+
+    assert result.exit_code != 0
+    assert order == ["sibling cancelled", "registry closed"], order
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "l-watch.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    crashed = [e for e in entries if e["event"] == "watch.crashed"]
+    assert len(crashed) == 1
+    assert crashed[0]["workspace"] == "alpha"

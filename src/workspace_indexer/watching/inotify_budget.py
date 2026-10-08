@@ -81,7 +81,7 @@ class InotifyBudget:
         """Directories accounted for so far, across every `check` on this object."""
         return self._reserved
 
-    def check(self, needed: int) -> bool:
+    def check(self, needed: int, label: str | None = None) -> bool:
         """Log the headroom. Returns False when the watch will not fit.
 
         Reported rather than enforced: a watcher that refuses to start is worse
@@ -90,22 +90,34 @@ class InotifyBudget:
 
         **Cumulative.** The kernel limit is per *user*, not per watch, so what
         matters is everything this process will watch -- and `watch` runs one
-        watcher per workspace. Each call adds to a running total and reports
-        against that, so the last caller sees the real figure and any caller
-        that crosses the threshold says so. With a single watcher, which is
-        every other caller, the total is its own number and nothing changes.
+        watcher per workspace. Each call adds to a running total and the
+        thresholds are judged against that, so the last caller sees the real
+        figure and any caller that crosses the line says so. With a single
+        watcher, which is every other caller, the total is its own number and
+        nothing changes.
+
+        Both numbers are logged, and `label` names the caller. Reporting only
+        the running total under the name `needed` would read as "this watcher
+        needs 4" on the second of two workspaces -- a figure the reader would
+        then act on by excluding trees from the wrong one.
+
+        One trap for later: a re-check after a rescope or a config reload would
+        double-count, because this never forgets. Nothing re-checks today;
+        anything that starts to must pass the delta.
         """
         self._reserved += needed
-        needed = self._reserved
+        total = self._reserved
         if self._limit is None:
-            log.debug("watch.budget_unknown", needed=needed)
+            log.debug("watch.budget_unknown", needed=needed, reserved=total, label=label)
             return True
 
-        share = needed / self._limit if self._limit else 1.0
-        if needed > self._limit:
+        share = total / self._limit if self._limit else 1.0
+        if total > self._limit:
             log.error(
                 "watch.budget_exceeded",
                 needed=needed,
+                reserved=total,
+                label=label,
                 limit=self._limit,
                 detail="more directories than inotify can watch; the watch will fail "
                 "with 'No space left on device', which is not about disk space. "
@@ -117,13 +129,15 @@ class InotifyBudget:
             log.warning(
                 "watch.budget_tight",
                 needed=needed,
+                reserved=total,
+                label=label,
                 limit=self._limit,
                 used_share=round(share, 2),
                 detail="the limit is per user and shared with editors and language "
                 "servers already running",
             )
         else:
-            log.info("watch.budget", needed=needed, limit=self._limit)
+            log.info("watch.budget", needed=needed, reserved=total, label=label, limit=self._limit)
         return True
 
 
