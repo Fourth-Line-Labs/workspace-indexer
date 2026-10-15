@@ -272,3 +272,59 @@ def test_a_crash_in_one_watcher_names_it_and_cancels_the_others_before_closing(
     crashed = [e for e in entries if e["event"] == "watch.crashed"]
     assert len(crashed) == 1
     assert crashed[0]["workspace"] == "alpha"
+    # The window, so a reader filtering `watch.crashed` can tell a failure
+    # under a running watcher from one during construction.
+    assert crashed[0]["phase"] == "watching"
+
+
+def test_a_failure_before_any_watcher_starts_is_logged_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup window, which nothing covered.
+
+    `ctx.indexer()`, the `Watcher` constructor and `plan()`'s filesystem probe
+    all run before any watcher does, so none of them has a watcher to log
+    `watch.crashed` on its behalf. Without a handler of its own a failure here
+    ends an unattended run with a JSONL holding nothing after startup -- the
+    one outcome this logging exists to prevent -- so the *event* is the claim.
+    The exit code and the registry close are not: both hold with the handler
+    deleted.
+    """
+    import json
+
+    import workspace_indexer.watching as watching_module
+    from workspace_indexer.workspace_registry import WorkspaceRegistry
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    closed: list[str] = []
+    real_close = WorkspaceRegistry.close
+
+    async def recording_close(self: WorkspaceRegistry) -> None:
+        closed.append("registry closed")
+        await real_close(self)
+
+    class ExplodingWatcher:
+        def __init__(self, config: Any, **kwargs: Any) -> None:
+            raise RuntimeError("inotify instance limit reached")
+
+    monkeypatch.setattr(WorkspaceRegistry, "close", recording_close)
+    monkeypatch.setattr(watching_module, "Watcher", ExplodingWatcher)
+
+    result = CliRunner().invoke(app, ["watch", "--config", _config(tmp_path).as_posix()])
+
+    assert result.exit_code != 0
+    assert closed == ["registry closed"]
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "l-watch.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    crashed = [e for e in entries if e["event"] == "watch.crashed"]
+    assert len(crashed) == 1
+    assert crashed[0]["phase"] == "setup"
+    assert "inotify instance limit" in crashed[0]["error"]
+    # Not a clean stop: `watch.stopped` would tell the reader the run ended on
+    # purpose, which is the distinction the terminator exists to make.
+    assert not [e for e in entries if e["event"] == "watch.stopped"]

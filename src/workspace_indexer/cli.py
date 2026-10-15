@@ -891,40 +891,61 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     resolved = config or DEFAULT_CONFIG_PATH
 
     async def run() -> None:
-        # Everything inside the try, construction included. `ctx.indexer()`,
-        # building a Watcher and `plan()` can all raise -- the filesystem probe
-        # on an exotic mount, say -- and unwinding before the `finally` was
-        # armed would leak every manifest, every store and the embedded-Qdrant
-        # storage lock while logging nothing, which is the outcome this
-        # handler exists to prevent.
+        # Everything inside the outer try, construction included.
+        # `ctx.indexer()`, building a Watcher and `plan()` can all raise -- the
+        # filesystem probe on an exotic mount, say -- and unwinding before the
+        # `finally` was armed would leak every manifest, every store and the
+        # embedded-Qdrant storage lock. The inner try is what keeps such a
+        # failure from also being silent; its handler says why.
         try:
-            # One watcher per workspace, each over the single-workspace config
-            # it already expects. Nothing in the watching package knows
-            # workspaces exist -- and where two workspaces cover the same tree,
-            # both watchers see the save and each reindexes its own index,
-            # which is what has to happen: the file is in both.
-            #
-            # Reindexes are serialised through one lock. The stores are
-            # independent, so concurrent writes would be safe, but concurrent
-            # *embedding* calls are not free: one save in a shared repository
-            # would fire several API requests at once, which makes the cost of
-            # a keystroke unpredictable.
-            reindexing = asyncio.Lock()
-            # One budget, because inotify's limit is per user rather than per
-            # watch: a budget each would have every watcher report a fraction
-            # and nobody see the total.
-            budget = InotifyBudget.detect()
-            watchers = [
-                _build_watcher(Watcher, registry.context(name), name, resolved, reindexing, budget)
-                for name in registry.names
-            ]
+            try:
+                # One watcher per workspace, each over the single-workspace
+                # config it already expects. Nothing in the watching package
+                # knows workspaces exist -- and where two workspaces cover the
+                # same tree, both watchers see the save and each reindexes its
+                # own index, which is what has to happen: the file is in both.
+                #
+                # Reindexes are serialised through one lock. The stores are
+                # independent, so concurrent writes would be safe, but
+                # concurrent *embedding* calls are not free: one save in a
+                # shared repository would fire several API requests at once,
+                # which makes the cost of a keystroke unpredictable.
+                reindexing = asyncio.Lock()
+                # One budget, because inotify's limit is per user rather than
+                # per watch: a budget each would have every watcher report a
+                # fraction and nobody see the total.
+                budget = InotifyBudget.detect()
+                watchers = [
+                    _build_watcher(
+                        Watcher, registry.context(name), name, resolved, reindexing, budget
+                    )
+                    for name in registry.names
+                ]
 
-            for name, watcher in zip(registry.names, watchers, strict=True):
-                if len(watchers) > 1:
-                    console.rule(f"[bold]{name}[/bold]")
-                for label, mode in watcher.plan().items():
-                    console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
-            console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
+                for name, watcher in zip(registry.names, watchers, strict=True):
+                    if len(watchers) > 1:
+                        console.rule(f"[bold]{name}[/bold]")
+                    for label, mode in watcher.plan().items():
+                        console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
+                console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
+            except Exception as exc:
+                # Setup gets its own handler because nothing is running yet: no
+                # watcher exists to log `watch.crashed` for itself, so a failure
+                # here -- an indexer that cannot build, a Watcher constructor,
+                # `plan()`'s filesystem probe on an exotic mount -- would
+                # otherwise end an unattended run with a JSONL holding nothing
+                # after startup, which is the outcome this logging exists to
+                # prevent. No workspace is named: construction walks all of
+                # them and naming the wrong one is worse than naming none.
+                watch_log.error(
+                    "watch.crashed",
+                    phase="setup",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    exc_info=True,
+                )
+                console.print(f"[red]watch failed during setup: {exc}[/red]")
+                raise
 
             # A TaskGroup rather than `gather`. `gather` propagates the first
             # failure and leaves its siblings *running* -- measured -- so the
@@ -937,12 +958,9 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
             async with asyncio.TaskGroup() as group:
                 for name, watcher in zip(registry.names, watchers, strict=True):
                     group.create_task(_run_watcher(name, watcher))
-        except* Exception:
-            # Each watcher has already logged its own `watch.crashed` with its
-            # workspace attached, which is the thing a reader needs; re-raised
-            # so the command still exits non-zero.
-            raise
-        else:
+
+            # Reached only on a clean stop. Every failure path above raises,
+            # and each has logged its own `watch.crashed` on the way out.
             watch_log.info("watch.stopped", reason="completed")
         finally:
             await registry.close()
@@ -950,12 +968,13 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        # Caught out here, not inside `run`. `asyncio.gather` turns a task's
-        # KeyboardInterrupt into a CancelledError at the await site and lets
-        # the interrupt escape `asyncio.run` instead -- measured, not assumed
-        # -- so a handler inside the coroutine never sees it, and Ctrl-C would
-        # end the one way this command is meant to end as an untrapped
-        # traceback.
+        # Caught out here, not inside `run`. A TaskGroup holds a BaseException
+        # apart from the group it raises for ordinary failures and re-raises it
+        # bare, so a task's KeyboardInterrupt escapes `asyncio.run` unwrapped
+        # -- measured, not assumed -- and neither `except Exception` nor
+        # `except* Exception` inside the coroutine can see it. Without this,
+        # Ctrl-C would end the one way this command is meant to end as an
+        # untrapped traceback.
         watch_log.info("watch.stopped", reason="interrupted")
 
 
@@ -976,6 +995,7 @@ async def _run_watcher(name: str, watcher: Watcher) -> None:
         # visibly died, so the only evidence was on screen.
         watch_log.error(
             "watch.crashed",
+            phase="watching",
             workspace=name,
             error=str(exc),
             error_type=type(exc).__name__,
