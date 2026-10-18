@@ -35,6 +35,9 @@ class EvalResult(BaseModel):
     # trades a round trip against work we would otherwise do here, which a
     # store-only number would hide.
     duration_ms: float = 0.0
+    # Files matched before the rank cutoff, for retrievers that can exceed it.
+    # None where the notion does not apply, which is every dense retriever.
+    breadth: int | None = None
 
     @property
     def recall(self) -> float:

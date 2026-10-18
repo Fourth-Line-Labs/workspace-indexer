@@ -1,0 +1,194 @@
+{
+  "case_count": 8,
+  "case_filter": "guidance",
+  "config_hash": "370358757e18d584",
+  "dimensions": 1024,
+  "embedding_model": "voyageai:voyage-code-4",
+  "empty_rate": 0.0,
+  "flood_rate": 0.0,
+  "fusion": "rrf",
+  "label": "voyageai_voyage-code-4_1024 fusion=rrf tool=search cases=guidance",
+  "limit": 10,
+  "median_breadth": 0.0,
+  "median_ms": 491.3596659898758,
+  "miss_count": 3,
+  "mrr_at_k": 0.625,
+  "p95_ms": 628.7854718975723,
+  "recall_at_k": 0.625,
+  "recorded_at": "2026-10-18T22:10:49.657540+00:00",
+  "reranker": "voyageai:rerank-2.5-lite",
+  "results": [
+    {
+      "breadth": null,
+      "duration_ms": 497.4311147816479,
+      "expected": [
+        "PythonEngineeringStandards.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "chrome-bookmark-manager/README.md",
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "chrome-bookmark-manager/ai-docs/ralph-prompts/phase-1-read-only-bookmark-audit.md",
+        "chrome-bookmark-manager/ai-docs/RalphPromptReferences.md",
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "chrome-bookmark-manager/ai-docs/RalphPromptReferences.md",
+        "chrome-bookmark-manager/ai-docs/ChromeBookmarkProjectPhases.md",
+        "chrome-bookmark-manager/ai-docs/ralph-prompts/phase-1-read-only-bookmark-audit.md"
+      ],
+      "query": "how should I write Python for this project, what are the standards"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 628.7854718975723,
+      "expected": [
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/ralph.m.yml",
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/ralph.m.yml",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ai-workspace/workspace-indexer/tests/test_eval_retrievers.py",
+        "ralph-orchestrator/.claude/skills/code-assist/SKILL.md",
+        "ralph-orchestrator/presets/pdd-to-code-assist.yml",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ralph-orchestrator/.ralph/specs/tui-refactor/validation.md"
+      ],
+      "query": "what conventions must I follow when structuring a new module"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 421.5725208632648,
+      "expected": [
+        "specs/pi-agent-support/design.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/summary.md",
+        "ralph-orchestrator/specs/roo-cli-provider/design/detailed-design.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/reranker_factory.py",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/design/detailed-design.md"
+      ],
+      "query": "I need to add support for a new agent provider, how should it be designed"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 501.8965401686728,
+      "expected": [
+        "specs/agent-waves/requirements.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/specs/agent-waves/requirements.md",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ralph-orchestrator/specs/agent-waves/requirements.md",
+        "ralph-orchestrator/specs/agent-waves/requirements.md",
+        "ralph-orchestrator/docs/advanced/agent-waves.md",
+        "ralph-orchestrator/specs/agent-waves/design.md",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ralph-orchestrator/docs/advanced/agent-waves.md",
+        "ralph-orchestrator/specs/agent-waves/design.md",
+        "ralph-orchestrator/AGENTS.md"
+      ],
+      "query": "what are the requirements for running agents concurrently in waves"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 470.56055604480207,
+      "expected": [
+        "specs/hat-imports/design.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/rough-idea.md"
+      ],
+      "query": "how should reusable hat definitions be imported from local files"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 491.3596659898758,
+      "expected": [
+        "CONTRIBUTING.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/docs/contributing.md",
+        "ralph-orchestrator/docs/contributing/index.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/mcp/query_service.py",
+        "ralph-orchestrator/.ralph/specs/devenv-setup.spec.md",
+        "ralph-orchestrator/docs/contributing/setup.md",
+        "ralph-orchestrator/docs/contributing/style.md",
+        "ralph-orchestrator/.ralph/specs/devenv-setup.spec.md",
+        "ralph-orchestrator/.ralph/specs/devenv-setup.spec.md",
+        "ralph-orchestrator/docs/contributing/setup.md",
+        "ralph-orchestrator/docs/reference/changelog.md"
+      ],
+      "query": "how do I set up a development environment and submit a change"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 463.38880993425846,
+      "expected": [
+        "specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/summary.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/CHANGELOG.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/CHANGELOG.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md"
+      ],
+      "query": "what is the plan for adding lifecycle hooks to the orchestrator"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 478.9822748862207,
+      "expected": [
+        "docs/iteration-1-plan.md",
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "redacted/c41b00c99ca48331",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "chrome-bookmark-manager/src/chrome_bookmark_manager/logging_setup.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ralph-orchestrator/.ralph/specs/diagnostics/research/event-system.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py"
+      ],
+      "query": "how should this project handle logging and observability"
+    }
+  ],
+  "retriever": "search",
+  "schema_version": 1,
+  "space_slug": "voyageai_voyage-code-4_1024"
+}

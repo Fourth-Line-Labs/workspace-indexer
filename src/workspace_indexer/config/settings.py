@@ -45,6 +45,19 @@ class Settings(BaseSettings):
     # everything using the key, not only by this index.
     embedding_free_tier_tokens: int | None = None
 
+    # ---- evaluation ----
+    # Colon-separated absolute paths whose contents MAY appear in a recorded
+    # eval run. An allowlist: anything outside it is replaced by a digest
+    # before the record is written. `evals/` is committed to a public
+    # repository and the corpus is a whole workspace, so the default has to be
+    # "do not publish". The denylist this replaced leaked, because a denylist
+    # can only hide what someone remembered to name. Empty disables redaction
+    # entirely, and the CLI says so on every recorded run.
+    #
+    # Deliberately not part of `config_hash`: it changes what is written down,
+    # never what was measured.
+    eval_public_roots: str = ""
+
     # ---- sparse ----
     sparse_model: str = "Qdrant/bm25"
 

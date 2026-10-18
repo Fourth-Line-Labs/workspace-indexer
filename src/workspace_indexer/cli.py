@@ -15,11 +15,17 @@ from workspace_indexer.app_context import AppContext, configure_logging_for
 from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
 from workspace_indexer.evaluation import (
+    GREP,
+    RIPGREP,
+    EvalCase,
     EvalComparison,
     EvalHarness,
     EvalRecord,
+    LexicalRetriever,
+    PublicPathGuard,
     Retriever,
     SearchRetriever,
+    ToolMissingError,
     ToolRetriever,
     compare,
     latest_comparable,
@@ -28,6 +34,7 @@ from workspace_indexer.evaluation import (
     write_record,
     write_report,
 )
+from workspace_indexer.evaluation.lexical_tool import translate_excludes
 from workspace_indexer.evaluation.search_retriever import Fusion
 from workspace_indexer.graph import SUPPORTED as IMPORT_LANGUAGES
 from workspace_indexer.graph.origin_coverage import OriginCoverage
@@ -584,10 +591,13 @@ def evaluate(
     ] = True,
     tool: Annotated[
         str,
-        typer.Option("--tool", help="Retrieval surface: search | search_code | find_guidance"),
+        typer.Option(
+            "--tool",
+            help="Retrieval surface: search | search_code | find_guidance | grep | ripgrep",
+        ),
     ] = "search",
     group: Annotated[
-        str, typer.Option("--group", help="Case group: all | retrieval | guidance")
+        str, typer.Option("--group", help="Case group: all | retrieval | guidance | lexical")
     ] = "all",
 ) -> None:
     """Score retrieval quality against a dataset of query/expected-file pairs.
@@ -615,22 +625,43 @@ def evaluate(
                 if dimensions
                 else None
             )
-            retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank)
+            retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank, cases=cases)
+            # A lexical tool has no embedding space and no fusion mode, and
+            # the record's filename is built from this label -- so naming them
+            # here would produce `voyage-code-4_1024-...-tool-grep.json`, a file
+            # claiming an embedding model that had nothing to do with it.
+            lexical = tool in LEXICAL_TOOLS
             label = (
-                f"{(space or ctx.space).slug()} fusion={fusion or ctx.config.search.fusion} "
-                f"tool={retriever.name} cases={group}"
+                f"{retriever.name} cases={group}"
+                if lexical
+                else (
+                    f"{(space or ctx.space).slug()} "
+                    f"fusion={fusion or ctx.config.search.fusion} "
+                    f"tool={retriever.name} cases={group}"
+                )
             )
             report = await EvalHarness(retriever).run(cases, limit=limit, label=label)
             active = space or ctx.space
+            # A lexical tool has no embedding space, fusion or reranker, and
+            # recording the ambient ones would tie its runs to settings that
+            # cannot affect them -- two grep runs would stop comparing because
+            # an embedding model changed between them. `config_hash` still
+            # over-segments for the same reason; it errs towards refusing a
+            # comparison rather than making a false one, which is the safe
+            # direction, and is tracked separately.
             record = EvalRecord(
                 recorded_at=datetime.now(UTC).isoformat(),
                 label=label,
                 config_hash=ctx.settings.config_hash(ctx.config),
-                space_slug=active.slug(),
-                embedding_model=active.model,
-                dimensions=active.dimensions,
-                fusion=fusion or ctx.config.search.fusion,
-                reranker="none" if rerank is False else ctx.config.search.rerank.model,
+                space_slug="n/a" if lexical else active.slug(),
+                embedding_model="n/a" if lexical else active.model,
+                dimensions=0 if lexical else active.dimensions,
+                fusion="n/a" if lexical else (fusion or ctx.config.search.fusion),
+                reranker=(
+                    "n/a"
+                    if lexical
+                    else ("none" if rerank is False else ctx.config.search.rerank.model)
+                ),
                 limit=limit,
                 retriever=retriever.name,
                 case_filter=group,
@@ -640,12 +671,36 @@ def evaluate(
                 miss_count=len(report.misses),
                 median_ms=report.median_ms,
                 p95_ms=report.p95_ms,
+                empty_rate=report.empty_rate,
+                flood_rate=report.flood_rate,
+                median_breadth=report.median_breadth,
                 results=report.results,
             )
+            # `evals/` is committed to a public repository and the corpus is
+            # a whole workspace, so anything a broad pattern matched under a
+            # private root is redacted before the record reaches disk. No
+            # expectation names private code, so this moves no number.
+            guard = PublicPathGuard.parse(
+                ctx.settings.eval_public_roots, [r.path for r in ctx.config.workspace.roots]
+            )
+            if save and not guard.active:
+                # The one line that would have caught the leak. A privacy
+                # control that is off should never be indistinguishable from
+                # one that found nothing to do.
+                console.print(
+                    "[yellow]EVAL_PUBLIC_ROOTS is unset: every matched path will be "
+                    "recorded verbatim.[/yellow]"
+                )
+            record = guard.apply(record)
             # Written before the comparison, so an interrupted comparison does
             # not lose the measurement that was just paid for.
             saved = write_record(record) if save else None
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ToolMissingError) as exc:
+            # ToolMissingError is raised lazily on first use, which puts it
+            # inside the harness run rather than at construction. Without it
+            # here, `eval --tool ripgrep` on a machine without rg exits 1 with
+            # a stack dump where every other expected environment problem in
+            # this CLI is a red line and exit 2.
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=2) from exc
         finally:
@@ -663,6 +718,15 @@ def evaluate(
             f"p95 [cyan]{report.p95_ms:.0f} ms[/cyan], "
             f"slowest {report.slowest_ms:.0f} ms"
         )
+        if report.median_breadth or report.empty_rate or report.flood_rate:
+            # Only for a retriever that can miss by saying nothing or by saying
+            # everything. Printed beside recall because recall scores the flood
+            # as a success and the silence as an ordinary miss.
+            console.print(
+                f"  breadth:   median [cyan]{report.median_breadth:.0f} files[/cyan], "
+                f"empty [cyan]{report.empty_rate:.0%}[/cyan], "
+                f"flood [cyan]{report.flood_rate:.0%}[/cyan]"
+            )
         for miss in report.misses:
             console.print(f"  [yellow]miss[/yellow] {miss.query}")
             console.print(f"    expected {miss.expected}")
@@ -686,6 +750,9 @@ def evaluate(
     asyncio.run(run())
 
 
+LEXICAL_TOOLS = {"grep": GREP, "ripgrep": RIPGREP}
+
+
 def _retriever(
     ctx: AppContext,
     space: EmbeddingSpace | None,
@@ -693,13 +760,50 @@ def _retriever(
     tool: str,
     fusion: str | None,
     rerank: bool | None,
+    cases: list[EvalCase],
 ) -> Retriever:
     """Pick the surface to score.
 
     The MCP tools are constructed over the same search service the baseline
     uses, so a difference between them is the tool's document-type policy and
     nothing else.
+
+    The lexical tools are here for the opposite reason: they share nothing with
+    the index except the corpus and the dataset, which is what makes a number
+    from one comparable to a number from the other at all.
     """
+    if tool in LEXICAL_TOOLS:
+        # `not pattern`, not `is None`. An empty string is representable in the
+        # dataset and is not None, so it cleared this check and then died
+        # mid-run inside the retriever as a raw KeyError -- losing a run
+        # already partly paid for, and disagreeing with the retriever about
+        # what counts as a missing pattern.
+        missing = [case.query for case in cases if not case.grep_pattern]
+        if missing:
+            console.print(
+                f"[red]{len(missing)} case(s) have no grep_pattern, so "
+                f"--tool {tool} would be scored against a strawman:[/red]"
+            )
+            for query in missing[:5]:
+                console.print(f"  [yellow]{query}[/yellow]")
+            raise typer.Exit(code=2)
+        # The index's *effective* exclusions, not the user-editable list.
+        # `HARDCODED_EXCLUDES` keeps `evals/`, `logs/` and the baselines table
+        # out of the index because each quotes every eval query verbatim, and
+        # `excluded_paths` does the same for the dataset, which also quotes
+        # every pattern. A lexical tool without them searches the harness's own
+        # output: measured, and `config/eval.yaml` came back rank 1 for five of
+        # eight lexical queries because it contains their answers.
+        dirs, files = translate_excludes(ctx.config.all_excludes)
+        files = (*files, *sorted({path.name for path in ctx.config.excluded_paths}))
+        return LexicalRetriever(
+            LEXICAL_TOOLS[tool],
+            [root.path for root in ctx.config.workspace.roots],
+            {case.query: pattern for case in cases if (pattern := case.grep_pattern)},
+            dirs,
+            files,
+        )
+
     if tool == "search":
         return SearchRetriever(
             ctx.search_service(space),
@@ -716,7 +820,9 @@ def _retriever(
     if tool == "find_guidance":
         return ToolRetriever("find_guidance", lambda q, n: queries.find_guidance(q, limit=n))
 
-    console.print(f"[red]unknown --tool {tool!r}: search | search_code | find_guidance[/red]")
+    console.print(
+        f"[red]unknown --tool {tool!r}: search | search_code | find_guidance | grep | ripgrep[/red]"
+    )
     raise typer.Exit(code=2)
 
 

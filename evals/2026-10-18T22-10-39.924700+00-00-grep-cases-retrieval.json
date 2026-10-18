@@ -1,0 +1,180 @@
+{
+  "case_count": 8,
+  "case_filter": "retrieval",
+  "config_hash": "370358757e18d584",
+  "dimensions": 0,
+  "embedding_model": "n/a",
+  "empty_rate": 0.125,
+  "flood_rate": 0.625,
+  "fusion": "n/a",
+  "label": "grep cases=retrieval",
+  "limit": 10,
+  "median_breadth": 67.0,
+  "median_ms": 56.53902096673846,
+  "miss_count": 4,
+  "mrr_at_k": 0.234375,
+  "p95_ms": 71.01183012127876,
+  "recall_at_k": 0.625,
+  "recorded_at": "2026-10-18T22:10:39.924700+00:00",
+  "reranker": "n/a",
+  "results": [
+    {
+      "breadth": 0,
+      "duration_ms": 48.954714089632034,
+      "expected": [
+        "state/manifest.py"
+      ],
+      "first_hit_rank": null,
+      "found": [],
+      "query": "how does the indexer decide whether a file needs reindexing"
+    },
+    {
+      "breadth": 38,
+      "duration_ms": 54.70782890915871,
+      "expected": [
+        "storage/qdrant_store.py"
+      ],
+      "first_hit_rank": 4,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ralph-orchestrator/backend/ralph-web-server/src/runner/ProcessSupervisor.ts",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/qdrant_store.py",
+        "ralph-orchestrator/crates/ralph-e2e/src/hooks_bdd.rs",
+        "ralph-orchestrator/docs/advanced/loop-detection.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/embedding/fastembed_sparse_backend.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_store.py",
+        "ai-workspace/workspace-indexer/tests/test_fastembed_sparse_backend.py",
+        "redacted/c41b00c99ca48331"
+      ],
+      "query": "where do we set the BM25 inverse document frequency modifier"
+    },
+    {
+      "breadth": 81,
+      "duration_ms": 65.20186783745885,
+      "expected": [
+        "chunking/code_chunker.py"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
+        "ralph-orchestrator/package-lock.json",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "redacted/6807c627266ea37b",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ai-workspace/workspace-indexer/tests/test_chunk_id.py",
+        "ai-workspace/workspace-indexer/tests/test_markdown_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/markdown_chunker.py",
+        "ai-workspace/workspace-indexer/tests/test_manifest.py"
+      ],
+      "query": "how are code chunks given their enclosing class or function name"
+    },
+    {
+      "breadth": 113,
+      "duration_ms": 55.51298800855875,
+      "expected": [
+        "search/staleness.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/tests/integration_events_isolation.rs",
+        "ai-workspace/workspace-indexer/tests/test_staleness.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/staleness.py",
+        "ralph-orchestrator/crates/ralph-core/src/event_loop/mod.rs",
+        "ralph-orchestrator/crates/ralph-core/src/loop_registry.rs",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ralph-orchestrator/crates/ralph-cli/src/loops.rs",
+        "ai-workspace/workspace-indexer/docs/deployment.md",
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs"
+      ],
+      "query": "what stops a search result showing text that no longer matches the file"
+    },
+    {
+      "breadth": 67,
+      "duration_ms": 57.00543895363808,
+      "expected": [
+        "state/manifest.py",
+        "chunking/file_reader.py"
+      ],
+      "first_hit_rank": 8,
+      "found": [
+        "ai-workspace/workspace-indexer/poetry.lock",
+        "redacted/edf32b75be870c73",
+        "ralph-orchestrator/Cargo.lock",
+        "chrome-bookmark-manager/poetry.lock",
+        "ralph-orchestrator/uv.lock",
+        "ralph-orchestrator/flake.lock",
+        "redacted/b3a5e9d15c0bb83f",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "redacted/0c67a79bd65e0f68",
+        "redacted/d87e95cdaa7bede3"
+      ],
+      "query": "how do we avoid re-embedding a file that was only reformatted"
+    },
+    {
+      "breadth": 14,
+      "duration_ms": 56.53902096673846,
+      "expected": [
+        "rerank/reranker_factory.py",
+        "rerank/noop_reranker.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/tests/test_search_service.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/reranker_factory.py",
+        "ai-workspace/workspace-indexer/tests/test_reranker_factory.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/__init__.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/search_service.py",
+        "ai-workspace/workspace-indexer/tests/test_mcp_server.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/server_reranker.py",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ai-workspace/workspace-indexer/CLAUDE.md"
+      ],
+      "query": "how is reranking turned off when there is no API key"
+    },
+    {
+      "breadth": 160,
+      "duration_ms": 71.01183012127876,
+      "expected": [
+        "search/reprojector.py"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_reprojector.py",
+        "ralph-orchestrator/crates/ralph-cli/src/memory.rs",
+        "ralph-orchestrator/crates/ralph-core/src/text.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/loops.rs",
+        "ai-workspace/workspace-indexer/tests/test_embedding_service.py",
+        "ralph-orchestrator/crates/ralph-core/src/handoff.rs",
+        "ralph-orchestrator/crates/ralph-adapters/src/stream_handler.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/display.rs",
+        "ralph-orchestrator/crates/ralph-adapters/src/claude_stream.rs",
+        "ralph-orchestrator/crates/ralph-core/src/hooks/executor.rs"
+      ],
+      "query": "truncating a vector to fewer dimensions without re-embedding"
+    },
+    {
+      "breadth": 6,
+      "duration_ms": 48.95144887268543,
+      "expected": [
+        "obs/context.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_no_leaks.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/context.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ai-workspace/workspace-indexer/tests/test_reference_doc.py",
+        "ai-workspace/workspace-indexer/tests/test_logging_setup.py"
+      ],
+      "query": "why does a log line know which file caused it"
+    }
+  ],
+  "retriever": "grep",
+  "schema_version": 1,
+  "space_slug": "n/a"
+}

@@ -17,6 +17,7 @@ import yaml
 from workspace_indexer.evaluation.eval_case import EvalCase
 from workspace_indexer.evaluation.eval_report import EvalReport
 from workspace_indexer.evaluation.eval_result import EvalResult, path_matches
+from workspace_indexer.evaluation.reports_breadth import ReportsBreadth
 from workspace_indexer.evaluation.retriever import Retriever
 from workspace_indexer.obs.logging import get_logger
 
@@ -55,6 +56,15 @@ class EvalHarness:
             started = time.perf_counter()
             found = await self._retriever.retrieve(case.query, limit)
             elapsed = (time.perf_counter() - started) * 1000
+            # Asked after the call rather than returned from it: a retriever
+            # that cannot exceed the cutoff has no breadth worth reporting, and
+            # making every retriever return one would mean inventing a number
+            # for the dense path that only restates `limit`.
+            breadth = (
+                self._retriever.last_breadth
+                if isinstance(self._retriever, ReportsBreadth)
+                else None
+            )
             results.append(
                 EvalResult(
                     query=case.query,
@@ -62,6 +72,7 @@ class EvalHarness:
                     found=found,
                     first_hit_rank=_first_rank(case.expect, found),
                     duration_ms=elapsed,
+                    breadth=breadth,
                 )
             )
 
@@ -76,6 +87,8 @@ class EvalHarness:
             misses=len(report.misses),
             median_ms=round(report.median_ms, 1),
             p95_ms=round(report.p95_ms, 1),
+            empty_rate=round(report.empty_rate, 3),
+            flood_rate=round(report.flood_rate, 3),
         )
         return report
 

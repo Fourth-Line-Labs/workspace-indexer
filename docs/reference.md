@@ -388,6 +388,7 @@ override both.
 | `dimensions` | `EMBEDDING_DIMENSIONS` | |
 | `quantization` | `EMBEDDING_QUANTIZATION` | `float32`, `int8` or `binary`. |
 | `sparse_model` | `SPARSE_MODEL` | Part of the collection name, so changing it is a separate space. |
+| — | `EVAL_PUBLIC_ROOTS` | Colon-separated absolute paths whose contents may appear in a recorded eval run. An **allowlist**: every matched path outside it becomes `redacted/<digest>` before the record is written, because `evals/` is committed and an eval searches the whole workspace. A denylist was tried first and leaked — it can only hide what someone remembered to name. Empty disables redaction, and the CLI warns on every recorded run while it is. No expectation names a redacted path, so no score moves. |
 | `price_per_mtok` | `EMBEDDING_PRICE_PER_MTOK` | See above: without it the workspace is costed at another model's rate. |
 
 | key | default | |

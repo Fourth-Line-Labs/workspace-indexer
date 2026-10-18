@@ -6,6 +6,12 @@ from pydantic import BaseModel
 
 from workspace_indexer.evaluation.eval_result import EvalResult
 
+# How many times the rank cutoff a result has to exceed before it is a flood
+# rather than a generous answer. Three is a judgement, not a measurement: at
+# -n 10 it means thirty files, which is more than an agent will open and few
+# enough that a genuinely well-targeted pattern stays under it.
+FLOOD_FACTOR = 3
+
 
 class EvalReport(BaseModel):
     label: str
@@ -45,14 +51,61 @@ class EvalReport(BaseModel):
         return self._percentile(0.95)
 
     @property
+    def empty_rate(self) -> float:
+        """Share of queries the retriever answered with nothing at all.
+
+        An agent can act on a wrong answer -- it reads the file and moves on.
+        It cannot act on silence, and a tool that is silent one query in three
+        is not a tool an agent should reach for first, whatever its recall on
+        the queries it does answer.
+        """
+        scored = [r for r in self.results if r.breadth is not None]
+        if not scored:
+            return 0.0
+        return sum(1 for r in scored if r.breadth == 0) / len(scored)
+
+    @property
+    def flood_rate(self) -> float:
+        """Share of queries that matched more than `flood_factor` x the cutoff.
+
+        The failure recall@k is blind to. A pattern matching four hundred files
+        has not found anything: the right file is in there, so recall scores it
+        a win, while the agent is handed a haystack and the ranking that
+        decided which ten of the four hundred it sees is match count, which is
+        not relevance. Counted against the cutoff rather than a flat number so
+        it still means the same thing at a different -n.
+        """
+        scored = [r for r in self.results if r.breadth is not None]
+        if not scored:
+            return 0.0
+        ceiling = self.limit * FLOOD_FACTOR
+        return sum(1 for r in scored if (r.breadth or 0) > ceiling) / len(scored)
+
+    @property
+    def median_breadth(self) -> float:
+        """Typical number of files matched, for retrievers that report it.
+
+        Through the same nearest-rank index as `median_ms`. Taking the
+        upper-middle element here while `_percentile` takes the lower-middle
+        one for some even samples would print a report whose two "typical"
+        numbers follow different rules -- and the rule would flip silently the
+        next time the dataset gained two cases.
+        """
+        widths = sorted(float(r.breadth) for r in self.results if r.breadth is not None)
+        return _at(widths, 0.5)
+
+    @property
     def slowest_ms(self) -> float:
         return max((r.duration_ms for r in self.results), default=0.0)
 
     def _percentile(self, share: float) -> float:
-        timings = sorted(r.duration_ms for r in self.results)
-        if not timings:
-            return 0.0
-        # Nearest-rank. Exact interpolation is false precision over sixteen
-        # samples, and the ranking between two backends is what this decides.
-        index = min(len(timings) - 1, int(round(share * (len(timings) - 1))))
-        return timings[index]
+        return _at(sorted(r.duration_ms for r in self.results), share)
+
+
+def _at(values: list[float], share: float) -> float:
+    """Nearest-rank. Exact interpolation is false precision over sixteen
+    samples, and the ranking between two backends is what this decides."""
+    if not values:
+        return 0.0
+    index = min(len(values) - 1, int(round(share * (len(values) - 1))))
+    return values[index]

@@ -28,4 +28,10 @@ HARDCODED_EXCLUDES: tuple[str, ...] = (
     "**/evals/**",
     "docs/eval-baselines.md",
     "**/docs/eval-baselines.md",
+    # The write-up of the grep comparison quotes eval queries and the patterns
+    # they are scored with, so it is an eval artefact in the same sense as a
+    # record: a lexical tool allowed to read it matches the terms it is being
+    # measured on.
+    "docs/grep-comparison.md",
+    "**/docs/grep-comparison.md",
 )
