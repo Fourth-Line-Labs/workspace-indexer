@@ -9,7 +9,7 @@ created: 2026-08-27
 updated: 2026-10-18
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
-source_ref: "feat/multi-workspace-watch @ 64b7239"
+source_ref: "feat/multi-workspace-watch @ 9e3901d"
 confidential: false
 audience: "someone looking up a command, flag or default -- human or LLM"
 ---
