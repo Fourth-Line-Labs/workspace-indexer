@@ -108,7 +108,9 @@ class Watcher:
             for directory in watched
             if any(directory == base or base in directory.parents for base in native_roots)
         )
-        self._budget.check(needed)
+        # Labelled with the workspace, so a cumulative total in the log can
+        # be attributed rather than read as this watcher's own figure.
+        self._budget.check(needed, label=self._config.workspace.name)
 
     async def run(self, stop: asyncio.Event | None = None) -> None:
         """Watch until cancelled, reindexing each root whose files changed."""
