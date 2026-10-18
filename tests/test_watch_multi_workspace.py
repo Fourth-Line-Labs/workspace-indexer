@@ -306,7 +306,10 @@ def test_a_failure_before_any_watcher_starts_is_logged_too(
 
     class ExplodingWatcher:
         def __init__(self, config: Any, **kwargs: Any) -> None:
-            raise RuntimeError("inotify instance limit reached")
+            # The *second* workspace, so the event has to carry the name rather
+            # than happening to be right about the first one it tried.
+            if config.workspace.name == "beta":
+                raise RuntimeError("inotify instance limit reached")
 
     monkeypatch.setattr(WorkspaceRegistry, "close", recording_close)
     monkeypatch.setattr(watching_module, "Watcher", ExplodingWatcher)
@@ -324,7 +327,43 @@ def test_a_failure_before_any_watcher_starts_is_logged_too(
     crashed = [e for e in entries if e["event"] == "watch.crashed"]
     assert len(crashed) == 1
     assert crashed[0]["phase"] == "setup"
+    assert crashed[0]["workspace"] == "beta"
     assert "inotify instance limit" in crashed[0]["error"]
     # Not a clean stop: `watch.stopped` would tell the reader the run ended on
     # purpose, which is the distinction the terminator exists to make.
     assert not [e for e in entries if e["event"] == "watch.stopped"]
+
+
+def test_a_window_wide_setup_failure_names_no_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the naming claim.
+
+    `InotifyBudget.detect()` runs once for the whole run, before any workspace
+    is touched. A name attached here would be a guess, and a guess sends the
+    operator to an innocent workspace -- so the null is the assertion, not an
+    accident of the event being built without one.
+    """
+    import json
+
+    import workspace_indexer.watching.inotify_budget as budget_module
+
+    isolate_context_env(monkeypatch, tmp_path)
+
+    def explode() -> Any:
+        raise RuntimeError("/proc/sys/fs/inotify is not readable")
+
+    monkeypatch.setattr(budget_module.InotifyBudget, "detect", staticmethod(explode))
+
+    result = CliRunner().invoke(app, ["watch", "--config", _config(tmp_path).as_posix()])
+
+    assert result.exit_code != 0
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "l-watch.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    crashed = [e for e in entries if e["event"] == "watch.crashed"]
+    assert len(crashed) == 1
+    assert crashed[0]["phase"] == "setup"
+    assert crashed[0]["workspace"] is None

@@ -897,6 +897,13 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
         # `finally` was armed would leak every manifest, every store and the
         # embedded-Qdrant storage lock. The inner try is what keeps such a
         # failure from also being silent; its handler says why.
+        # Which workspace setup is working on, so a failure there can name it
+        # the way `_run_watcher` names one in the watching window. Bound out
+        # here because the handler reads it on any path. `None` outside the
+        # loops below: the lock and the budget are window-wide, and pinning a
+        # name on them would send the reader to an innocent workspace.
+        building: str | None = None
+
         try:
             try:
                 # One watcher per workspace, each over the single-workspace
@@ -915,18 +922,23 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
                 # per watch: a budget each would have every watcher report a
                 # fraction and nobody see the total.
                 budget = InotifyBudget.detect()
-                watchers = [
-                    _build_watcher(
-                        Watcher, registry.context(name), name, resolved, reindexing, budget
+
+                watchers: list[Watcher] = []
+                for name in registry.names:
+                    building = name
+                    watchers.append(
+                        _build_watcher(
+                            Watcher, registry.context(name), name, resolved, reindexing, budget
+                        )
                     )
-                    for name in registry.names
-                ]
 
                 for name, watcher in zip(registry.names, watchers, strict=True):
+                    building = name
                     if len(watchers) > 1:
                         console.rule(f"[bold]{name}[/bold]")
                     for label, mode in watcher.plan().items():
                         console.print(f"  {label}: [cyan]{mode.value}[/cyan]")
+                building = None
                 console.print("[dim]Watching. Ctrl-C to stop.[/dim]")
             except Exception as exc:
                 # Setup gets its own handler because nothing is running yet: no
@@ -935,16 +947,19 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
                 # `plan()`'s filesystem probe on an exotic mount -- would
                 # otherwise end an unattended run with a JSONL holding nothing
                 # after startup, which is the outcome this logging exists to
-                # prevent. No workspace is named: construction walks all of
-                # them and naming the wrong one is worse than naming none.
+                # prevent. Nearly all of it runs per workspace, so `building`
+                # usually names the one that failed; a null `workspace` means
+                # the failure was window-wide, not that it was unattributable.
                 watch_log.error(
                     "watch.crashed",
                     phase="setup",
+                    workspace=building,
                     error=str(exc),
                     error_type=type(exc).__name__,
                     exc_info=True,
                 )
-                console.print(f"[red]watch failed during setup: {exc}[/red]")
+                where = f"{building}: " if building is not None else ""
+                console.print(f"[red]{where}watch failed during setup: {exc}[/red]")
                 raise
 
             # A TaskGroup rather than `gather`. `gather` propagates the first
@@ -959,8 +974,17 @@ def watch(config: ConfigOption = None, workspace: WorkspaceOption = None) -> Non
                 for name, watcher in zip(registry.names, watchers, strict=True):
                     group.create_task(_run_watcher(name, watcher))
 
-            # Reached only on a clean stop. Every failure path above raises,
-            # and each has logged its own `watch.crashed` on the way out.
+            # Reached only on a clean stop. Every path above that raises an
+            # `Exception` logs its own `watch.crashed` first -- setup in the
+            # handler above, a running watcher in `_run_watcher`. That is the
+            # whole of the claim: a `BaseException` out of a watcher is not
+            # covered, because `_run_watcher` catching one would also catch
+            # `CancelledError`, which the TaskGroup raises in every sibling
+            # when one crashes -- measured -- so each cancelled watcher would
+            # log a `watch.crashed` of its own beside the single real one, and
+            # the JSONL would name every workspace but the guilty one. The
+            # `BaseException` that actually happens here is Ctrl-C, logged as
+            # the clean stop it is below.
             watch_log.info("watch.stopped", reason="completed")
         finally:
             await registry.close()

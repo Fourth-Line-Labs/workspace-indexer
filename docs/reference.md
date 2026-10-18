@@ -6,10 +6,10 @@ summary: >-
   storage backends and their differences, where reranking runs and which
   environments can run it, cluster sizing limits, and the indexing brakes.
 created: 2026-08-27
-updated: 2026-10-08
+updated: 2026-10-18
 tags: [reference, configuration, cli, mcp, storage, reranking]
 status: current
-source_ref: "main @ 2053f81"
+source_ref: "feat/multi-workspace-watch @ 64b7239"
 confidential: false
 audience: "someone looking up a command, flag or default -- human or LLM"
 ---
@@ -332,7 +332,7 @@ console-only report is a report to nobody:
 | event | when |
 |---|---|
 | `watch.reindex_failed` | one root's reindex raised; the watcher keeps going |
-| `watch.crashed` | anything raised out of the watch loop; the process ends |
+| `watch.crashed` | the run ends on a failure, with `phase` naming the window: `setup` while the watchers are being built, `watching` from a running one. Carries `workspace` wherever one is known — null only for the window-wide setup steps |
 | `watch.stopped` | clean exit, with `reason` of `completed` or `interrupted` |
 
 The terminator matters: a log ending at `watch.start` used to be ambiguous
