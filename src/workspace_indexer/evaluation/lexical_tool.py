@@ -73,10 +73,21 @@ GREP = LexicalTool(
     exclude_file_template="--exclude={name}",
 )
 
+# --hidden, because `Walker` indexes hidden files and directories deliberately
+# -- `.claude/` is a primary target, not something to skip -- while ripgrep
+# skips them by default and grep does not. Measured before it was fixed: over
+# the 24-case dataset grep returned ten hits under hidden directories and
+# ripgrep returned none, and their total breadth differed by 109 files. Two
+# tools scoring the same while reading different corpora is the failure this
+# comparison is least able to detect from its own output.
+#
+# Only hidden files; gitignore handling stays as it is. That difference is
+# real, is one of the things the comparison is for, and is reported rather
+# than flattened.
 RIPGREP = LexicalTool(
     name="ripgrep",
     binary="rg",
-    flags=("-c", "-i"),
+    flags=("-c", "-i", "--hidden"),
     exclude_dir_template="--glob=!{name}/",
     exclude_file_template="--glob=!{name}",
 )
@@ -92,24 +103,41 @@ def translate_excludes(patterns: list[str]) -> tuple[tuple[str, ...], tuple[str,
     given the same exclusions searches the harness's own output and scores it,
     which is how a comparison ends up measuring itself.
 
-    `name/**` and `**/name/**` become a directory; anything else contributes
-    its last segment as a file glob. Only the final segment survives, so a
-    rooted pattern like `**/data/qdrant/**` excludes any `qdrant` directory
-    rather than only that one. Over-exclusion, and deliberately the chosen
-    direction: searching *more* than the index is what invalidates a run.
+    `name/**`, `**/name/**` and `name/` all become a directory; anything else
+    contributes its last segment as a file glob. Only the final segment
+    survives, so a rooted pattern like `**/data/qdrant/**` excludes any
+    `qdrant` directory rather than only that one. Over-exclusion, and
+    deliberately the chosen direction: searching *more* than the index is what
+    invalidates a run.
+
+    The trailing-slash spelling is a directory to `IgnoreMatcher` and is how a
+    user writes one in `index.exclude`. Taking its last segment as a file glob
+    produced the empty string, which excluded nothing and left the tools
+    searching a directory the index does not have.
     """
     dirs: list[str] = []
     files: list[str] = []
     for pattern in patterns:
         trimmed = pattern.removeprefix("**/")
+        directory = None
         if trimmed.endswith("/**"):
-            name = trimmed[: -len("/**")].split("/")[-1]
+            directory = trimmed[: -len("/**")]
+        elif trimmed.endswith("/"):
+            directory = trimmed.rstrip("/")
+        if directory is not None:
+            name = directory.split("/")[-1]
             if set(name) & _GLOB_METACHARACTERS:
                 raise ValueError(
                     f"exclusion {pattern!r} names a directory with glob characters, which "
                     "cannot be passed to grep and ripgrep as the same literal"
                 )
-            dirs.append(name)
-        else:
-            files.append(trimmed.split("/")[-1])
+            if name:
+                dirs.append(name)
+            continue
+        name = trimmed.split("/")[-1]
+        # An empty glob is not a no-op: it reaches the tools as `--exclude=`,
+        # which is a pattern matching nothing and reads in the argv as though
+        # something had been excluded.
+        if name:
+            files.append(name)
     return tuple(dict.fromkeys(dirs)), tuple(dict.fromkeys(files))

@@ -648,7 +648,7 @@ def evaluate(
                     console.print(f"[red]no cases in group {group!r}[/red]")
                     raise typer.Exit(code=2)
             if ctx is None:
-                retriever = _lexical_retriever(
+                retriever = build_lexical_retriever(
                     active_config, tool=tool, cases=cases, dataset=dataset_path
                 )
                 # A lexical tool has no embedding space, fusion or reranker,
@@ -795,7 +795,7 @@ def evaluate(
 LEXICAL_TOOLS = {"grep": GREP, "ripgrep": RIPGREP}
 
 
-def _lexical_retriever(
+def build_lexical_retriever(
     config: WorkspaceConfig,
     *,
     tool: str,
@@ -803,6 +803,11 @@ def _lexical_retriever(
     dataset: Path,
 ) -> Retriever:
     """A command-line search tool scored over the index's own corpus.
+
+    Public because the corpus it assembles is the whole measurement, and the
+    test that asserts the tools search exactly what the walker indexes has to
+    exercise this rather than a copy of it -- three confounds in a row were
+    about which exclusions reach the tools, which is decided here.
 
     Shares nothing with the index except the corpus and the dataset, which is
     what makes a number from one comparable to a number from the other at all
@@ -867,6 +872,7 @@ def _lexical_retriever(
         {case.query: pattern for case in cases if (pattern := case.grep_pattern)},
         dirs,
         files,
+        config.index.max_file_bytes,
     )
 
 

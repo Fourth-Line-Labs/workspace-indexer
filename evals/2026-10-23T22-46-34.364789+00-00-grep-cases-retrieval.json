@@ -10,17 +10,17 @@
   "label": "grep cases=retrieval",
   "limit": 10,
   "median_breadth": 61.0,
-  "median_ms": 58.41005500406027,
+  "median_ms": 63.84583399631083,
   "miss_count": 4,
   "mrr_at_k": 0.28125,
-  "p95_ms": 71.68857706710696,
+  "p95_ms": 85.39172005839646,
   "recall_at_k": 0.625,
-  "recorded_at": "2026-10-23T21:35:13.497799+00:00",
+  "recorded_at": "2026-10-23T22:46:34.364789+00:00",
   "reranker": "n/a",
   "results": [
     {
       "breadth": 0,
-      "duration_ms": 49.65288005769253,
+      "duration_ms": 50.30437093228102,
       "expected": [
         "state/manifest.py"
       ],
@@ -31,7 +31,7 @@
     },
     {
       "breadth": 37,
-      "duration_ms": 53.451577899977565,
+      "duration_ms": 56.70310603454709,
       "expected": [
         "storage/qdrant_store.py"
       ],
@@ -53,7 +53,7 @@
     },
     {
       "breadth": 79,
-      "duration_ms": 64.05680300667882,
+      "duration_ms": 72.8692808188498,
       "expected": [
         "chunking/code_chunker.py"
       ],
@@ -75,7 +75,7 @@
     },
     {
       "breadth": 113,
-      "duration_ms": 55.53319817408919,
+      "duration_ms": 68.54482810012996,
       "expected": [
         "search/staleness.py"
       ],
@@ -97,7 +97,7 @@
     },
     {
       "breadth": 61,
-      "duration_ms": 58.60459920950234,
+      "duration_ms": 63.84583399631083,
       "expected": [
         "state/manifest.py",
         "chunking/file_reader.py"
@@ -120,7 +120,7 @@
     },
     {
       "breadth": 14,
-      "duration_ms": 58.41005500406027,
+      "duration_ms": 57.53222992643714,
       "expected": [
         "rerank/reranker_factory.py",
         "rerank/noop_reranker.py"
@@ -143,7 +143,7 @@
     },
     {
       "breadth": 159,
-      "duration_ms": 71.68857706710696,
+      "duration_ms": 85.39172005839646,
       "expected": [
         "search/reprojector.py"
       ],
@@ -165,7 +165,7 @@
     },
     {
       "breadth": 6,
-      "duration_ms": 48.43841399997473,
+      "duration_ms": 47.9561579413712,
       "expected": [
         "obs/context.py"
       ],

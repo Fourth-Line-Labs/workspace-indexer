@@ -22,6 +22,7 @@ import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
+from workspace_indexer.discovery.git_metadata import is_linked_worktree
 from workspace_indexer.evaluation.lexical_tool import LexicalTool
 from workspace_indexer.evaluation.missing_pattern_error import MissingPatternError
 from workspace_indexer.obs.logging import get_logger
@@ -50,6 +51,7 @@ class LexicalRetriever:
         patterns: Mapping[str, str],
         exclude_dirs: tuple[str, ...] = (),
         exclude_files: tuple[str, ...] = (),
+        max_file_bytes: int | None = None,
     ) -> None:
         # Labelled, not bare paths. A recorded hit is prefixed with the root it
         # came from when there is more than one, and the basename is not an
@@ -73,6 +75,16 @@ class LexicalRetriever:
         self._patterns = patterns
         self._exclude_dirs = exclude_dirs
         self._exclude_files = exclude_files
+        # Two of the walker's eligibility rules are not patterns and so cannot
+        # be handed to a binary: it rejects a file over `max_file_bytes`
+        # (`walker.py:180`) and prunes a directory that is a linked worktree
+        # (`walker.py:129`), which holds a second copy of a repository already
+        # indexed. A match in either is a file the index does not contain, and
+        # it takes a result slot and inflates breadth exactly as a lockfile
+        # did. Enforced after the run rather than before it, because grep has
+        # no size flag at all and neither binary knows what a worktree is.
+        self._max_file_bytes = max_file_bytes
+        self._worktrees: dict[Path, bool] = {}
         self.name = tool.name
         # How many files matched before the rank cutoff. The harness reads it
         # after each call, because recall@k cannot express either failure that
@@ -98,6 +110,8 @@ class LexicalRetriever:
         counts: dict[tuple[str, str], int] = {}
         for label, root in self._roots:
             for rel, count in (await self._run(pattern, root)).items():
+                if not self._eligible(root, rel):
+                    continue
                 key = (label, rel)
                 counts[key] = counts.get(key, 0) + count
 
@@ -122,6 +136,36 @@ class LexicalRetriever:
         root that was not allowlisted. Expectations match as substrings, so the
         prefix costs nothing."""
         return rel if len(self._roots) == 1 else f"{label}/{rel}"
+
+    def _eligible(self, root: Path, rel: str) -> bool:
+        """Would the walker have indexed this file?
+
+        Only the rules the tools cannot be told about. Everything expressible
+        as a path reaches them as an exclusion instead, so that a skipped file
+        is never read -- which keeps the reported latency honest as well.
+        """
+        path = root / rel
+        if self._max_file_bytes is not None:
+            try:
+                if path.stat().st_size > self._max_file_bytes:
+                    return False
+            except OSError:
+                # Matched a moment ago and unreadable now. The walker would
+                # have skipped it as UNREADABLE, so dropping it agrees.
+                return False
+        parent = path.parent
+        while parent != root and root in parent.parents:
+            # Cached per directory: a flood puts hundreds of hits under a
+            # handful of directories, and the answer costs a subprocess for
+            # any directory whose `.git` is a file.
+            linked = self._worktrees.get(parent)
+            if linked is None:
+                linked = is_linked_worktree(parent)
+                self._worktrees[parent] = linked
+            if linked:
+                return False
+            parent = parent.parent
+        return True
 
     async def _run(self, pattern: str, root: Path) -> dict[str, int]:
         argv = self._tool.argv(pattern, root, self._exclude_dirs, self._exclude_files)

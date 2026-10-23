@@ -10,17 +10,17 @@
   "label": "grep cases=lexical",
   "limit": 10,
   "median_breadth": 4.0,
-  "median_ms": 41.901272954419255,
+  "median_ms": 43.24549715965986,
   "miss_count": 0,
   "mrr_at_k": 0.675,
-  "p95_ms": 51.4882430434227,
+  "p95_ms": 51.35339195840061,
   "recall_at_k": 1.0,
-  "recorded_at": "2026-10-23T21:35:35.327546+00:00",
+  "recorded_at": "2026-10-23T22:46:56.192931+00:00",
   "reranker": "n/a",
   "results": [
     {
       "breadth": 17,
-      "duration_ms": 40.50688911229372,
+      "duration_ms": 42.28813597001135,
       "expected": [
         "workspace_indexer/config/settings.py"
       ],
@@ -42,7 +42,7 @@
     },
     {
       "breadth": 1,
-      "duration_ms": 51.4882430434227,
+      "duration_ms": 51.35339195840061,
       "expected": [
         "workspace_indexer/workspace_registry.py"
       ],
@@ -55,7 +55,7 @@
     },
     {
       "breadth": 4,
-      "duration_ms": 40.30839796178043,
+      "duration_ms": 40.5892338603735,
       "expected": [
         "workspace_indexer/cli.py"
       ],
@@ -71,7 +71,7 @@
     },
     {
       "breadth": 1,
-      "duration_ms": 50.29126815497875,
+      "duration_ms": 50.99557898938656,
       "expected": [
         "evaluation/eval_result.py"
       ],
@@ -84,7 +84,7 @@
     },
     {
       "breadth": 27,
-      "duration_ms": 29.138114070519805,
+      "duration_ms": 31.351611018180847,
       "expected": [
         "workspace_indexer/config/settings.py"
       ],
@@ -106,7 +106,7 @@
     },
     {
       "breadth": 23,
-      "duration_ms": 41.901272954419255,
+      "duration_ms": 43.24549715965986,
       "expected": [
         "evaluation/eval_record.py"
       ],
@@ -128,7 +128,7 @@
     },
     {
       "breadth": 1,
-      "duration_ms": 45.950987841933966,
+      "duration_ms": 45.171905076131225,
       "expected": [
         "workspace_indexer/cli.py"
       ],
@@ -141,7 +141,7 @@
     },
     {
       "breadth": 1,
-      "duration_ms": 28.034106828272343,
+      "duration_ms": 28.75296212732792,
       "expected": [
         "models/chunk_id.py"
       ],

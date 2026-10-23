@@ -3,15 +3,15 @@ title: "Semantic retrieval against grep and ripgrep"
 summary: >-
   A measured comparison between this index and the command-line tools an agent
   would otherwise reach for, over one 24-case dataset and one real workspace.
-  Records the method, the two corpus confounds that invalidated earlier
-  attempts, two predictions the results falsified, and the decision rule the
-  numbers support.
+  Records the method, the three corpus confounds that invalidated earlier
+  attempts and the test that now prevents a fourth, two predictions the
+  results falsified, and the decision rule the numbers support.
 created: 2026-10-18
 updated: 2026-10-23
 tags: [evaluation, retrieval, grep, ripgrep, benchmark]
 status: current
 audience: "an engineer deciding whether an agent should call this tool or just grep"
-source_ref: "feat/grep-comparison @ ace1b3c"
+source_ref: "feat/grep-comparison @ PENDING"
 ---
 
 # Semantic retrieval against grep and ripgrep
@@ -56,11 +56,17 @@ matched before the cutoff) and **flood rate** (share of queries matching more
 than 3x the cutoff). Recall scores a 400-file match containing the right file
 as a perfect success; for an agent it is a haystack.
 
-**All three tools search the same corpus**, using the index's *effective*
-exclusion set — `HARDCODED_EXCLUDES`, the dataset in use, and the lockfiles
-`Walker._consider` rejects through `is_lockfile` rather than through any
-pattern. Not just the user-editable list. That sentence has been false twice
-and is the single most important thing on this page.
+**All three tools search the same corpus.** That sentence has been false three
+times and is the single most important thing on this page, so it is no longer
+asserted: `tests/test_lexical_corpus_parity.py` walks a fixture with `Walker`
+and asserts that each tool's matched set *equals* the walker's eligible set,
+and that grep and ripgrep match the same files as each other. A rule added to
+the walker that the tools do not know about fails the suite instead of quietly
+moving a published number.
+
+The exclusions are the index's *effective* set — `HARDCODED_EXCLUDES`, the
+dataset actually in use, the lockfiles rejected by `is_lockfile`, files over
+`max_file_bytes` and linked worktrees — not the user-editable list.
 
 ## Results
 
@@ -69,23 +75,25 @@ and is the single most important thing on this page.
 | group | tool | recall@10 | MRR@10 | median latency | median breadth | flood |
 |---|---|---|---|---|---|---|
 | **all (24)** | search | **0.875** | **0.715** | 509 ms | — | — |
-| | ripgrep | 0.771 | 0.446 | **16 ms** | 23 | 38% |
-| | grep | 0.771 | 0.443 | 56 ms | 27 | 42% |
+| | ripgrep | 0.771 | 0.445 | **18 ms** | 24 | 38% |
+| | grep | 0.771 | 0.443 | 59 ms | 27 | 42% |
 | **retrieval (8)** | search | **1.000** | **0.615** | 494 ms | — | — |
-| | ripgrep | 0.625 | 0.281 | **18 ms** | 56 | 62% |
-| | grep | 0.625 | 0.281 | 58 ms | 61 | 62% |
+| | ripgrep | 0.625 | 0.281 | **23 ms** | 57 | 62% |
+| | grep | 0.625 | 0.281 | 64 ms | 61 | 62% |
 | **guidance (8)** | search | 0.625 | **0.625** | 491 ms | — | — |
 | | **find_guidance** | **0.938** | 0.768 | 498 ms | — | — |
-| | ripgrep | 0.688 | 0.378 | **19 ms** | 44 | 50% |
-| | grep | 0.688 | 0.373 | 59 ms | 52 | 62% |
+| | ripgrep | 0.688 | 0.378 | **23 ms** | 50 | 50% |
+| | grep | 0.688 | 0.373 | 63 ms | 52 | 62% |
 | **lexical (8)** | search | **1.000** | **0.906** | 502 ms | — | — |
-| | ripgrep | **1.000** | 0.680 | **13 ms** | 4 | 0% |
-| | grep | **1.000** | 0.675 | 42 ms | 4 | 0% |
+| | ripgrep | **1.000** | 0.676 | **14 ms** | 4 | 0% |
+| | grep | **1.000** | 0.675 | 43 ms | 4 | 0% |
 
-**grep and ripgrep now agree to within 0.006 on every group.** That is the strongest evidence
-the corpus is finally shared: the two binaries differ in gitignore handling and
-little else, so once they search the same files they should score the same, and
-they do.
+**grep and ripgrep agree to within 0.006 on every group.** That used to be
+offered here as the evidence that the corpus is shared. It is not evidence of
+anything: the third confound below had the two binaries agreeing to three
+decimal places while reading corpora that differed by 109 files. The agreement
+is reported because it is true, and the corpus claim is now carried by a test
+instead.
 
 ## Where the predictions failed
 
@@ -101,12 +109,14 @@ and it is the weakest result here. The tool an agent actually calls,
 `find_guidance`, reaches 0.938 with its document-type filter, so the capability
 is real; plain `search` does not have it.
 
-## Two corpus confounds, both found after the numbers were published
+## Three corpus confounds, all found after the numbers were published
 
 Every claim on this page rests on the three tools searching the same files.
-Both times that has been false, the defect was invisible in the output: the
-numbers looked ordinary, and only a reviewer reading the exclusion path found
-them. They are recorded together because the pattern is the finding.
+All three times that has been false, the defect was invisible in the output:
+the numbers looked ordinary, and each time it was a reviewer reading the
+exclusion path who found it, never the harness. They are recorded together
+because the pattern is the finding, and the pattern is what the parity test
+exists to break.
 
 ### The first: the harness searched its own answer key
 
@@ -152,9 +162,40 @@ to 0.281 on retrieval. The eight affected records were withdrawn and the runs
 repeated; the `search` rows were never affected, since the index excluded
 lockfiles all along.
 
-The exclusions a lexical baseline needs are therefore *not* a list that exists
-anywhere in the configuration. They are whatever the walker actually does, and
-the only honest way to track that is a test per rule.
+### The third: ripgrep was not reading hidden files
+
+ripgrep skips hidden files and directories unless told otherwise. `Walker`
+indexes them deliberately — `.claude/` is a primary target, not something to
+skip — and grep has no such default. Measured on the records published between
+these two revisions: **grep returned 10 hits under hidden directories, ripgrep
+returned 0**, and their total breadth differed by 109 files.
+
+This is the one that should change how the earlier revisions of this page are
+read. The two binaries were scoring within 0.005 of each other while searching
+materially different corpora, and that agreement was the stated evidence that
+the corpus was shared. A measurement cannot audit itself.
+
+Fixed with `--hidden`. Afterwards ripgrep returns 2 of those 10.
+
+**The remaining 8 are a real result rather than a defect.** They are files
+under `.ralph/` and `.agents/` in one repository: directories named in its
+`.gitignore`, holding files that are nonetheless *committed*. The index
+consults git for tracked status, so a pattern has no effect on a file already
+in the index and it holds them. ripgrep applies the pattern and does not.
+
+So ripgrep silently misses committed source in any repository whose
+`.gitignore` names a directory that was later force-added — and nothing in its
+output says so. That is a second reason, independent of ranking, that "just use
+ripgrep" is not the whole rule.
+
+### The shape of all three
+
+The exclusions a lexical baseline needs are *not* a list that exists anywhere
+in the configuration. They are whatever the walker actually does: three of the
+rules that mattered — lockfiles, oversized files, linked worktrees — are code
+rather than patterns, and a fourth is a default inside one of the binaries.
+Enumerating them one at a time is what produced a run of three, so the harness
+now asserts the property instead of the rules.
 
 ## A second finding: the index can be stale
 
@@ -178,14 +219,16 @@ it was last week is wrong in a way the reader cannot detect from the answer.
 - Match-count ranking is a choice, and it drives the MRR gap. An agent scanning
   ten paths is not bound by rank 1, so MRR understates the lexical tools.
 - No measurement of tokens delivered to the agent.
+- The parity test runs over a fixture, not over this workspace. It asserts the
+  rules agree; it cannot prove the fixture contains every rule that matters.
 
 ## The decision rule the numbers support
 
 Not "use the index instead of grep":
 
 1. **Know the token? Use ripgrep.** Identical recall, 4-file breadth, no
-   floods, 13 ms, no staleness, no API key. The index's better ranking does not
-   justify 38x the latency when the answer is one of four files.
+   floods, 14 ms, no staleness, no API key. The index's better ranking does not
+   justify 35x the latency when the answer is one of four files.
 2. **Describing behaviour rather than naming it? Use the index.** This is the
    one unambiguous win: 1.000 against 0.625 recall, 0.615 against 0.281 MRR,
    and the lexical tools flood on 62% of those queries while the index cannot.

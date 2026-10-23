@@ -10,17 +10,17 @@
   "label": "grep cases=guidance",
   "limit": 10,
   "median_breadth": 52.0,
-  "median_ms": 59.24226203933358,
+  "median_ms": 63.21666180156171,
   "miss_count": 3,
   "mrr_at_k": 0.3732638888888889,
-  "p95_ms": 73.91818193718791,
+  "p95_ms": 74.97035781852901,
   "recall_at_k": 0.6875,
-  "recorded_at": "2026-10-23T21:35:24.528216+00:00",
+  "recorded_at": "2026-10-23T22:46:45.394917+00:00",
   "reranker": "n/a",
   "results": [
     {
       "breadth": 10,
-      "duration_ms": 73.91818193718791,
+      "duration_ms": 74.97035781852901,
       "expected": [
         "PythonEngineeringStandards.md"
       ],
@@ -42,7 +42,7 @@
     },
     {
       "breadth": 62,
-      "duration_ms": 59.24226203933358,
+      "duration_ms": 66.11952092498541,
       "expected": [
         "workspace-indexer/CLAUDE.md"
       ],
@@ -64,7 +64,7 @@
     },
     {
       "breadth": 3,
-      "duration_ms": 58.75066085718572,
+      "duration_ms": 58.123436057940125,
       "expected": [
         "specs/pi-agent-support/design.md"
       ],
@@ -79,7 +79,7 @@
     },
     {
       "breadth": 60,
-      "duration_ms": 58.17869585007429,
+      "duration_ms": 63.21666180156171,
       "expected": [
         "specs/agent-waves/requirements.md"
       ],
@@ -101,7 +101,7 @@
     },
     {
       "breadth": 70,
-      "duration_ms": 58.39337897486985,
+      "duration_ms": 62.961447052657604,
       "expected": [
         "specs/hat-imports/design.md"
       ],
@@ -123,7 +123,7 @@
     },
     {
       "breadth": 52,
-      "duration_ms": 63.69269383139908,
+      "duration_ms": 68.08526115491986,
       "expected": [
         "CONTRIBUTING.md"
       ],
@@ -145,7 +145,7 @@
     },
     {
       "breadth": 37,
-      "duration_ms": 57.337449165061116,
+      "duration_ms": 61.444217804819345,
       "expected": [
         "specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md"
       ],
@@ -167,7 +167,7 @@
     },
     {
       "breadth": 29,
-      "duration_ms": 61.916450038552284,
+      "duration_ms": 62.88382690399885,
       "expected": [
         "docs/iteration-1-plan.md",
         "workspace-indexer/CLAUDE.md"

@@ -223,10 +223,15 @@ async def test_a_tool_that_never_returns_is_killed(
     # `sh -c` rather than `sleep`: argv always ends with `-e <pattern> <root>`,
     # which sleep rejects as an operand and exits 1 -- indistinguishable from
     # "no matches", so the test passed without ever reaching the timeout.
+    #
+    # `exec`, because killing the shell leaves `sleep` holding the inherited
+    # stdout and stderr: `process.wait()` then blocks until the pipes close,
+    # so the test passed after thirty seconds rather than after the timeout it
+    # claims to measure. It cost this file thirty of its thirty-four seconds.
     sleeper = LexicalTool(
         name="sleeper",
         binary="sh",
-        flags=("-c", "sleep 30"),
+        flags=("-c", "exec sleep 30"),
         exclude_dir_template="--ignored={name}",
         exclude_file_template="--ignored={name}",
     )

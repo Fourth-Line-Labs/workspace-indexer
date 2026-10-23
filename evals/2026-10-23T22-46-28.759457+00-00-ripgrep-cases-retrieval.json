@@ -9,18 +9,18 @@
   "fusion": "n/a",
   "label": "ripgrep cases=retrieval",
   "limit": 10,
-  "median_breadth": 56.0,
-  "median_ms": 17.877854872494936,
+  "median_breadth": 57.0,
+  "median_ms": 23.065952816978097,
   "miss_count": 4,
   "mrr_at_k": 0.28125,
-  "p95_ms": 23.275652201846242,
+  "p95_ms": 36.21096792630851,
   "recall_at_k": 0.625,
-  "recorded_at": "2026-10-23T21:35:07.816218+00:00",
+  "recorded_at": "2026-10-23T22:46:28.759457+00:00",
   "reranker": "n/a",
   "results": [
     {
       "breadth": 0,
-      "duration_ms": 17.877854872494936,
+      "duration_ms": 16.899481881409883,
       "expected": [
         "state/manifest.py"
       ],
@@ -30,8 +30,8 @@
       "query": "how does the indexer decide whether a file needs reindexing"
     },
     {
-      "breadth": 34,
-      "duration_ms": 16.890058061107993,
+      "breadth": 36,
+      "duration_ms": 21.12764911726117,
       "expected": [
         "storage/qdrant_store.py"
       ],
@@ -46,14 +46,14 @@
         "ai-workspace/workspace-indexer/src/workspace_indexer/embedding/fastembed_sparse_backend.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_store.py",
         "ai-workspace/workspace-indexer/tests/test_fastembed_sparse_backend.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_index_spec.py"
+        "redacted/c41b00c99ca48331"
       ],
       "matched": 1,
       "query": "where do we set the BM25 inverse document frequency modifier"
     },
     {
-      "breadth": 73,
-      "duration_ms": 19.363594008609653,
+      "breadth": 77,
+      "duration_ms": 26.837321929633617,
       "expected": [
         "chunking/code_chunker.py"
       ],
@@ -62,20 +62,20 @@
         "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
         "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "redacted/6807c627266ea37b",
         "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
         "ai-workspace/workspace-indexer/tests/test_chunk_id.py",
         "ai-workspace/workspace-indexer/tests/test_markdown_chunker.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/markdown_chunker.py",
         "ai-workspace/workspace-indexer/tests/test_manifest.py",
-        "ai-workspace/workspace-indexer/docs/reference.md",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/chunk_factory.py"
+        "ai-workspace/workspace-indexer/docs/reference.md"
       ],
       "matched": 1,
       "query": "how are code chunks given their enclosing class or function name"
     },
     {
-      "breadth": 97,
-      "duration_ms": 19.15169507265091,
+      "breadth": 103,
+      "duration_ms": 31.457539880648255,
       "expected": [
         "search/staleness.py"
       ],
@@ -96,8 +96,8 @@
       "query": "what stops a search result showing text that no longer matches the file"
     },
     {
-      "breadth": 56,
-      "duration_ms": 17.60675315745175,
+      "breadth": 57,
+      "duration_ms": 23.065952816978097,
       "expected": [
         "state/manifest.py",
         "chunking/file_reader.py"
@@ -120,7 +120,7 @@
     },
     {
       "breadth": 14,
-      "duration_ms": 17.339571146294475,
+      "duration_ms": 17.01399707235396,
       "expected": [
         "rerank/reranker_factory.py",
         "rerank/noop_reranker.py"
@@ -142,8 +142,8 @@
       "query": "how is reranking turned off when there is no API key"
     },
     {
-      "breadth": 138,
-      "duration_ms": 23.275652201846242,
+      "breadth": 140,
+      "duration_ms": 36.21096792630851,
       "expected": [
         "search/reprojector.py"
       ],
@@ -165,7 +165,7 @@
     },
     {
       "breadth": 6,
-      "duration_ms": 15.861182939261198,
+      "duration_ms": 15.972247812896967,
       "expected": [
         "obs/context.py"
       ],
