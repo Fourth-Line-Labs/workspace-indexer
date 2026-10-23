@@ -182,7 +182,7 @@ def test_one_public_root_does_not_publish_the_other_roots(tmp_path: Path) -> Non
     mine.mkdir()
     client.mkdir()
 
-    guard = PublicPathGuard([mine], [mine, client])
+    guard = PublicPathGuard([mine], [mine, client], root_qualified_paths=True)
 
     assert guard.active
     assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
@@ -197,9 +197,58 @@ def test_a_nested_public_root_matches_the_root_prefixed_recorded_form(tmp_path: 
     (mine / "proj").mkdir(parents=True)
     (tmp_path / "client-x").mkdir()
 
-    guard = PublicPathGuard([mine / "proj"], [mine, tmp_path / "client-x"])
+    guard = PublicPathGuard(
+        [mine / "proj"], [mine, tmp_path / "client-x"], root_qualified_paths=True
+    )
 
     assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
     # The prefix is segment-aware and root-scoped: a same-named directory under
     # a different root is not allowlisted by it.
     assert _found(guard, ["client-x/proj/x.py"])[0].startswith("redacted/")
+
+
+def test_an_unqualified_record_cannot_publish_by_coincidence_of_spelling(tmp_path: Path) -> None:
+    """A dense record carries `hit.rel_path`, which the walker computes
+    relative to the owning root with no root name, so nothing in it says which
+    root a path came from. Matching the root-prefixed form against it would
+    publish a path from a *private* root that happened to reproduce the public
+    root's spelling -- here a real `repo-b/repo-a/secrets.py`, recorded as
+    `repo-a/secrets.py`. Narrow, and still a fail-open in a control whose
+    stated design is to fail closed, so an unqualified multi-root record
+    matches no relative form at all."""
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    guard = PublicPathGuard([repo_a], [repo_a, repo_b], root_qualified_paths=False)
+
+    assert guard.active
+    assert _found(guard, ["repo-a/secrets.py"])[0].startswith("redacted/")
+
+
+def test_roots_sharing_a_basename_do_not_publish_each_other(tmp_path: Path) -> None:
+    """The root name is what makes a qualified form identify one root. Two
+    roots called `api` render identically even when the name is recorded, so
+    the prefix stops identifying anything and the form is not produced."""
+    first = tmp_path / "x" / "api"
+    second = tmp_path / "y" / "api"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+
+    guard = PublicPathGuard([first], [first, second], root_qualified_paths=True)
+
+    assert guard.active
+    assert _found(guard, ["api/secrets.py"])[0].startswith("redacted/")
+
+
+def test_a_single_root_record_is_unaffected_by_qualification(tmp_path: Path) -> None:
+    """With one root there is nothing to disambiguate: every recorded path is
+    relative to it on both surfaces, so the flag must not change the answer."""
+    mine = tmp_path / "mine"
+    mine.mkdir()
+
+    for qualified in (True, False):
+        guard = PublicPathGuard([mine], [tmp_path], root_qualified_paths=qualified)
+        assert _found(guard, ["mine/a.py"]) == ["mine/a.py"]
+        assert _found(guard, ["theirs/a.py"])[0].startswith("redacted/")

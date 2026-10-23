@@ -681,7 +681,14 @@ def evaluate(
             # private root is redacted before the record reaches disk. No
             # expectation names private code, so this moves no number.
             guard = PublicPathGuard.parse(
-                ctx.settings.eval_public_roots, [r.path for r in ctx.config.workspace.roots]
+                ctx.settings.eval_public_roots,
+                [r.path for r in ctx.config.workspace.roots],
+                # Only the lexical retrievers name the root a path came from,
+                # and only when there is more than one. Without that the guard
+                # cannot tell which root a recorded path belongs to, so it
+                # redacts the lot rather than publishing on a coincidence of
+                # spelling.
+                root_qualified_paths=lexical,
             )
             if save and not guard.active:
                 # The one line that would have caught the leak. A privacy
