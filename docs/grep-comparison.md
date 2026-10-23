@@ -10,7 +10,7 @@ updated: 2026-10-23
 tags: [evaluation, retrieval, grep, ripgrep, benchmark]
 status: current
 audience: "an engineer deciding whether an agent should call this tool or just grep"
-source_ref: "feat/grep-comparison @ fd7eff3"
+source_ref: "feat/grep-comparison @ 1877037"
 ---
 
 # Semantic retrieval against grep and ripgrep
