@@ -11,9 +11,19 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from workspace_indexer.app_context import AppContext, configure_logging_for
-from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
+from workspace_indexer.app_context import (
+    AppContext,
+    configure_logging_for,
+    load_config_and_settings,
+)
+from workspace_indexer.config import (
+    ConfigError,
+    WorkspaceChoiceError,
+    WorkspaceConfig,
+    load_workspace_config,
+)
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
+from workspace_indexer.discovery.classify import LOCKFILE_NAMES
 from workspace_indexer.evaluation import (
     GREP,
     RIPGREP,
@@ -608,60 +618,84 @@ def evaluate(
     """
 
     async def run() -> None:
-        ctx = _context(config, "eval", workspace)
+        # Decided before anything is opened. A lexical baseline shares nothing
+        # with the index except the corpus, so making it wait on the manifest,
+        # the vector store and a local embedding model meant `eval --tool grep`
+        # failed outright while `watch` or the MCP server held embedded
+        # Qdrant's single-process lock -- for a measurement that never reads a
+        # vector.
+        lexical = tool in LEXICAL_TOOLS
+        ctx: AppContext | None = None
+        if lexical:
+            try:
+                active_config, settings_obj = load_config_and_settings(config, "eval", workspace)
+            except (ConfigError, WorkspaceChoiceError) as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=2) from exc
+        else:
+            ctx = _context(config, "eval", workspace)
+            active_config, settings_obj = ctx.config, ctx.settings
         try:
-            cases = load_cases(dataset or ctx.config.eval.dataset)
+            # Held as a path rather than only loaded, because a lexical tool
+            # has to be told not to search it: the dataset quotes every query
+            # and every pattern, so a run that can read it scores the answer
+            # key above the workspace.
+            dataset_path = dataset or active_config.eval.dataset
+            cases = load_cases(dataset_path)
             if group != "all":
                 cases = [case for case in cases if case.group == group]
                 if not cases:
                     console.print(f"[red]no cases in group {group!r}[/red]")
                     raise typer.Exit(code=2)
-            # A reprojected collection is a distinct space, so it has to be
-            # addressed as one rather than by width alone.
-            space = (
-                ctx.space.model_copy(
-                    update={"dimensions": dimensions, "derived_from": ctx.space.dimensions}
+            if ctx is None:
+                retriever = _lexical_retriever(
+                    active_config, tool=tool, cases=cases, dataset=dataset_path
                 )
-                if dimensions
-                else None
-            )
-            retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank, cases=cases)
-            # A lexical tool has no embedding space and no fusion mode, and
-            # the record's filename is built from this label -- so naming them
-            # here would produce `voyage-code-4_1024-...-tool-grep.json`, a file
-            # claiming an embedding model that had nothing to do with it.
-            lexical = tool in LEXICAL_TOOLS
+                # A lexical tool has no embedding space, fusion or reranker,
+                # and recording the ambient ones would tie its runs to settings
+                # that cannot affect them -- two grep runs would stop comparing
+                # because an embedding model changed between them.
+                # `config_hash` still over-segments for the same reason; it
+                # errs towards refusing a comparison rather than making a false
+                # one, which is the safe direction, and is tracked separately.
+                space_slug, model_name, fusion_name, reranker_name = "n/a", "n/a", "n/a", "n/a"
+                dimensions_used = 0
+            else:
+                # A reprojected collection is a distinct space, so it has to be
+                # addressed as one rather than by width alone.
+                space = (
+                    ctx.space.model_copy(
+                        update={"dimensions": dimensions, "derived_from": ctx.space.dimensions}
+                    )
+                    if dimensions
+                    else None
+                )
+                retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank)
+                active = space or ctx.space
+                space_slug = active.slug()
+                model_name = active.model
+                dimensions_used = active.dimensions
+                fusion_name = fusion or active_config.search.fusion
+                reranker_name = "none" if rerank is False else active_config.search.rerank.model
+            # The record's filename is built from this label -- so naming an
+            # embedding space on a lexical run would produce
+            # `voyage-code-4_1024-...-tool-grep.json`, a file claiming a model
+            # that had nothing to do with it.
             label = (
                 f"{retriever.name} cases={group}"
                 if lexical
-                else (
-                    f"{(space or ctx.space).slug()} "
-                    f"fusion={fusion or ctx.config.search.fusion} "
-                    f"tool={retriever.name} cases={group}"
-                )
+                else (f"{space_slug} fusion={fusion_name} tool={retriever.name} cases={group}")
             )
             report = await EvalHarness(retriever).run(cases, limit=limit, label=label)
-            active = space or ctx.space
-            # A lexical tool has no embedding space, fusion or reranker, and
-            # recording the ambient ones would tie its runs to settings that
-            # cannot affect them -- two grep runs would stop comparing because
-            # an embedding model changed between them. `config_hash` still
-            # over-segments for the same reason; it errs towards refusing a
-            # comparison rather than making a false one, which is the safe
-            # direction, and is tracked separately.
             record = EvalRecord(
                 recorded_at=datetime.now(UTC).isoformat(),
                 label=label,
-                config_hash=ctx.settings.config_hash(ctx.config),
-                space_slug="n/a" if lexical else active.slug(),
-                embedding_model="n/a" if lexical else active.model,
-                dimensions=0 if lexical else active.dimensions,
-                fusion="n/a" if lexical else (fusion or ctx.config.search.fusion),
-                reranker=(
-                    "n/a"
-                    if lexical
-                    else ("none" if rerank is False else ctx.config.search.rerank.model)
-                ),
+                config_hash=settings_obj.config_hash(active_config),
+                space_slug=space_slug,
+                embedding_model=model_name,
+                dimensions=dimensions_used,
+                fusion=fusion_name,
+                reranker=reranker_name,
                 limit=limit,
                 retriever=retriever.name,
                 case_filter=group,
@@ -681,8 +715,8 @@ def evaluate(
             # private root is redacted before the record reaches disk. No
             # expectation names private code, so this moves no number.
             guard = PublicPathGuard.parse(
-                ctx.settings.eval_public_roots,
-                [r.path for r in ctx.config.workspace.roots],
+                settings_obj.eval_public_roots,
+                [(root.resolved_label, root.path) for root in active_config.workspace.roots],
                 # Only the lexical retrievers name the root a path came from,
                 # and only when there is more than one. Without that the guard
                 # cannot tell which root a recorded path belongs to, so it
@@ -711,7 +745,8 @@ def evaluate(
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=2) from exc
         finally:
-            await ctx.close()
+            if ctx is not None:
+                await ctx.close()
 
         console.print(f"[bold]{report.label}[/bold]")
         console.print(f"  recall@{limit}: [cyan]{report.recall_at_k:.3f}[/cyan]")
@@ -760,6 +795,81 @@ def evaluate(
 LEXICAL_TOOLS = {"grep": GREP, "ripgrep": RIPGREP}
 
 
+def _lexical_retriever(
+    config: WorkspaceConfig,
+    *,
+    tool: str,
+    cases: list[EvalCase],
+    dataset: Path,
+) -> Retriever:
+    """A command-line search tool scored over the index's own corpus.
+
+    Shares nothing with the index except the corpus and the dataset, which is
+    what makes a number from one comparable to a number from the other at all
+    -- and which makes the corpus the whole measurement. Every way the two
+    sets of files can drift apart is a confound, and two of them have already
+    produced numbers that had to be withdrawn.
+    """
+    # `not pattern`, not `is None`. An empty string is representable in the
+    # dataset and is not None, so it cleared this check and then died mid-run
+    # inside the retriever as a raw KeyError -- losing a run already partly
+    # paid for, and disagreeing with the retriever about what counts as a
+    # missing pattern.
+    missing = [case.query for case in cases if not case.grep_pattern]
+    if missing:
+        console.print(
+            f"[red]{len(missing)} case(s) have no grep_pattern, so "
+            f"--tool {tool} would be scored against a strawman:[/red]"
+        )
+        for query in missing[:5]:
+            console.print(f"  [yellow]{query}[/yellow]")
+        raise typer.Exit(code=2)
+    # The index's *effective* exclusions, not the user-editable list.
+    # `HARDCODED_EXCLUDES` keeps `evals/`, `logs/` and the baselines table out
+    # of the index because each quotes every eval query verbatim, and
+    # `excluded_paths` does the same for the configured datasets, which also
+    # quote every pattern. A lexical tool without them searches the harness's
+    # own output: measured, and `config/eval.yaml` came back rank 1 for five of
+    # eight lexical queries because it contains their answers.
+    try:
+        dirs, files = translate_excludes(config.all_excludes)
+    except ValueError as exc:
+        # Caught here rather than added to the command's handler: that `except`
+        # wraps the whole run, and a blanket ValueError there would turn a
+        # genuine bug anywhere inside it into a tidy exit 2. A bad
+        # `index.exclude` entry is an expected environment problem, so it gets
+        # this CLI's convention for one -- a red line and exit 2 -- instead of
+        # a stack dump.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    files = (
+        *files,
+        *sorted({path.name for path in config.excluded_paths}),
+        # The dataset actually in use. `excluded_paths` covers every
+        # *configured* workspace's dataset, and `--dataset` is not one of them
+        # -- so an override living inside a searched root was readable by the
+        # tools being scored against it, which is the contamination the
+        # configured exclusion exists to prevent.
+        dataset.name,
+        # Lockfiles are rejected by `Walker._consider` through `is_lockfile`,
+        # not by any pattern, so `all_excludes` cannot express them and the
+        # tools searched files the index had never seen. Measured: seven
+        # lockfile hits across the 24-case grep run, five of them filling half
+        # the top ten of a single query and pushing the expected file to rank
+        # eight. A corpus the baseline searches and the index does not is the
+        # confound that invalidated the first attempt at this comparison.
+        *sorted(LOCKFILE_NAMES),
+        "*.lock",
+    )
+    return LexicalRetriever(
+        LEXICAL_TOOLS[tool],
+        [(root.resolved_label, root.path) for root in config.workspace.roots],
+        {case.query: pattern for case in cases if (pattern := case.grep_pattern)},
+        dirs,
+        files,
+    )
+
+
 def _retriever(
     ctx: AppContext,
     space: EmbeddingSpace | None,
@@ -767,60 +877,13 @@ def _retriever(
     tool: str,
     fusion: str | None,
     rerank: bool | None,
-    cases: list[EvalCase],
 ) -> Retriever:
-    """Pick the surface to score.
+    """Pick the index-backed surface to score.
 
     The MCP tools are constructed over the same search service the baseline
     uses, so a difference between them is the tool's document-type policy and
     nothing else.
-
-    The lexical tools are here for the opposite reason: they share nothing with
-    the index except the corpus and the dataset, which is what makes a number
-    from one comparable to a number from the other at all.
     """
-    if tool in LEXICAL_TOOLS:
-        # `not pattern`, not `is None`. An empty string is representable in the
-        # dataset and is not None, so it cleared this check and then died
-        # mid-run inside the retriever as a raw KeyError -- losing a run
-        # already partly paid for, and disagreeing with the retriever about
-        # what counts as a missing pattern.
-        missing = [case.query for case in cases if not case.grep_pattern]
-        if missing:
-            console.print(
-                f"[red]{len(missing)} case(s) have no grep_pattern, so "
-                f"--tool {tool} would be scored against a strawman:[/red]"
-            )
-            for query in missing[:5]:
-                console.print(f"  [yellow]{query}[/yellow]")
-            raise typer.Exit(code=2)
-        # The index's *effective* exclusions, not the user-editable list.
-        # `HARDCODED_EXCLUDES` keeps `evals/`, `logs/` and the baselines table
-        # out of the index because each quotes every eval query verbatim, and
-        # `excluded_paths` does the same for the dataset, which also quotes
-        # every pattern. A lexical tool without them searches the harness's own
-        # output: measured, and `config/eval.yaml` came back rank 1 for five of
-        # eight lexical queries because it contains their answers.
-        try:
-            dirs, files = translate_excludes(ctx.config.all_excludes)
-        except ValueError as exc:
-            # Caught here rather than added to the command's handler: that
-            # `except` wraps the whole run, and a blanket ValueError there
-            # would turn a genuine bug anywhere inside it into a tidy exit 2.
-            # A bad `index.exclude` entry is an expected environment problem,
-            # so it gets this CLI's convention for one -- a red line and exit
-            # 2 -- instead of a stack dump.
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=2) from exc
-        files = (*files, *sorted({path.name for path in ctx.config.excluded_paths}))
-        return LexicalRetriever(
-            LEXICAL_TOOLS[tool],
-            [root.path for root in ctx.config.workspace.roots],
-            {case.query: pattern for case in cases if (pattern := case.grep_pattern)},
-            dirs,
-            files,
-        )
-
     if tool == "search":
         return SearchRetriever(
             ctx.search_service(space),

@@ -38,13 +38,34 @@ class EvalResult(BaseModel):
     # Files matched before the rank cutoff, for retrievers that can exceed it.
     # None where the notion does not apply, which is every dense retriever.
     breadth: int | None = None
+    # How many expectations this result satisfied, fixed at the moment of
+    # measurement. Recorded rather than derived because `found` does not
+    # survive the trip to disk intact: `PublicPathGuard` replaces paths
+    # outside the allowlist with digests, and a score recomputed afterwards
+    # reads a redacted hit as a miss -- saving `recall 0` beside
+    # `first_hit_rank: 1`, with the record's own aggregate disagreeing with
+    # both. Redaction decides what may be published, never what was measured.
+    #
+    # Defaulted to None so records written before this field still load, and
+    # so a hand-built result in a test need not restate what `found` already
+    # says; both fall back to recomputing.
+    matched: int | None = None
 
     @property
     def recall(self) -> float:
         if not self.expected:
             return 0.0
-        hit = sum(1 for want in self.expected if any(path_matches(want, got) for got in self.found))
+        hit = self.matched if self.matched is not None else self._count_matches()
         return hit / len(self.expected)
+
+    def _count_matches(self) -> int:
+        return sum(
+            1 for want in self.expected if any(path_matches(want, got) for got in self.found)
+        )
+
+    def measured(self) -> EvalResult:
+        """A copy whose score is pinned to the paths as they were retrieved."""
+        return self.model_copy(update={"matched": self._count_matches()})
 
     @property
     def reciprocal_rank(self) -> float:

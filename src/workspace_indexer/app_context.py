@@ -241,6 +241,31 @@ def close_blocking(close: Callable[[], Coroutine[Any, Any, None]]) -> str | None
     return "not closed: an event loop is already running"
 
 
+def load_config_and_settings(
+    config_path: Path | None = None,
+    role: str | None = None,
+    workspace: str | None = None,
+) -> tuple[WorkspaceConfig, Settings]:
+    """Everything `AppContext.build` resolves, without the resources.
+
+    `build` opens the manifest, the vector store and the embedding backends
+    before the caller has said what it intends to do. Embedded Qdrant takes a
+    single-process lock on its storage path, so a command that never touches
+    the index -- scoring grep as a baseline is the case this exists for --
+    could not run while `watch` or the MCP server held it, and paid a local
+    embedding model's load time for nothing.
+
+    Same order as `build`, deliberately: `with_rerank_overrides` before
+    `settings_for`, for the reason spelled out there. A config read two ways
+    that disagree is worse than one way that is wrong.
+    """
+    config = load_workspace_config(config_path).select(workspace)
+    configure_logging_for(config, role)
+    base = Settings()
+    config = with_rerank_overrides(config, base)
+    return config, settings_for(config, base)
+
+
 def configure_logging_for(config: WorkspaceConfig, role: str | None = None) -> None:
     """Set logging up once for a command, honouring .env over workspace.yaml.
 

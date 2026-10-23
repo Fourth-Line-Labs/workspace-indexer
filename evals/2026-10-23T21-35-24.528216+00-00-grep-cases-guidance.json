@@ -5,22 +5,22 @@
   "dimensions": 0,
   "embedding_model": "n/a",
   "empty_rate": 0.0,
-  "flood_rate": 0.5,
+  "flood_rate": 0.625,
   "fusion": "n/a",
-  "label": "ripgrep cases=guidance",
+  "label": "grep cases=guidance",
   "limit": 10,
-  "median_breadth": 44.0,
-  "median_ms": 18.100942950695753,
+  "median_breadth": 52.0,
+  "median_ms": 59.24226203933358,
   "miss_count": 3,
-  "mrr_at_k": 0.36924603174603177,
-  "p95_ms": 19.85718682408333,
+  "mrr_at_k": 0.3732638888888889,
+  "p95_ms": 73.91818193718791,
   "recall_at_k": 0.6875,
-  "recorded_at": "2026-10-18T22:10:55.571274+00:00",
+  "recorded_at": "2026-10-23T21:35:24.528216+00:00",
   "reranker": "n/a",
   "results": [
     {
-      "breadth": 8,
-      "duration_ms": 16.06595190241933,
+      "breadth": 10,
+      "duration_ms": 73.91818193718791,
       "expected": [
         "PythonEngineeringStandards.md"
       ],
@@ -30,50 +30,56 @@
         "ralph-orchestrator/docs/guide/prompts.md",
         "ralph-orchestrator/docs/contributing/pull-requests.md",
         "ralph-orchestrator/docs/contributing/style.md",
+        "redacted/8c7d2d71885b7d9f",
         "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
         "chrome-bookmark-manager/README.md",
+        "ralph-orchestrator/.ralph/specs/README.md",
         "ralph-orchestrator/docs/contributing.md",
         "ralph-orchestrator/docs/contributing/index.md"
       ],
+      "matched": 1,
       "query": "how should I write Python for this project, what are the standards"
     },
     {
-      "breadth": 46,
-      "duration_ms": 18.100942950695753,
+      "breadth": 62,
+      "duration_ms": 59.24226203933358,
       "expected": [
         "workspace-indexer/CLAUDE.md"
       ],
-      "first_hit_rank": 7,
+      "first_hit_rank": 8,
       "found": [
         "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
-        "ai-workspace/workspace-indexer/poetry.lock",
+        "ralph-orchestrator/.ralph/specs/tui-refactor/research/existing-patterns.md",
+        "chrome-bookmark-manager/.ralph/diagnostics/2026-06-12T15-18-44/prompt-log.md",
         "ralph-orchestrator/ralph.yml",
         "ai-workspace/workspace-indexer/tests/test_query_service.py",
         "ralph-orchestrator/crates/ralph-cli/presets/pdd-to-code-assist.yml",
         "ralph-orchestrator/presets/pdd-to-code-assist.yml",
         "ai-workspace/workspace-indexer/CLAUDE.md",
-        "ralph-orchestrator/ralph.m.yml",
-        "ralph-orchestrator/crates/ralph-proto/src/json_rpc.rs",
-        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md"
+        "ralph-orchestrator/.claude/skills/code-assist/SKILL.md",
+        "ralph-orchestrator/ralph.m.yml"
       ],
+      "matched": 1,
       "query": "what conventions must I follow when structuring a new module"
     },
     {
-      "breadth": 2,
-      "duration_ms": 15.332174021750689,
+      "breadth": 3,
+      "duration_ms": 58.75066085718572,
       "expected": [
         "specs/pi-agent-support/design.md"
       ],
       "first_hit_rank": null,
       "found": [
         "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/rough-idea.md",
         "ralph-orchestrator/specs/roo-cli-provider/rough-idea.md"
       ],
+      "matched": 0,
       "query": "I need to add support for a new agent provider, how should it be designed"
     },
     {
-      "breadth": 59,
-      "duration_ms": 17.957271076738834,
+      "breadth": 60,
+      "duration_ms": 58.17869585007429,
       "expected": [
         "specs/agent-waves/requirements.md"
       ],
@@ -90,11 +96,12 @@
         "ralph-orchestrator/crates/ralph-core/src/wave_prompt.rs",
         "ralph-orchestrator/docs/advanced/agent-waves.md"
       ],
+      "matched": 0,
       "query": "what are the requirements for running agents concurrently in waves"
     },
     {
-      "breadth": 59,
-      "duration_ms": 18.64401390776038,
+      "breadth": 70,
+      "duration_ms": 58.39337897486985,
       "expected": [
         "specs/hat-imports/design.md"
       ],
@@ -102,20 +109,21 @@
       "found": [
         "ralph-orchestrator/specs/hat-imports/design.md",
         "ralph-orchestrator/specs/hat-imports/requirements.md",
+        "redacted/6807c627266ea37b",
         "ralph-orchestrator/specs/hat-imports/rough-idea.md",
         "ralph-orchestrator/specs/hat-imports/research/circular-import-detection.md",
         "ralph-orchestrator/specs/hat-imports/research/merge-overlay-mechanics.md",
         "ai-workspace/workspace-indexer/docs/reference.md",
         "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
         "ralph-orchestrator/specs/hat-imports/research/serde-unknown-fields.md",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/graph/dependent.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/mcp/impact_service.py"
+        "ai-workspace/workspace-indexer/src/workspace_indexer/graph/dependent.py"
       ],
+      "matched": 1,
       "query": "how should reusable hat definitions be imported from local files"
     },
     {
-      "breadth": 44,
-      "duration_ms": 19.85718682408333,
+      "breadth": 52,
+      "duration_ms": 63.69269383139908,
       "expected": [
         "CONTRIBUTING.md"
       ],
@@ -126,17 +134,18 @@
         "ralph-orchestrator/CONTRIBUTING.md",
         "ralph-orchestrator/skills/ralph-docs/references/llms-txt-map.md",
         "ralph-orchestrator/skills/ralph-docs/SKILL.md",
+        "ai-workspace/workspace-indexer/.github/workflows/ci.yml",
         "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
         "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
         "ai-workspace/workspace-indexer/tests/test_eval_harness.py",
-        "ralph-orchestrator/README.md",
-        "ralph-orchestrator/docs/contributing/index.md"
+        "ralph-orchestrator/README.md"
       ],
+      "matched": 1,
       "query": "how do I set up a development environment and submit a change"
     },
     {
-      "breadth": 30,
-      "duration_ms": 18.833938986063004,
+      "breadth": 37,
+      "duration_ms": 57.337449165061116,
       "expected": [
         "specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md"
       ],
@@ -153,32 +162,34 @@
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/05-iteration-checkpoint.md"
       ],
+      "matched": 1,
       "query": "what is the plan for adding lifecycle hooks to the orchestrator"
     },
     {
-      "breadth": 23,
-      "duration_ms": 15.907977009192109,
+      "breadth": 29,
+      "duration_ms": 61.916450038552284,
       "expected": [
         "docs/iteration-1-plan.md",
         "workspace-indexer/CLAUDE.md"
       ],
-      "first_hit_rank": 5,
+      "first_hit_rank": 4,
       "found": [
-        "ai-workspace/workspace-indexer/poetry.lock",
         "ralph-orchestrator/docs/deployment/qchat-production.md",
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/requirements.md",
         "ralph-orchestrator/specs/agent-waves/plan.md",
         "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ralph-orchestrator/.ralph/specs/test-tools.spec.md",
         "ralph-orchestrator/docs/03-best-practices/best-practices.md",
         "ralph-orchestrator/docs/deployment/kubernetes.md",
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/01-lifecycle-map.md",
-        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md"
+        "redacted/8c7d2d71885b7d9f"
       ],
+      "matched": 1,
       "query": "how should this project handle logging and observability"
     }
   ],
-  "retriever": "ripgrep",
+  "retriever": "grep",
   "schema_version": 1,
   "space_slug": "n/a"
 }

@@ -66,6 +66,10 @@ class EvalHarness:
                 else None
             )
             results.append(
+                # Pinned here rather than left to be recomputed from `found`:
+                # the paths are rewritten by `PublicPathGuard` on the way to
+                # disk, and a score derived afterwards scores the redaction
+                # instead of the retrieval.
                 EvalResult(
                     query=case.query,
                     expected=case.expect,
@@ -73,7 +77,7 @@ class EvalHarness:
                     first_hit_rank=_first_rank(case.expect, found),
                     duration_ms=elapsed,
                     breadth=breadth,
-                )
+                ).measured()
             )
 
         report = EvalReport(label=label, limit=limit, results=results)

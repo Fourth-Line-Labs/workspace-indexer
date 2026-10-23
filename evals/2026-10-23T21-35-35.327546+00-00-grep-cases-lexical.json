@@ -7,24 +7,24 @@
   "empty_rate": 0.0,
   "flood_rate": 0.0,
   "fusion": "n/a",
-  "label": "ripgrep cases=lexical",
+  "label": "grep cases=lexical",
   "limit": 10,
   "median_breadth": 4.0,
-  "median_ms": 13.663745950907469,
+  "median_ms": 41.901272954419255,
   "miss_count": 0,
-  "mrr_at_k": 0.6795138888888889,
-  "p95_ms": 15.499722911044955,
+  "mrr_at_k": 0.675,
+  "p95_ms": 51.4882430434227,
   "recall_at_k": 1.0,
-  "recorded_at": "2026-10-18T22:11:17.223253+00:00",
+  "recorded_at": "2026-10-23T21:35:35.327546+00:00",
   "reranker": "n/a",
   "results": [
     {
-      "breadth": 15,
-      "duration_ms": 13.663745950907469,
+      "breadth": 17,
+      "duration_ms": 40.50688911229372,
       "expected": [
         "workspace_indexer/config/settings.py"
       ],
-      "first_hit_rank": 8,
+      "first_hit_rank": 10,
       "found": [
         "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
         "ai-workspace/workspace-indexer/docs/reference.md",
@@ -33,15 +33,16 @@
         "ai-workspace/workspace-indexer/docs/deployment.md",
         "ai-workspace/workspace-indexer/src/workspace_indexer/storage/store_factory.py",
         "ai-workspace/workspace-indexer/tests/isolated_env.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/mcp/empty_index_error.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py"
+        "ai-workspace/workspace-indexer/.env",
+        "ai-workspace/workspace-indexer/.env.example",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py"
       ],
+      "matched": 1,
       "query": "where is the QDRANT_MODE setting read"
     },
     {
       "breadth": 1,
-      "duration_ms": 13.736312044784427,
+      "duration_ms": 51.4882430434227,
       "expected": [
         "workspace_indexer/workspace_registry.py"
       ],
@@ -49,11 +50,12 @@
       "found": [
         "ai-workspace/workspace-indexer/src/workspace_indexer/workspace_registry.py"
       ],
+      "matched": 1,
       "query": "find the WorkspaceRegistry class definition"
     },
     {
       "breadth": 4,
-      "duration_ms": 13.007445959374309,
+      "duration_ms": 40.30839796178043,
       "expected": [
         "workspace_indexer/cli.py"
       ],
@@ -64,11 +66,12 @@
         "ai-workspace/workspace-indexer/tests/test_watch_failures_are_logged.py",
         "ai-workspace/workspace-indexer/docs/reference.md"
       ],
+      "matched": 1,
       "query": "where is the watch.crashed event logged"
     },
     {
       "breadth": 1,
-      "duration_ms": 13.332223054021597,
+      "duration_ms": 50.29126815497875,
       "expected": [
         "evaluation/eval_result.py"
       ],
@@ -76,15 +79,16 @@
       "found": [
         "ai-workspace/workspace-indexer/src/workspace_indexer/evaluation/eval_result.py"
       ],
+      "matched": 1,
       "query": "which module defines path_matches"
     },
     {
-      "breadth": 25,
-      "duration_ms": 15.499722911044955,
+      "breadth": 27,
+      "duration_ms": 29.138114070519805,
       "expected": [
         "workspace_indexer/config/settings.py"
       ],
-      "first_hit_rank": 9,
+      "first_hit_rank": 10,
       "found": [
         "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
         "ai-workspace/workspace-indexer/tests/test_embedding_space.py",
@@ -94,14 +98,15 @@
         "ai-workspace/workspace-indexer/docs/reference.md",
         "ai-workspace/workspace-indexer/tests/test_backend_factory.py",
         "ai-workspace/workspace-indexer/tests/test_eval_store.py",
-        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py",
-        "ai-workspace/workspace-indexer/tests/test_embedding_cost.py"
+        "ai-workspace/workspace-indexer/.env.example",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py"
       ],
+      "matched": 1,
       "query": "where is voyage-code-4 set as the default embedding model"
     },
     {
       "breadth": 23,
-      "duration_ms": 14.738967176526785,
+      "duration_ms": 41.901272954419255,
       "expected": [
         "evaluation/eval_record.py"
       ],
@@ -118,11 +123,12 @@
         "ralph-orchestrator/crates/ralph-core/src/lib.rs",
         "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/02-config-and-execution-model.md"
       ],
+      "matched": 1,
       "query": "find the SCHEMA_VERSION constant for recorded eval runs"
     },
     {
       "breadth": 1,
-      "duration_ms": 12.710226932540536,
+      "duration_ms": 45.950987841933966,
       "expected": [
         "workspace_indexer/cli.py"
       ],
@@ -130,11 +136,12 @@
       "found": [
         "ai-workspace/workspace-indexer/src/workspace_indexer/cli.py"
       ],
+      "matched": 1,
       "query": "find where asyncio.TaskGroup is used"
     },
     {
       "breadth": 1,
-      "duration_ms": 12.346005067229271,
+      "duration_ms": 28.034106828272343,
       "expected": [
         "models/chunk_id.py"
       ],
@@ -142,10 +149,11 @@
       "found": [
         "ai-workspace/workspace-indexer/src/workspace_indexer/models/chunk_id.py"
       ],
+      "matched": 1,
       "query": "where are chunk ids generated with uuid5"
     }
   ],
-  "retriever": "ripgrep",
+  "retriever": "grep",
   "schema_version": 1,
   "space_slug": "n/a"
 }

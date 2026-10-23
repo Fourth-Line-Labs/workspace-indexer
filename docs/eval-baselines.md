@@ -20,17 +20,18 @@ per-case detail lives in `evals/*.json`.
 
 | recorded | config | embedding | dims | fusion | reranker | tool | cases | recall@k | MRR@k | misses |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 2026-10-18T22:11:23 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | lexical | 1.000 | 0.675 | 0/8 |
-| 2026-10-18T22:11:17 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | lexical | 1.000 | 0.680 | 0/8 |
+| 2026-10-23T21:35:35 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | lexical | 1.000 | 0.675 | 0/8 |
+| 2026-10-23T21:35:29 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | lexical | 1.000 | 0.680 | 0/8 |
+| 2026-10-23T21:35:24 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | guidance | 0.688 | 0.373 | 3/8 |
+| 2026-10-23T21:35:18 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | guidance | 0.688 | 0.378 | 3/8 |
+| 2026-10-23T21:35:13 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | retrieval | 0.625 | 0.281 | 4/8 |
+| 2026-10-23T21:35:07 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | retrieval | 0.625 | 0.281 | 4/8 |
+| 2026-10-23T21:35:02 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | all | 0.771 | 0.443 | 7/24 |
+| 2026-10-23T21:34:56 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | all | 0.771 | 0.446 | 7/24 |
+| 2026-10-18T22:11:51 | `37035875` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | find_guidance | guidance | 0.938 | 0.768 | 1/8 |
 | 2026-10-18T22:11:11 | `37035875` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | lexical | 1.000 | 0.906 | 0/8 |
-| 2026-10-18T22:11:01 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | guidance | 0.688 | 0.365 | 3/8 |
-| 2026-10-18T22:10:55 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | guidance | 0.688 | 0.369 | 3/8 |
 | 2026-10-18T22:10:49 | `37035875` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | guidance | 0.625 | 0.625 | 3/8 |
-| 2026-10-18T22:10:39 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | retrieval | 0.625 | 0.234 | 4/8 |
-| 2026-10-18T22:10:33 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | retrieval | 0.625 | 0.234 | 4/8 |
 | 2026-10-18T22:10:27 | `37035875` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | retrieval | 1.000 | 0.615 | 0/8 |
-| 2026-10-18T22:10:17 | `37035875` | `n/a` | 0 | n/a | `n/a` | grep | all | 0.771 | 0.425 | 7/24 |
-| 2026-10-18T22:10:10 | `37035875` | `n/a` | 0 | n/a | `n/a` | ripgrep | all | 0.771 | 0.428 | 7/24 |
 | 2026-10-18T22:10:04 | `37035875` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | all | 0.875 | 0.715 | 3/24 |
 | 2026-09-10T07:31:20 | `f7de243f` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | search | guidance | 0.625 | 0.625 | 3/8 |
 | 2026-09-10T07:31:10 | `f7de243f` | `voyageai:voyage-code-4` | 1024 | rrf | `voyageai:rerank-2.5-lite` | find_guidance | guidance | 0.938 | 0.830 | 1/8 |

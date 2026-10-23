@@ -26,6 +26,13 @@ from workspace_indexer.evaluation.tool_missing_error import ToolMissingError
 requires_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
 
 
+def _roots(*roots: Path) -> list[tuple[str, Path]]:
+    """Roots as the retriever takes them: labelled, because the basename is not
+    an identifier -- two roots can share one and `RootConfig.resolved_label`
+    is what the rest of the system keys them by."""
+    return [(root.name, root) for root in roots]
+
+
 @pytest.fixture
 def corpus(tmp_path: Path) -> Path:
     """One term, three files, deliberately uneven counts -- the ranking is the
@@ -42,7 +49,7 @@ def corpus(tmp_path: Path) -> Path:
 async def test_files_rank_by_match_count(corpus: Path) -> None:
     """grep returns an unordered set, so an order has to be imposed before a
     rank means anything. Count descending is the most favourable honest one."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     assert await retriever.retrieve("q", 10) == ["many.py", "few.py"]
 
@@ -51,7 +58,7 @@ async def test_a_file_without_the_term_is_not_a_candidate(corpus: Path) -> None:
     """GNU grep's -c prints every file it walked, matched or not. A zero kept
     by accident counts towards breadth and would inflate the flood rate for
     grep alone, while ripgrep -- which prints only matches -- stayed honest."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     assert "none.py" not in await retriever.retrieve("q", 10)
 
@@ -60,7 +67,7 @@ async def test_breadth_counts_every_match_not_only_the_returned_ones(corpus: Pat
     """The flood is the point. Truncating to the cutoff and reporting that
     number would say two files matched when the agent's problem is that two
     hundred did."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     returned = await retriever.retrieve("q", 1)
 
@@ -71,18 +78,18 @@ async def test_breadth_counts_every_match_not_only_the_returned_ones(corpus: Pat
 async def test_an_excluded_directory_is_not_searched(corpus: Path) -> None:
     """Vendored code the index never saw. Without this the tools answer a
     question about a different corpus, and node_modules would win on count."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     assert await retriever.retrieve("q", 10) == ["many.py", "few.py"]
 
-    unfiltered = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ())
+    unfiltered = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ())
     assert any("node_modules" in path for path in await unfiltered.retrieve("q", 10))
 
 
 async def test_no_match_is_an_empty_result_not_a_failure(corpus: Path) -> None:
     """grep exits 1 when nothing matched. Treating a non-zero exit as an error
     would turn the single most interesting lexical outcome into a crash."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "absent-token"}, ())
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "absent-token"}, ())
 
     assert await retriever.retrieve("q", 10) == []
     assert retriever.last_breadth == 0
@@ -91,7 +98,7 @@ async def test_no_match_is_an_empty_result_not_a_failure(corpus: Path) -> None:
 async def test_a_case_without_a_pattern_is_an_error(corpus: Path) -> None:
     """The strawman guard. Falling back to the raw English question would match
     nothing and record a plausible-looking row of zeroes."""
-    retriever = LexicalRetriever(GREP, [corpus], {})
+    retriever = LexicalRetriever(GREP, _roots(corpus), {})
 
     with pytest.raises(MissingPatternError):
         await retriever.retrieve("how does reindexing decide what to skip", 10)
@@ -100,7 +107,7 @@ async def test_a_case_without_a_pattern_is_an_error(corpus: Path) -> None:
 async def test_paths_are_relative_to_the_root(corpus: Path) -> None:
     """Uniform with the index, so one set of expectations scores both -- and so
     an absolute home directory never reaches a committed record."""
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     assert all(not Path(path).is_absolute() for path in await retriever.retrieve("q", 10))
 
@@ -109,7 +116,7 @@ async def test_paths_are_relative_to_the_root(corpus: Path) -> None:
 async def test_ripgrep_ranks_the_same_corpus_the_same_way(corpus: Path) -> None:
     """Different binary, different count syntax, same answer. A divergence here
     is a parsing bug rather than a finding about either tool."""
-    retriever = LexicalRetriever(RIPGREP, [corpus], {"q": "needle"}, ("node_modules",))
+    retriever = LexicalRetriever(RIPGREP, _roots(corpus), {"q": "needle"}, ("node_modules",))
 
     assert await retriever.retrieve("q", 10) == ["many.py", "few.py"]
 
@@ -162,11 +169,11 @@ async def test_an_excluded_file_is_not_searched(corpus: Path) -> None:
     """The eval dataset quotes every query and every pattern, so a tool allowed
     to read it finds the answer key. It is excluded by name, not by directory."""
     (corpus / "answers.yaml").write_text("needle\nneedle\nneedle\nneedle\n", encoding="utf-8")
-    retriever = LexicalRetriever(GREP, [corpus], {"q": "needle"}, ("node_modules",), ())
+    retriever = LexicalRetriever(GREP, _roots(corpus), {"q": "needle"}, ("node_modules",), ())
     assert "answers.yaml" in await retriever.retrieve("q", 10)
 
     filtered = LexicalRetriever(
-        GREP, [corpus], {"q": "needle"}, ("node_modules",), ("answers.yaml",)
+        GREP, _roots(corpus), {"q": "needle"}, ("node_modules",), ("answers.yaml",)
     )
     assert "answers.yaml" not in await filtered.retrieve("q", 10)
 
@@ -179,7 +186,9 @@ async def test_two_roots_holding_the_same_relative_path_stay_distinct(tmp_path: 
         (tmp_path / name).mkdir()
         (tmp_path / name / "main.py").write_text("needle\n", encoding="utf-8")
 
-    retriever = LexicalRetriever(GREP, [tmp_path / "alpha", tmp_path / "beta"], {"q": "needle"})
+    retriever = LexicalRetriever(
+        GREP, _roots(tmp_path / "alpha", tmp_path / "beta"), {"q": "needle"}
+    )
 
     found = await retriever.retrieve("q", 10)
 
@@ -198,7 +207,7 @@ async def test_a_tool_error_is_raised_not_scored_as_an_empty_result(corpus: Path
         exclude_dir_template="--exclude-dir={name}",
         exclude_file_template="--exclude={name}",
     )
-    retriever = LexicalRetriever(broken, [corpus], {"q": "needle"})
+    retriever = LexicalRetriever(broken, _roots(corpus), {"q": "needle"})
 
     with pytest.raises(RuntimeError, match="exited"):
         await retriever.retrieve("q", 10)
@@ -222,7 +231,44 @@ async def test_a_tool_that_never_returns_is_killed(
         exclude_file_template="--ignored={name}",
     )
     monkeypatch.setattr(module, "_TIMEOUT_S", 0.3)
-    retriever = LexicalRetriever(sleeper, [corpus], {"q": "needle"})
+    retriever = LexicalRetriever(sleeper, _roots(corpus), {"q": "needle"})
 
     with pytest.raises(TimeoutError):
         await retriever.retrieve("q", 10)
+
+
+async def test_two_roots_sharing_a_label_are_refused(tmp_path: Path) -> None:
+    """A recorded hit from a multi-root run is prefixed with its root, and that
+    prefix has to identify exactly one of them: `PublicPathGuard` matches the
+    allowlist against this form, so an ambiguous prefix publishes the root that
+    was not allowlisted, and `redact` digests the same string into the same
+    digest for two different files. Refused rather than disambiguated here,
+    because a label is what the rest of the system already keys roots by."""
+    for parent in ("x", "y"):
+        (tmp_path / parent / "api").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="same label"):
+        LexicalRetriever(
+            GREP,
+            [("api", tmp_path / "x" / "api"), ("api", tmp_path / "y" / "api")],
+            {"q": "needle"},
+        )
+
+
+async def test_the_label_rather_than_the_basename_prefixes_a_recorded_path(
+    tmp_path: Path,
+) -> None:
+    """`resolved_label` is the identifier, and it is only the basename by
+    default. A record prefixed with the basename cannot be matched against an
+    allowlist built from labels."""
+    for parent in ("x", "y"):
+        (tmp_path / parent / "api").mkdir(parents=True)
+        (tmp_path / parent / "api" / "main.py").write_text("needle\n", encoding="utf-8")
+
+    retriever = LexicalRetriever(
+        GREP,
+        [("first", tmp_path / "x" / "api"), ("second", tmp_path / "y" / "api")],
+        {"q": "needle"},
+    )
+
+    assert sorted(await retriever.retrieve("q", 10)) == ["first/main.py", "second/main.py"]

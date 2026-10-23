@@ -9,28 +9,29 @@
   "fusion": "n/a",
   "label": "ripgrep cases=retrieval",
   "limit": 10,
-  "median_breadth": 62.0,
-  "median_ms": 18.481521867215633,
+  "median_breadth": 56.0,
+  "median_ms": 17.877854872494936,
   "miss_count": 4,
-  "mrr_at_k": 0.234375,
-  "p95_ms": 23.118904093280435,
+  "mrr_at_k": 0.28125,
+  "p95_ms": 23.275652201846242,
   "recall_at_k": 0.625,
-  "recorded_at": "2026-10-18T22:10:33.730516+00:00",
+  "recorded_at": "2026-10-23T21:35:07.816218+00:00",
   "reranker": "n/a",
   "results": [
     {
       "breadth": 0,
-      "duration_ms": 15.219436027109623,
+      "duration_ms": 17.877854872494936,
       "expected": [
         "state/manifest.py"
       ],
       "first_hit_rank": null,
       "found": [],
+      "matched": 0,
       "query": "how does the indexer decide whether a file needs reindexing"
     },
     {
-      "breadth": 35,
-      "duration_ms": 16.841437900438905,
+      "breadth": 34,
+      "duration_ms": 16.890058061107993,
       "expected": [
         "storage/qdrant_store.py"
       ],
@@ -47,11 +48,12 @@
         "ai-workspace/workspace-indexer/tests/test_fastembed_sparse_backend.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_index_spec.py"
       ],
+      "matched": 1,
       "query": "where do we set the BM25 inverse document frequency modifier"
     },
     {
-      "breadth": 75,
-      "duration_ms": 18.64165998995304,
+      "breadth": 73,
+      "duration_ms": 19.363594008609653,
       "expected": [
         "chunking/code_chunker.py"
       ],
@@ -59,20 +61,21 @@
       "found": [
         "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
-        "ralph-orchestrator/package-lock.json",
         "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
         "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
         "ai-workspace/workspace-indexer/tests/test_chunk_id.py",
         "ai-workspace/workspace-indexer/tests/test_markdown_chunker.py",
         "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/markdown_chunker.py",
         "ai-workspace/workspace-indexer/tests/test_manifest.py",
-        "ai-workspace/workspace-indexer/docs/reference.md"
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/chunk_factory.py"
       ],
+      "matched": 1,
       "query": "how are code chunks given their enclosing class or function name"
     },
     {
       "breadth": 97,
-      "duration_ms": 18.481521867215633,
+      "duration_ms": 19.15169507265091,
       "expected": [
         "search/staleness.py"
       ],
@@ -89,33 +92,35 @@
         "ai-workspace/workspace-indexer/docs/deployment.md",
         "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs"
       ],
+      "matched": 1,
       "query": "what stops a search result showing text that no longer matches the file"
     },
     {
-      "breadth": 62,
-      "duration_ms": 18.624062882736325,
+      "breadth": 56,
+      "duration_ms": 17.60675315745175,
       "expected": [
         "state/manifest.py",
         "chunking/file_reader.py"
       ],
-      "first_hit_rank": 8,
+      "first_hit_rank": 2,
       "found": [
-        "ai-workspace/workspace-indexer/poetry.lock",
-        "redacted/edf32b75be870c73",
-        "ralph-orchestrator/Cargo.lock",
-        "chrome-bookmark-manager/poetry.lock",
-        "ralph-orchestrator/uv.lock",
-        "ralph-orchestrator/flake.lock",
         "redacted/b3a5e9d15c0bb83f",
         "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
         "redacted/0c67a79bd65e0f68",
-        "redacted/d87e95cdaa7bede3"
+        "redacted/d87e95cdaa7bede3",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "redacted/417d031deffb2120",
+        "ai-workspace/workspace-indexer/tests/test_chunk_id.py",
+        "redacted/a2655efdc4558ffb",
+        "redacted/22e51f79e4bf97c2",
+        "redacted/26d7387490f4627c"
       ],
+      "matched": 1,
       "query": "how do we avoid re-embedding a file that was only reformatted"
     },
     {
       "breadth": 14,
-      "duration_ms": 14.66999901458621,
+      "duration_ms": 17.339571146294475,
       "expected": [
         "rerank/reranker_factory.py",
         "rerank/noop_reranker.py"
@@ -133,11 +138,12 @@
         "ai-workspace/workspace-indexer/tests/test_query_service.py",
         "ai-workspace/workspace-indexer/CLAUDE.md"
       ],
+      "matched": 1,
       "query": "how is reranking turned off when there is no API key"
     },
     {
-      "breadth": 139,
-      "duration_ms": 23.118904093280435,
+      "breadth": 138,
+      "duration_ms": 23.275652201846242,
       "expected": [
         "search/reprojector.py"
       ],
@@ -154,11 +160,12 @@
         "ralph-orchestrator/crates/ralph-adapters/src/claude_stream.rs",
         "ralph-orchestrator/crates/ralph-core/src/hooks/executor.rs"
       ],
+      "matched": 0,
       "query": "truncating a vector to fewer dimensions without re-embedding"
     },
     {
       "breadth": 6,
-      "duration_ms": 14.483530074357986,
+      "duration_ms": 15.861182939261198,
       "expected": [
         "obs/context.py"
       ],
@@ -171,6 +178,7 @@
         "ai-workspace/workspace-indexer/tests/test_reference_doc.py",
         "ai-workspace/workspace-indexer/tests/test_logging_setup.py"
       ],
+      "matched": 1,
       "query": "why does a log line know which file caused it"
     }
   ],

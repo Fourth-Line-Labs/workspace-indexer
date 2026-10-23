@@ -21,6 +21,13 @@ from workspace_indexer.evaluation.private_path_error import PrivatePathError
 from workspace_indexer.evaluation.public_path_guard import ENV_VAR, PublicPathGuard
 
 
+def _ws(*roots: Path) -> list[tuple[str, Path]]:
+    """Workspace roots as the guard takes them: labelled, because the label is
+    what a multi-root recorded path is prefixed with. `resolved_label` defaults
+    to the basename, which is what these fixtures want."""
+    return [(root.name, root) for root in roots]
+
+
 def _record(found: list[str]) -> EvalRecord:
     return EvalRecord(
         recorded_at="2026-10-18T00:00:00+00:00",
@@ -47,7 +54,7 @@ def _found(guard: PublicPathGuard, paths: list[str]) -> list[str]:
 def test_a_path_outside_the_allowlist_is_replaced_by_a_stable_digest(tmp_path: Path) -> None:
     """Redaction rather than refusal: matches outside the allowlist happen on
     most runs, so a guard that rejected such a record would reject every one."""
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     first = _found(guard, ["theirs/secret.cs"])[0]
     second = _found(guard, ["theirs/secret.cs"])[0]
@@ -59,13 +66,13 @@ def test_a_path_outside_the_allowlist_is_replaced_by_a_stable_digest(tmp_path: P
 def test_an_unlisted_tree_is_redacted_without_anyone_naming_it(tmp_path: Path) -> None:
     """The whole reason for the inversion. A denylist publishes what nobody
     thought to add to it; an allowlist redacts it."""
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     assert _found(guard, ["never-considered/cv.md"])[0].startswith("redacted/")
 
 
 def test_a_listed_tree_is_untouched(tmp_path: Path) -> None:
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     assert _found(guard, ["mine/a.py"]) == ["mine/a.py"]
 
@@ -73,7 +80,7 @@ def test_a_listed_tree_is_untouched(tmp_path: Path) -> None:
 def test_a_sibling_sharing_a_name_prefix_is_not_treated_as_inside(tmp_path: Path) -> None:
     """`mine-notes` is not under `mine`. Matching on the raw string would
     publish it."""
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     assert _found(guard, ["mine-notes/readme.md"])[0].startswith("redacted/")
 
@@ -81,7 +88,7 @@ def test_a_sibling_sharing_a_name_prefix_is_not_treated_as_inside(tmp_path: Path
 def test_two_redacted_files_stay_distinguishable(tmp_path: Path) -> None:
     """One placeholder for everything would make three hits on one file and
     three hits on three files read identically."""
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     assert len(set(_found(guard, ["x/a.cs", "x/b.cs"]))) == 2
 
@@ -91,7 +98,7 @@ def test_a_public_root_equal_to_the_workspace_root_publishes_everything(tmp_path
     recorded path -- so the denylist version of this silently redacted nothing
     in its maximal configuration. The empty relative form is what makes the
     declaration mean what it says."""
-    guard = PublicPathGuard([tmp_path], [tmp_path])
+    guard = PublicPathGuard([tmp_path], _ws(tmp_path))
 
     assert guard.active
     assert _found(guard, ["anything/at/all.py"]) == ["anything/at/all.py"]
@@ -104,7 +111,7 @@ def test_a_directory_named_like_the_redaction_namespace_does_not_break_the_backs
     redacted output would report every redaction as a leak for anyone whose
     allowlist excludes `redacted/`, failing closed on an ordinary name and
     killing the measurement."""
-    guard = PublicPathGuard([tmp_path / "mine"], [tmp_path])
+    guard = PublicPathGuard([tmp_path / "mine"], _ws(tmp_path))
 
     out = _found(guard, ["redacted/notes.md"])
 
@@ -120,7 +127,7 @@ def test_an_unresolved_spelling_still_matches(tmp_path: Path) -> None:
     link = tmp_path / "link"
     link.symlink_to(real)
 
-    guard = PublicPathGuard([link / "mine"], [real])
+    guard = PublicPathGuard([link / "mine"], _ws(real))
 
     assert _found(guard, ["mine/a.py"]) == ["mine/a.py"]
 
@@ -128,7 +135,7 @@ def test_an_unresolved_spelling_still_matches(tmp_path: Path) -> None:
 def test_nothing_configured_means_nothing_redacted(tmp_path: Path) -> None:
     """A workspace with nothing to hide is not forced to enumerate itself. The
     CLI prints a warning on any recorded run in this state."""
-    guard = PublicPathGuard([], [tmp_path])
+    guard = PublicPathGuard([], _ws(tmp_path))
 
     assert not guard.active
     assert _found(guard, ["anything.py"]) == ["anything.py"]
@@ -141,7 +148,7 @@ def test_a_public_root_outside_every_workspace_root_is_reported(
     nothing -- and a silently useless privacy control looks exactly like a
     working one. Read off stdout rather than caplog: structlog renders there
     and never reaches the stdlib handler caplog installs."""
-    PublicPathGuard([tmp_path / "elsewhere"], [tmp_path / "workspace"])
+    PublicPathGuard([tmp_path / "elsewhere"], _ws(tmp_path / "workspace"))
 
     assert "public_root_outside_workspace" in capsys.readouterr().out
 
@@ -151,7 +158,7 @@ def test_roots_come_from_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_pa
     private tree should not enter a committed file."""
     monkeypatch.setenv(ENV_VAR, f"{tmp_path / 'a'}:{tmp_path / 'b'}")
 
-    guard = PublicPathGuard.from_env([tmp_path])
+    guard = PublicPathGuard.from_env(_ws(tmp_path))
 
     assert guard.is_public("a/x.py")
     assert guard.is_public("b/y.py")
@@ -167,7 +174,7 @@ def test_a_path_that_cannot_be_redacted_refuses_the_record(tmp_path: Path) -> No
             return path
 
     with pytest.raises(PrivatePathError):
-        Broken([tmp_path / "mine"], [tmp_path]).apply(_record(["theirs/x.cs"]))
+        Broken([tmp_path / "mine"], _ws(tmp_path)).apply(_record(["theirs/x.cs"]))
 
 
 def test_one_public_root_does_not_publish_the_other_roots(tmp_path: Path) -> None:
@@ -182,7 +189,7 @@ def test_one_public_root_does_not_publish_the_other_roots(tmp_path: Path) -> Non
     mine.mkdir()
     client.mkdir()
 
-    guard = PublicPathGuard([mine], [mine, client], root_qualified_paths=True)
+    guard = PublicPathGuard([mine], _ws(mine, client), root_qualified_paths=True)
 
     assert guard.active
     assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
@@ -198,7 +205,7 @@ def test_a_nested_public_root_matches_the_root_prefixed_recorded_form(tmp_path: 
     (tmp_path / "client-x").mkdir()
 
     guard = PublicPathGuard(
-        [mine / "proj"], [mine, tmp_path / "client-x"], root_qualified_paths=True
+        [mine / "proj"], _ws(mine, tmp_path / "client-x"), root_qualified_paths=True
     )
 
     assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
@@ -221,7 +228,7 @@ def test_an_unqualified_record_cannot_publish_by_coincidence_of_spelling(tmp_pat
     repo_a.mkdir()
     repo_b.mkdir()
 
-    guard = PublicPathGuard([repo_a], [repo_a, repo_b], root_qualified_paths=False)
+    guard = PublicPathGuard([repo_a], _ws(repo_a, repo_b), root_qualified_paths=False)
 
     assert guard.active
     assert _found(guard, ["repo-a/secrets.py"])[0].startswith("redacted/")
@@ -236,7 +243,7 @@ def test_roots_sharing_a_basename_do_not_publish_each_other(tmp_path: Path) -> N
     first.mkdir(parents=True)
     second.mkdir(parents=True)
 
-    guard = PublicPathGuard([first], [first, second], root_qualified_paths=True)
+    guard = PublicPathGuard([first], _ws(first, second), root_qualified_paths=True)
 
     assert guard.active
     assert _found(guard, ["api/secrets.py"])[0].startswith("redacted/")
@@ -249,6 +256,6 @@ def test_a_single_root_record_is_unaffected_by_qualification(tmp_path: Path) -> 
     mine.mkdir()
 
     for qualified in (True, False):
-        guard = PublicPathGuard([mine], [tmp_path], root_qualified_paths=qualified)
+        guard = PublicPathGuard([mine], _ws(tmp_path), root_qualified_paths=qualified)
         assert _found(guard, ["mine/a.py"]) == ["mine/a.py"]
         assert _found(guard, ["theirs/a.py"])[0].startswith("redacted/")

@@ -58,11 +58,17 @@ class EvalReport(BaseModel):
         It cannot act on silence, and a tool that is silent one query in three
         is not a tool an agent should reach for first, whatever its recall on
         the queries it does answer.
+
+        Over every result, unlike `flood_rate` and `median_breadth`. Returning
+        nothing is visible in `found` for any retriever, while breadth is a
+        count only the retrievers that can exceed the cutoff report -- so
+        filtering on breadth here scored a search or tool run that answered
+        nothing at all as `empty_rate` 0.0, for the surface the metric exists
+        to compare the lexical tools against.
         """
-        scored = [r for r in self.results if r.breadth is not None]
-        if not scored:
+        if not self.results:
             return 0.0
-        return sum(1 for r in scored if r.breadth == 0) / len(scored)
+        return sum(1 for r in self.results if not r.found) / len(self.results)
 
     @property
     def flood_rate(self) -> float:

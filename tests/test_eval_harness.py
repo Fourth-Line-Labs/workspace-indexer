@@ -137,7 +137,12 @@ def _breadth(breadths: list[int | None], limit: int = 10) -> EvalReport:
         label="t",
         limit=limit,
         results=[
-            EvalResult(query="q", expected=["a.py"], found=["a.py"], breadth=b) for b in breadths
+            # `found` follows the breadth it is given, because a real
+            # retriever cannot match zero files and still return one. A fixture
+            # pairing breadth 0 with a hit would let `empty_rate` key on either
+            # and look right both ways.
+            EvalResult(query="q", expected=["a.py"], found=[] if b == 0 else ["a.py"], breadth=b)
+            for b in breadths
         ],
     )
 
@@ -165,15 +170,55 @@ def test_the_flood_threshold_scales_with_the_cutoff() -> None:
     assert _breadth([40], limit=50).flood_rate == pytest.approx(0.0)
 
 
-def test_a_retriever_that_reports_no_breadth_is_excluded_not_counted_as_zero() -> None:
+def test_a_retriever_that_reports_no_breadth_is_not_counted_as_zero_breadth() -> None:
     """A dense retriever returns `limit` hits by construction and has no
     breadth. Treating its None as zero would report it as silent on every
-    query -- a 100% empty rate for the tool that is never empty."""
+    query -- a 100% empty rate for the tool that is never empty. Breadth and
+    flood keep the optional capability; emptiness does not need it."""
     report = _breadth([None, None, 0])
 
-    assert report.empty_rate == pytest.approx(1.0)  # one scored case, and it was empty
+    assert report.empty_rate == pytest.approx(1 / 3)  # the one that returned nothing
     assert report.median_breadth == pytest.approx(0.0)
     assert _breadth([None, None]).empty_rate == pytest.approx(0.0)
+
+
+def test_a_capped_retriever_that_returns_nothing_is_still_empty() -> None:
+    """`empty_rate` used to be computed only over results reporting a breadth,
+    so a search or tool run that answered nothing at all recorded 0.0 -- on the
+    surface the metric exists to compare the lexical tools against, and one the
+    harness already has a case for (an empty tool response is a miss). Silence
+    is visible in `found` whether or not the retriever counts its matches."""
+    report = EvalReport(
+        label="t",
+        limit=10,
+        results=[
+            EvalResult(query="q", expected=["a.py"], found=[]),
+            EvalResult(query="q", expected=["a.py"], found=["a.py"], first_hit_rank=1),
+        ],
+    )
+
+    assert report.empty_rate == pytest.approx(0.5)
+    # Breadth is genuinely unknown here, and inventing one would turn "this
+    # retriever does not count" into "it matched nothing".
+    assert report.flood_rate == pytest.approx(0.0)
+
+
+def test_a_redacted_path_does_not_rescore_the_case() -> None:
+    """`PublicPathGuard` rewrites `found` on the way to disk. A recall derived
+    from those paths afterwards scores the redaction rather than the
+    retrieval -- saving recall 0 beside first_hit_rank 1, with the record's own
+    aggregate disagreeing with both."""
+    measured = EvalResult(
+        query="q", expected=["a.py"], found=["mine/a.py"], first_hit_rank=1
+    ).measured()
+
+    redacted = measured.model_copy(update={"found": ["redacted/0123456789abcdef"]})
+
+    assert measured.recall == 1.0
+    assert redacted.recall == 1.0
+    # A result built without a measurement still falls back to the paths, so
+    # records written before the field loaded unchanged.
+    assert redacted.model_copy(update={"matched": None}).recall == 0.0
 
 
 async def test_the_harness_records_breadth_only_from_a_retriever_that_reports_it() -> None:

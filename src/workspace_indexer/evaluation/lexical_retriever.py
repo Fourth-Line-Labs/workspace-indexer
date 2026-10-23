@@ -46,11 +46,28 @@ class LexicalRetriever:
     def __init__(
         self,
         tool: LexicalTool,
-        roots: list[Path],
+        roots: list[tuple[str, Path]],
         patterns: Mapping[str, str],
         exclude_dirs: tuple[str, ...] = (),
         exclude_files: tuple[str, ...] = (),
     ) -> None:
+        # Labelled, not bare paths. A recorded hit is prefixed with the root it
+        # came from when there is more than one, and the basename is not an
+        # identifier: `RootConfig.resolved_label` is, and the configuration
+        # allows `/x/api` and `/y/api` to carry distinct ones. Prefixing with
+        # the basename made two different files the same recorded string --
+        # and because `PublicPathGuard.redact` digests that string, the same
+        # digest after redaction too.
+        labels = [label for label, _ in roots]
+        if len(set(labels)) != len(labels):
+            # Refused rather than disambiguated here: a label is what the rest
+            # of the system already keys roots by -- `config_hash`, the
+            # manifest, `--unit` -- so a duplicate is a configuration error to
+            # fix once, not a collision for each consumer to invent a rule for.
+            raise ValueError(
+                "two workspace roots resolve to the same label, so a recorded path "
+                "cannot say which one it came from. Give them distinct `label:` values."
+            )
         self._tool = tool
         self._roots = roots
         self._patterns = patterns
@@ -78,14 +95,14 @@ class LexicalRetriever:
         # and undercount breadth. Where one root nests inside another, the same
         # file arrives under two keys and is counted twice; that is visible in
         # the output rather than silently summed.
-        counts: dict[tuple[Path, str], int] = {}
-        for root in self._roots:
+        counts: dict[tuple[str, str], int] = {}
+        for label, root in self._roots:
             for rel, count in (await self._run(pattern, root)).items():
-                key = (root, rel)
+                key = (label, rel)
                 counts[key] = counts.get(key, 0) + count
 
         self.last_breadth = len(counts)
-        ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0][1], str(item[0][0])))
+        ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0][1], item[0][0]))
         log.info(
             "eval.lexical",
             tool=self._tool.name,
@@ -93,14 +110,18 @@ class LexicalRetriever:
             breadth=len(counts),
             returned=min(len(ranked), limit),
         )
-        return [self._display(root, rel) for (root, rel), _ in ranked[:limit]]
+        return [self._display(label, rel) for (label, rel), _ in ranked[:limit]]
 
-    def _display(self, root: Path, rel: str) -> str:
+    def _display(self, label: str, rel: str) -> str:
         """Relative to the root, as the index reports it -- and prefixed with
-        the root's own name when there is more than one, so two roots holding
-        the same relative path stay distinguishable in the record. Expectations
-        match as substrings, so the prefix costs nothing."""
-        return rel if len(self._roots) == 1 else f"{root.name}/{rel}"
+        the root's label when there is more than one, so two roots holding the
+        same relative path stay distinguishable in the record. The label rather
+        than the basename, because two roots can share a basename and the
+        prefix has to identify exactly one of them: `PublicPathGuard` matches
+        the allowlist against this form, so an ambiguous prefix publishes the
+        root that was not allowlisted. Expectations match as substrings, so the
+        prefix costs nothing."""
+        return rel if len(self._roots) == 1 else f"{label}/{rel}"
 
     async def _run(self, pattern: str, root: Path) -> dict[str, int]:
         argv = self._tool.argv(pattern, root, self._exclude_dirs, self._exclude_files)
