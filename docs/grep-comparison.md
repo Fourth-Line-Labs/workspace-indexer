@@ -6,7 +6,7 @@ summary: >-
   Records the method, the confound that invalidated the first attempt, two
   predictions the results falsified, and the decision rule the numbers support.
 created: 2026-10-18
-updated: 2026-10-18
+updated: 2026-10-23
 tags: [evaluation, retrieval, grep, ripgrep, benchmark]
 status: current
 audience: "an engineer deciding whether an agent should call this tool or just grep"
@@ -80,7 +80,7 @@ document and is the single most important thing on this page.
 | | ripgrep | **1.000** | 0.680 | **14 ms** | 4 | 0% |
 | | grep | **1.000** | 0.675 | 43 ms | 4 | 0% |
 
-**grep and ripgrep now agree to within 0.004.** That is the strongest evidence
+**grep and ripgrep now agree to within 0.005.** That is the strongest evidence
 the corpus is finally shared: the two binaries differ in gitignore handling and
 little else, so once they search the same files they should score the same, and
 they do.
@@ -163,7 +163,7 @@ Not "use the index instead of grep":
    Plain `search` loses this group to ripgrep on recall; the document-type
    filter is what makes it 0.938.
 4. **Grepped and got nothing, or got 60 files? That is the index's cue.** The
-   lexical tools flood on 38% of all cases and 62% of the retrieval group. An
+   lexical tools flood on 38-42% of all cases and 62% of the retrieval group. An
    empty result and a flood are both detectable at the call site without
    knowing the answer.
 

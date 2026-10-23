@@ -191,6 +191,28 @@ def test_eval_scores_a_dataset(project: Path) -> None:
 
 
 @pytest.mark.integration
+def test_eval_rejects_an_exclusion_grep_cannot_express(project: Path) -> None:
+    """`translate_excludes` refuses a directory exclusion containing glob
+    metacharacters, because grep and ripgrep cannot be given it as the same
+    literal. That refusal is reached through a user-editable `index.exclude`
+    entry, so it is an expected environment problem and gets this CLI's
+    convention for one -- a red line and exit 2 -- rather than a traceback."""
+    config = project / "config" / "workspace.yaml"
+    raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+    raw["index"]["exclude"] = ["**/bu[ld]/**"]
+    config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    (project / "config" / "eval.yaml").write_text(
+        "- query: how does the widget render\n  expect: [widget.py]\n  grep_pattern: widget\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["eval", "--dataset", "config/eval.yaml", "--tool", "grep"])
+
+    assert result.exit_code == 2, result.stdout
+    assert "glob characters" in plain(result.stdout)
+
+
+@pytest.mark.integration
 def test_reproject_creates_a_narrower_collection(project: Path) -> None:
     runner.invoke(app, ["index"])
     result = runner.invoke(app, ["reproject", "--dimensions", "128"])

@@ -794,7 +794,17 @@ def _retriever(
         # every pattern. A lexical tool without them searches the harness's own
         # output: measured, and `config/eval.yaml` came back rank 1 for five of
         # eight lexical queries because it contains their answers.
-        dirs, files = translate_excludes(ctx.config.all_excludes)
+        try:
+            dirs, files = translate_excludes(ctx.config.all_excludes)
+        except ValueError as exc:
+            # Caught here rather than added to the command's handler: that
+            # `except` wraps the whole run, and a blanket ValueError there
+            # would turn a genuine bug anywhere inside it into a tidy exit 2.
+            # A bad `index.exclude` entry is an expected environment problem,
+            # so it gets this CLI's convention for one -- a red line and exit
+            # 2 -- instead of a stack dump.
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=2) from exc
         files = (*files, *sorted({path.name for path in ctx.config.excluded_paths}))
         return LexicalRetriever(
             LEXICAL_TOOLS[tool],

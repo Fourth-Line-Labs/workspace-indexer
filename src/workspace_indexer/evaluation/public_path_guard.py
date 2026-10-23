@@ -72,21 +72,52 @@ class PublicPathGuard:
                     ),
                 )
             self._prefixes.extend(relative)
+        if self._prefixes and len(self._workspace_roots) > 1:
+            # `SearchRetriever` returns `hit.rel_path`, which the walker
+            # computes as `path.relative_to(root.path)` -- no root name. Two
+            # roots holding the same relative path are therefore the same
+            # string in a dense record, and nothing in the record says which
+            # root a path came from. Matching on a root-prefixed form means
+            # such a record redacts wholesale: safe, and useless as a record.
+            # The alternative is accepting the bare relative form, which is the
+            # fail-open again, so this is the direction to fail in -- said out
+            # loud because a run that redacts everything should not look like a
+            # run that found nothing to redact.
+            log.warning(
+                "eval.multi_root_dense_paths_are_root_ambiguous",
+                detail=(
+                    "more than one workspace root: a dense (`--tool search`) record does not "
+                    "record which root each path came from, so every path in it falls outside "
+                    "the allowlist and is redacted. Lexical records carry the root name and "
+                    "match normally."
+                ),
+            )
 
     def _relative_forms(self, public: Path) -> list[str]:
         """How this root appears in a root-relative recorded path.
 
-        An empty string when the public root *is* a workspace root: everything
-        recorded relative to it is then public. Returned as `""` rather than
-        `Path('.')`, whose string form matches no recorded path and which is
-        how the denylist version of this silently allowlisted nothing.
+        Root-aware, because the recorded form depends on how many workspace
+        roots there are. With one root, a path is recorded relative to it and a
+        public root equal to it yields `""` -- everything recorded is then
+        public. Returned as `""` rather than `Path('.')`, whose string form
+        matches no recorded path and which is how the denylist version of this
+        silently allowlisted nothing.
+
+        With more than one root, `LexicalRetriever._display` prefixes the
+        root's own name, so the matching form carries that prefix too. `""`
+        must *not* be produced there: `is_public` treats it as matching every
+        path, so allowlisting one root of a multi-root workspace would publish
+        every other root as well -- the exact fail-open the allowlist exists to
+        close, and one a single-root test cannot reach.
         """
+        multi_root = len(self._workspace_roots) > 1
         forms: list[str] = []
         for workspace in self._workspace_roots:
             if public == workspace:
-                forms.append("")
+                forms.append(workspace.name if multi_root else "")
             elif workspace in public.parents:
-                forms.append(str(public.relative_to(workspace)))
+                relative = public.relative_to(workspace).as_posix()
+                forms.append(f"{workspace.name}/{relative}" if multi_root else relative)
         return forms
 
     @classmethod
@@ -118,6 +149,10 @@ class PublicPathGuard:
         if not self.active:
             return True
         return any(
+            # `""` is produced only for a single-root workspace, where every
+            # recorded path is relative to that one root. `_relative_forms`
+            # never yields it for a multi-root workspace, where it would
+            # publish every root at once.
             prefix == "" or path == prefix or path.startswith(prefix + "/")
             # Segment-aware, so a sibling sharing a name prefix is not treated
             # as inside: `work-notes` is not under `work`.

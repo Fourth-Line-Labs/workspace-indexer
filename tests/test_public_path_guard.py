@@ -168,3 +168,38 @@ def test_a_path_that_cannot_be_redacted_refuses_the_record(tmp_path: Path) -> No
 
     with pytest.raises(PrivatePathError):
         Broken([tmp_path / "mine"], [tmp_path]).apply(_record(["theirs/x.cs"]))
+
+
+def test_one_public_root_does_not_publish_the_other_roots(tmp_path: Path) -> None:
+    """The fail-open the allowlist exists to close, in the layout
+    `config/workspace.example.yaml` documents. A public root equal to *a*
+    workspace root used to yield the empty relative form, and `is_public`
+    treats that as matching every path -- so declaring one root public
+    published every sibling root with it. A single-root test cannot reach
+    this, because there the empty form is correct."""
+    mine = tmp_path / "mine"
+    client = tmp_path / "client-x"
+    mine.mkdir()
+    client.mkdir()
+
+    guard = PublicPathGuard([mine], [mine, client])
+
+    assert guard.active
+    assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
+    assert _found(guard, ["client-x/secret.py"])[0].startswith("redacted/")
+
+
+def test_a_nested_public_root_matches_the_root_prefixed_recorded_form(tmp_path: Path) -> None:
+    """`LexicalRetriever._display` prefixes the root's name when there is more
+    than one, so `proj` is recorded as `mine/proj/x.py`. A form derived without
+    that prefix matches nothing and redacts an explicitly allowlisted tree."""
+    mine = tmp_path / "mine"
+    (mine / "proj").mkdir(parents=True)
+    (tmp_path / "client-x").mkdir()
+
+    guard = PublicPathGuard([mine / "proj"], [mine, tmp_path / "client-x"])
+
+    assert _found(guard, ["mine/proj/x.py"]) == ["mine/proj/x.py"]
+    # The prefix is segment-aware and root-scoped: a same-named directory under
+    # a different root is not allowlisted by it.
+    assert _found(guard, ["client-x/proj/x.py"])[0].startswith("redacted/")
