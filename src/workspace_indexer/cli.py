@@ -760,7 +760,7 @@ def evaluate(
             f"p95 [cyan]{report.p95_ms:.0f} ms[/cyan], "
             f"slowest {report.slowest_ms:.0f} ms"
         )
-        if report.median_breadth or report.empty_rate or report.flood_rate:
+        if report.reports_breadth:
             # Only for a retriever that can miss by saying nothing or by saying
             # everything. Printed beside recall because recall scores the flood
             # as a success and the silence as an ordinary miss.
@@ -768,6 +768,15 @@ def evaluate(
                 f"  breadth:   median [cyan]{report.median_breadth:.0f} files[/cyan], "
                 f"empty [cyan]{report.empty_rate:.0%}[/cyan], "
                 f"flood [cyan]{report.flood_rate:.0%}[/cyan]"
+            )
+        elif report.empty_rate:
+            # A dense retriever has no breadth to report, but it can still
+            # answer nothing. Gated on `reports_breadth` rather than on a
+            # truthy `median_breadth`, because that falls back to 0.0 on an
+            # empty sample and would print "median 0 files" -- a missing
+            # measurement rendered as a measured zero, next to a real number.
+            console.print(
+                f"  empty:     [cyan]{report.empty_rate:.0%}[/cyan] of queries returned nothing"
             )
         for miss in report.misses:
             console.print(f"  [yellow]miss[/yellow] {miss.query}")

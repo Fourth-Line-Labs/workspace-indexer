@@ -71,6 +71,18 @@ class EvalReport(BaseModel):
         return sum(1 for r in self.results if not r.found) / len(self.results)
 
     @property
+    def reports_breadth(self) -> bool:
+        """Whether any result came from a retriever that counts its matches.
+
+        `median_breadth` falls back to 0.0 on an empty sample, which is
+        indistinguishable from a measured zero -- so a caller that renders it
+        has to ask this first rather than treating a falsy value as "nothing
+        to show". `empty_rate` is counted over every result and is therefore
+        no longer a usable proxy.
+        """
+        return any(r.breadth is not None for r in self.results)
+
+    @property
     def flood_rate(self) -> float:
         """Share of queries that matched more than `flood_factor` x the cutoff.
 

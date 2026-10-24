@@ -259,3 +259,20 @@ def test_a_single_root_record_is_unaffected_by_qualification(tmp_path: Path) -> 
         guard = PublicPathGuard([mine], _ws(tmp_path), root_qualified_paths=qualified)
         assert _found(guard, ["mine/a.py"]) == ["mine/a.py"]
         assert _found(guard, ["theirs/a.py"])[0].startswith("redacted/")
+
+
+def test_an_empty_label_does_not_publish_every_root(tmp_path: Path) -> None:
+    """An empty label is unique against every other label, so the duplicate
+    check passes it, and it is also the prefix `is_public` treats as matching
+    every path. `RootConfig` now refuses to produce one; the guard fails
+    closed on one reaching it by any other route."""
+    mine = tmp_path / "mine"
+    client = tmp_path / "client"
+    mine.mkdir()
+    client.mkdir()
+
+    guard = PublicPathGuard([mine], [("", mine), ("client", client)], root_qualified_paths=True)
+
+    assert guard.active
+    assert _found(guard, ["client/secret.py"])[0].startswith("redacted/")
+    assert _found(guard, ["anything/at/all.py"])[0].startswith("redacted/")

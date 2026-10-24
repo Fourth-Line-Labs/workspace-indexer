@@ -159,3 +159,23 @@ def test_an_ordinary_label_is_untouched() -> None:
         {"workspace": {"name": "w", "roots": [{"path": "/tmp/a", "label": "my-repo"}]}}
     )
     assert config.workspace.roots[0].resolved_label == "my-repo"
+
+
+@pytest.mark.parametrize("path", [".", "/", ""])
+def test_a_root_whose_path_supplies_no_name_must_be_labelled(path: str) -> None:
+    """`resolved_label` falls back to `path.name`, which pathlib gives as the
+    empty string for these. An empty label is unique against every other
+    label, so every duplicate check passes it -- and it is also the prefix
+    that matches every recorded path, so allowlisting such a root in a
+    multi-root eval publishes all of them."""
+    with pytest.raises(ValidationError, match="no usable name"):
+        WorkspaceConfig.model_validate(
+            {"workspace": {"name": "w", "roots": [{"path": path}, {"path": "/tmp/client"}]}}
+        )
+
+
+def test_a_root_without_a_name_is_fine_once_labelled() -> None:
+    config = WorkspaceConfig.model_validate(
+        {"workspace": {"name": "w", "roots": [{"path": ".", "label": "here"}]}}
+    )
+    assert config.workspace.roots[0].resolved_label == "here"

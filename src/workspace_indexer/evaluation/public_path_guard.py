@@ -83,7 +83,11 @@ class PublicPathGuard:
         # backstop for every other way a guard gets built, and it fails closed
         # rather than refusing, because refusing here would reject a record
         # that is already measured.
-        self._labels_unique = len(set(labels)) == len(labels)
+        # `all(labels)`, not only uniqueness. An empty label is unique against
+        # every other label and is also the prefix that matches every path, so
+        # a duplicate check alone lets it through. `RootConfig` now refuses to
+        # produce one; this is the backstop for a guard built any other way.
+        self._labels_unique = len(set(labels)) == len(labels) and all(labels)
         self._prefixes: list[str] = []
         for public in self._roots:
             self._prefixes.append(str(public))

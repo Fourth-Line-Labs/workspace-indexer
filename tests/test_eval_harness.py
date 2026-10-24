@@ -257,3 +257,21 @@ async def test_the_harness_records_breadth_only_from_a_retriever_that_reports_it
 
     assert wide.results[0].breadth == 42
     assert plain.results[0].breadth is None
+
+
+def test_a_report_says_whether_any_retriever_counted_its_matches() -> None:
+    """`median_breadth` falls back to 0.0 on an empty sample, which renders
+    identically to a measured zero. Since `empty_rate` is now counted over
+    every result, it is no longer a usable proxy for "this retriever reports
+    a breadth" -- a dense run that answered nothing would have opened the
+    breadth line and printed `median 0 files` as though it were measured."""
+    dense = EvalReport(
+        label="t",
+        limit=10,
+        results=[EvalResult(query="q", expected=["a.py"], found=[])],
+    )
+
+    assert dense.empty_rate == pytest.approx(1.0)
+    assert dense.median_breadth == pytest.approx(0.0)
+    assert dense.reports_breadth is False
+    assert _breadth([0, 3]).reports_breadth is True
