@@ -15,6 +15,7 @@ inflating a published number.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,19 @@ from workspace_indexer.evaluation import GREP, RIPGREP, EvalCase, LexicalTool
 # Matches any line with a character on it, so the "query" selects the whole
 # corpus and the comparison is between two file sets rather than two rankings.
 EVERYTHING = "."
+
+# CI installs ripgrep precisely so this does not skip there -- one of the three
+# confounds this file exists to catch was a ripgrep default, and a guard that
+# quietly skips half of itself on the only machine that runs it unattended is
+# not a guard. The marker is for a contributor's laptop, where a skip that says
+# why beats a failure that looks like a bug in the code.
+needs_ripgrep = pytest.mark.skipif(
+    shutil.which("rg") is None, reason="ripgrep is not installed; CI installs it"
+)
+
+# Marked per parameter rather than per test, so a laptop without ripgrep still
+# runs the grep half instead of losing both.
+TOOLS = [pytest.param(GREP, id="grep"), pytest.param(RIPGREP, marks=needs_ripgrep, id="ripgrep")]
 _IDENTITY = ("-c", "user.email=t@example.com", "-c", "user.name=T")
 
 
@@ -107,7 +121,7 @@ async def _searched(tool: LexicalTool, config: WorkspaceConfig) -> set[str]:
     return set(await retriever.retrieve("q", 10_000))
 
 
-@pytest.mark.parametrize("tool", [GREP, RIPGREP], ids=lambda t: t.name)
+@pytest.mark.parametrize("tool", TOOLS)
 async def test_a_lexical_tool_searches_exactly_what_the_index_holds(
     tool: LexicalTool, corpus: Path
 ) -> None:
@@ -120,6 +134,7 @@ async def test_a_lexical_tool_searches_exactly_what_the_index_holds(
     assert await _searched(tool, config) == _indexed(config)
 
 
+@needs_ripgrep
 async def test_grep_and_ripgrep_read_the_same_files(corpus: Path) -> None:
     """The document'"'"'s stated evidence that the corpus is shared is that the two
     binaries score alike. They scored alike while reading different corpora:
@@ -130,6 +145,7 @@ async def test_grep_and_ripgrep_read_the_same_files(corpus: Path) -> None:
     assert await _searched(GREP, config) == await _searched(RIPGREP, config)
 
 
+@needs_ripgrep
 async def test_a_hidden_file_is_searched_by_both(corpus: Path) -> None:
     """`.claude/` is a primary target rather than something to skip, and
     ripgrep skips hidden paths unless told otherwise."""
@@ -141,7 +157,7 @@ async def test_a_hidden_file_is_searched_by_both(corpus: Path) -> None:
     assert hidden in await _searched(GREP, config)
 
 
-@pytest.mark.parametrize("tool", [GREP, RIPGREP], ids=lambda t: t.name)
+@pytest.mark.parametrize("tool", TOOLS)
 async def test_a_file_over_the_size_limit_is_not_a_candidate(
     tool: LexicalTool, corpus: Path
 ) -> None:
@@ -153,7 +169,7 @@ async def test_a_file_over_the_size_limit_is_not_a_candidate(
     assert "huge.py" not in await _searched(tool, config)
 
 
-@pytest.mark.parametrize("tool", [GREP, RIPGREP], ids=lambda t: t.name)
+@pytest.mark.parametrize("tool", TOOLS)
 async def test_a_linked_worktree_is_not_a_candidate(tool: LexicalTool, corpus: Path) -> None:
     """A linked worktree is a second copy of a repository already indexed, so
     every file in it would be counted twice and rank against itself."""

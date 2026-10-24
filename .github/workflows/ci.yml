@@ -28,6 +28,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `tests/test_lexical_corpus_parity.py` asserts that grep and ripgrep
+      # search exactly the files the walker indexes. Three corpus confounds
+      # reached published numbers before that test existed, and one of them
+      # was a ripgrep default -- so skipping the ripgrep half on a runner
+      # without `rg` would leave the guard half-blind in the only place it
+      # runs unattended. grep is already present on ubuntu-latest.
+      - name: Install ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
