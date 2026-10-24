@@ -131,3 +131,51 @@ def test_staleness_checking_can_be_turned_off() -> None:
         }
     )
     assert config.search.check_staleness is False
+
+
+def test_a_root_label_cannot_contain_a_path_separator() -> None:
+    """A label identifies one root inside a recorded eval path.
+    `LexicalRetriever._display` prefixes a hit with it and `PublicPathGuard`
+    matches the allowlist against that form, so `public` and `public/private`
+    are distinct labels that pass every uniqueness check while one root's
+    prefix is a prefix of the other's -- allowlisting the first publishes the
+    second's `public/private/secret.py` verbatim."""
+    with pytest.raises(ValidationError, match="single component"):
+        WorkspaceConfig.model_validate(
+            {
+                "workspace": {
+                    "name": "w",
+                    "roots": [
+                        {"path": "/tmp/a", "label": "public"},
+                        {"path": "/tmp/b", "label": "public/private"},
+                    ],
+                }
+            }
+        )
+
+
+def test_an_ordinary_label_is_untouched() -> None:
+    config = WorkspaceConfig.model_validate(
+        {"workspace": {"name": "w", "roots": [{"path": "/tmp/a", "label": "my-repo"}]}}
+    )
+    assert config.workspace.roots[0].resolved_label == "my-repo"
+
+
+@pytest.mark.parametrize("path", [".", "/", ""])
+def test_a_root_whose_path_supplies_no_name_must_be_labelled(path: str) -> None:
+    """`resolved_label` falls back to `path.name`, which pathlib gives as the
+    empty string for these. An empty label is unique against every other
+    label, so every duplicate check passes it -- and it is also the prefix
+    that matches every recorded path, so allowlisting such a root in a
+    multi-root eval publishes all of them."""
+    with pytest.raises(ValidationError, match="no usable name"):
+        WorkspaceConfig.model_validate(
+            {"workspace": {"name": "w", "roots": [{"path": path}, {"path": "/tmp/client"}]}}
+        )
+
+
+def test_a_root_without_a_name_is_fine_once_labelled() -> None:
+    config = WorkspaceConfig.model_validate(
+        {"workspace": {"name": "w", "roots": [{"path": ".", "label": "here"}]}}
+    )
+    assert config.workspace.roots[0].resolved_label == "here"

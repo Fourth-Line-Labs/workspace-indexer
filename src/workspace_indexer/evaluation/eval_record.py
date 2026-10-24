@@ -51,6 +51,13 @@ class EvalRecord(BaseModel):
     median_ms: float = 0.0
     p95_ms: float = 0.0
 
+    # What recall@k cannot say. Defaulted to zero so records written before the
+    # grep comparison still load -- and zero is the truthful value for them,
+    # since a dense retriever never returns nothing and never floods.
+    empty_rate: float = 0.0
+    flood_rate: float = 0.0
+    median_breadth: float = 0.0
+
     results: list[EvalResult] = Field(default_factory=list[EvalResult])
 
     def comparable_to(self, other: EvalRecord) -> bool:
@@ -87,4 +94,10 @@ class EvalRecord(BaseModel):
             # case that actually happened. config_hash omitting `roots` is the
             # real gap and is tracked separately.
             and self.case_count == other.case_count
+            # `flood_rate` counts matches above `limit * FLOOD_FACTOR` and
+            # `median_breadth` moves with the cutoff too, so a -n 10 run and a
+            # -n 50 run are not the same measurement. recall@k and MRR@k were
+            # always cutoff-relative as well; the breadth metrics are what made
+            # ignoring it load-bearing rather than merely untidy.
+            and self.limit == other.limit
         )

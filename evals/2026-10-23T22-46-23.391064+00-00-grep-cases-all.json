@@ -1,0 +1,492 @@
+{
+  "case_count": 24,
+  "case_filter": "all",
+  "config_hash": "370358757e18d584",
+  "dimensions": 0,
+  "embedding_model": "n/a",
+  "empty_rate": 0.041666666666666664,
+  "flood_rate": 0.4166666666666667,
+  "fusion": "n/a",
+  "label": "grep cases=all",
+  "limit": 10,
+  "median_breadth": 27.0,
+  "median_ms": 58.94969799555838,
+  "miss_count": 7,
+  "mrr_at_k": 0.4431712962962963,
+  "p95_ms": 73.09063198044896,
+  "recall_at_k": 0.7708333333333334,
+  "recorded_at": "2026-10-23T22:46:23.391064+00:00",
+  "reranker": "n/a",
+  "results": [
+    {
+      "breadth": 0,
+      "duration_ms": 49.829351948574185,
+      "expected": [
+        "state/manifest.py"
+      ],
+      "first_hit_rank": null,
+      "found": [],
+      "matched": 0,
+      "query": "how does the indexer decide whether a file needs reindexing"
+    },
+    {
+      "breadth": 37,
+      "duration_ms": 56.47474201396108,
+      "expected": [
+        "storage/qdrant_store.py"
+      ],
+      "first_hit_rank": 4,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ralph-orchestrator/backend/ralph-web-server/src/runner/ProcessSupervisor.ts",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/qdrant_store.py",
+        "ralph-orchestrator/crates/ralph-e2e/src/hooks_bdd.rs",
+        "ralph-orchestrator/docs/advanced/loop-detection.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/embedding/fastembed_sparse_backend.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_store.py",
+        "ai-workspace/workspace-indexer/tests/test_fastembed_sparse_backend.py",
+        "redacted/c41b00c99ca48331"
+      ],
+      "matched": 1,
+      "query": "where do we set the BM25 inverse document frequency modifier"
+    },
+    {
+      "breadth": 79,
+      "duration_ms": 72.19831994734704,
+      "expected": [
+        "chunking/code_chunker.py"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "redacted/6807c627266ea37b",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ai-workspace/workspace-indexer/tests/test_chunk_id.py",
+        "ai-workspace/workspace-indexer/tests/test_markdown_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/markdown_chunker.py",
+        "ai-workspace/workspace-indexer/tests/test_manifest.py",
+        "ai-workspace/workspace-indexer/docs/reference.md"
+      ],
+      "matched": 1,
+      "query": "how are code chunks given their enclosing class or function name"
+    },
+    {
+      "breadth": 113,
+      "duration_ms": 66.62324909120798,
+      "expected": [
+        "search/staleness.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/tests/integration_events_isolation.rs",
+        "ai-workspace/workspace-indexer/tests/test_staleness.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/staleness.py",
+        "ralph-orchestrator/crates/ralph-core/src/event_loop/mod.rs",
+        "ralph-orchestrator/crates/ralph-core/src/loop_registry.rs",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ralph-orchestrator/crates/ralph-cli/src/loops.rs",
+        "ai-workspace/workspace-indexer/docs/deployment.md",
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs"
+      ],
+      "matched": 1,
+      "query": "what stops a search result showing text that no longer matches the file"
+    },
+    {
+      "breadth": 61,
+      "duration_ms": 62.065512174740434,
+      "expected": [
+        "state/manifest.py",
+        "chunking/file_reader.py"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "redacted/b3a5e9d15c0bb83f",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "redacted/0c67a79bd65e0f68",
+        "redacted/d87e95cdaa7bede3",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "chrome-bookmark-manager/.ralph/diagnostics/2026-06-12T15-18-44/prompt-log.md",
+        "ralph-orchestrator/.ralph/specs/homebrew-tap.spec.md",
+        "redacted/417d031deffb2120",
+        "ralph-orchestrator/.ralph/specs/test-tools.spec.md",
+        "ai-workspace/workspace-indexer/tests/test_chunk_id.py"
+      ],
+      "matched": 1,
+      "query": "how do we avoid re-embedding a file that was only reformatted"
+    },
+    {
+      "breadth": 14,
+      "duration_ms": 58.94969799555838,
+      "expected": [
+        "rerank/reranker_factory.py",
+        "rerank/noop_reranker.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/tests/test_search_service.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/reranker_factory.py",
+        "ai-workspace/workspace-indexer/tests/test_reranker_factory.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/__init__.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/search_service.py",
+        "ai-workspace/workspace-indexer/tests/test_mcp_server.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/server_reranker.py",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ai-workspace/workspace-indexer/CLAUDE.md"
+      ],
+      "matched": 1,
+      "query": "how is reranking turned off when there is no API key"
+    },
+    {
+      "breadth": 159,
+      "duration_ms": 88.14974408596754,
+      "expected": [
+        "search/reprojector.py"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_reprojector.py",
+        "ralph-orchestrator/crates/ralph-cli/src/memory.rs",
+        "ralph-orchestrator/crates/ralph-core/src/text.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/loops.rs",
+        "ai-workspace/workspace-indexer/tests/test_embedding_service.py",
+        "ralph-orchestrator/crates/ralph-core/src/handoff.rs",
+        "ralph-orchestrator/crates/ralph-adapters/src/stream_handler.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/display.rs",
+        "ralph-orchestrator/crates/ralph-adapters/src/claude_stream.rs",
+        "ralph-orchestrator/crates/ralph-core/src/hooks/executor.rs"
+      ],
+      "matched": 0,
+      "query": "truncating a vector to fewer dimensions without re-embedding"
+    },
+    {
+      "breadth": 6,
+      "duration_ms": 58.60018194653094,
+      "expected": [
+        "obs/context.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/tests/test_no_leaks.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/context.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ai-workspace/workspace-indexer/tests/test_reference_doc.py",
+        "ai-workspace/workspace-indexer/tests/test_logging_setup.py"
+      ],
+      "matched": 1,
+      "query": "why does a log line know which file caused it"
+    },
+    {
+      "breadth": 10,
+      "duration_ms": 73.09063198044896,
+      "expected": [
+        "PythonEngineeringStandards.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "ralph-orchestrator/docs/guide/prompts.md",
+        "ralph-orchestrator/docs/contributing/pull-requests.md",
+        "ralph-orchestrator/docs/contributing/style.md",
+        "redacted/8c7d2d71885b7d9f",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
+        "chrome-bookmark-manager/README.md",
+        "ralph-orchestrator/.ralph/specs/README.md",
+        "ralph-orchestrator/docs/contributing.md",
+        "ralph-orchestrator/docs/contributing/index.md"
+      ],
+      "matched": 1,
+      "query": "how should I write Python for this project, what are the standards"
+    },
+    {
+      "breadth": 62,
+      "duration_ms": 63.97670297883451,
+      "expected": [
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": 8,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/.ralph/specs/tui-refactor/research/existing-patterns.md",
+        "chrome-bookmark-manager/.ralph/diagnostics/2026-06-12T15-18-44/prompt-log.md",
+        "ralph-orchestrator/ralph.yml",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ralph-orchestrator/crates/ralph-cli/presets/pdd-to-code-assist.yml",
+        "ralph-orchestrator/presets/pdd-to-code-assist.yml",
+        "ai-workspace/workspace-indexer/CLAUDE.md",
+        "ralph-orchestrator/.claude/skills/code-assist/SKILL.md",
+        "ralph-orchestrator/ralph.m.yml"
+      ],
+      "matched": 1,
+      "query": "what conventions must I follow when structuring a new module"
+    },
+    {
+      "breadth": 3,
+      "duration_ms": 58.81667719222605,
+      "expected": [
+        "specs/pi-agent-support/design.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/.agents/planning/2026-03-03-roo-cli-provider/rough-idea.md",
+        "ralph-orchestrator/specs/roo-cli-provider/rough-idea.md"
+      ],
+      "matched": 0,
+      "query": "I need to add support for a new agent provider, how should it be designed"
+    },
+    {
+      "breadth": 60,
+      "duration_ms": 62.90154601447284,
+      "expected": [
+        "specs/agent-waves/requirements.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs",
+        "ralph-orchestrator/specs/agent-waves/design.md",
+        "ralph-orchestrator/crates/ralph-tui/src/state.rs",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ralph-orchestrator/crates/ralph-core/src/wave_tracker.rs",
+        "ralph-orchestrator/crates/ralph-core/src/wave_detection.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/wave.rs",
+        "ralph-orchestrator/crates/ralph-core/src/event_reader.rs",
+        "ralph-orchestrator/crates/ralph-core/src/wave_prompt.rs",
+        "ralph-orchestrator/docs/advanced/agent-waves.md"
+      ],
+      "matched": 0,
+      "query": "what are the requirements for running agents concurrently in waves"
+    },
+    {
+      "breadth": 70,
+      "duration_ms": 62.07521399483085,
+      "expected": [
+        "specs/hat-imports/design.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/requirements.md",
+        "redacted/6807c627266ea37b",
+        "ralph-orchestrator/specs/hat-imports/rough-idea.md",
+        "ralph-orchestrator/specs/hat-imports/research/circular-import-detection.md",
+        "ralph-orchestrator/specs/hat-imports/research/merge-overlay-mechanics.md",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ralph-orchestrator/specs/hat-imports/research/serde-unknown-fields.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/graph/dependent.py"
+      ],
+      "matched": 1,
+      "query": "how should reusable hat definitions be imported from local files"
+    },
+    {
+      "breadth": 52,
+      "duration_ms": 66.86430494301021,
+      "expected": [
+        "CONTRIBUTING.md"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ralph-orchestrator/mkdocs.yml",
+        "ralph-orchestrator/docs/contributing.md",
+        "ralph-orchestrator/CONTRIBUTING.md",
+        "ralph-orchestrator/skills/ralph-docs/references/llms-txt-map.md",
+        "ralph-orchestrator/skills/ralph-docs/SKILL.md",
+        "ai-workspace/workspace-indexer/.github/workflows/ci.yml",
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
+        "ai-workspace/workspace-indexer/tests/test_eval_harness.py",
+        "ralph-orchestrator/README.md"
+      ],
+      "matched": 1,
+      "query": "how do I set up a development environment and submit a change"
+    },
+    {
+      "breadth": 37,
+      "duration_ms": 61.452355002984405,
+      "expected": [
+        "specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md"
+      ],
+      "first_hit_rank": 9,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/summary.md",
+        "ralph-orchestrator/crates/ralph-core/src/config.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/requirements.md",
+        "ralph-orchestrator/docs/guide/configuration.md",
+        "ralph-orchestrator/code-base-summary.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/CHANGELOG.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/05-iteration-checkpoint.md"
+      ],
+      "matched": 1,
+      "query": "what is the plan for adding lifecycle hooks to the orchestrator"
+    },
+    {
+      "breadth": 29,
+      "duration_ms": 62.371850945055485,
+      "expected": [
+        "docs/iteration-1-plan.md",
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": 4,
+      "found": [
+        "ralph-orchestrator/docs/deployment/qchat-production.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/requirements.md",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ralph-orchestrator/.ralph/specs/test-tools.spec.md",
+        "ralph-orchestrator/docs/03-best-practices/best-practices.md",
+        "ralph-orchestrator/docs/deployment/kubernetes.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/01-lifecycle-map.md",
+        "redacted/8c7d2d71885b7d9f"
+      ],
+      "matched": 1,
+      "query": "how should this project handle logging and observability"
+    },
+    {
+      "breadth": 17,
+      "duration_ms": 38.87509391643107,
+      "expected": [
+        "workspace_indexer/config/settings.py"
+      ],
+      "first_hit_rank": 10,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/tests/test_store_factory.py",
+        "ai-workspace/workspace-indexer/README.md",
+        "ai-workspace/workspace-indexer/docs/deployment.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/store_factory.py",
+        "ai-workspace/workspace-indexer/tests/isolated_env.py",
+        "ai-workspace/workspace-indexer/.env",
+        "ai-workspace/workspace-indexer/.env.example",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py"
+      ],
+      "matched": 1,
+      "query": "where is the QDRANT_MODE setting read"
+    },
+    {
+      "breadth": 1,
+      "duration_ms": 54.23611612059176,
+      "expected": [
+        "workspace_indexer/workspace_registry.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/workspace_registry.py"
+      ],
+      "matched": 1,
+      "query": "find the WorkspaceRegistry class definition"
+    },
+    {
+      "breadth": 4,
+      "duration_ms": 40.67646409384906,
+      "expected": [
+        "workspace_indexer/cli.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/cli.py",
+        "ai-workspace/workspace-indexer/tests/test_watch_multi_workspace.py",
+        "ai-workspace/workspace-indexer/tests/test_watch_failures_are_logged.py",
+        "ai-workspace/workspace-indexer/docs/reference.md"
+      ],
+      "matched": 1,
+      "query": "where is the watch.crashed event logged"
+    },
+    {
+      "breadth": 1,
+      "duration_ms": 51.06699001044035,
+      "expected": [
+        "evaluation/eval_result.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/evaluation/eval_result.py"
+      ],
+      "matched": 1,
+      "query": "which module defines path_matches"
+    },
+    {
+      "breadth": 27,
+      "duration_ms": 31.857105903327465,
+      "expected": [
+        "workspace_indexer/config/settings.py"
+      ],
+      "first_hit_rank": 10,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/tests/test_embedding_space.py",
+        "ai-workspace/workspace-indexer/docs/deployment.md",
+        "ai-workspace/workspace-indexer/tests/test_multi_workspace.py",
+        "ai-workspace/workspace-indexer/README.md",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/tests/test_backend_factory.py",
+        "ai-workspace/workspace-indexer/tests/test_eval_store.py",
+        "ai-workspace/workspace-indexer/.env.example",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py"
+      ],
+      "matched": 1,
+      "query": "where is voyage-code-4 set as the default embedding model"
+    },
+    {
+      "breadth": 23,
+      "duration_ms": 42.54155186936259,
+      "expected": [
+        "evaluation/eval_record.py"
+      ],
+      "first_hit_rank": 5,
+      "found": [
+        "ralph-orchestrator/crates/ralph-core/src/hooks/engine.rs",
+        "ralph-orchestrator/crates/ralph-core/src/hooks/suspend_state.rs",
+        "ai-workspace/workspace-indexer/tests/test_eval_store.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/evaluation/__init__.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/evaluation/eval_record.py",
+        "ralph-orchestrator/crates/ralph-core/src/hooks/executor.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/crates/ralph-core/src/hooks/mod.rs",
+        "ralph-orchestrator/crates/ralph-core/src/lib.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/02-config-and-execution-model.md"
+      ],
+      "matched": 1,
+      "query": "find the SCHEMA_VERSION constant for recorded eval runs"
+    },
+    {
+      "breadth": 1,
+      "duration_ms": 44.43937703035772,
+      "expected": [
+        "workspace_indexer/cli.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/cli.py"
+      ],
+      "matched": 1,
+      "query": "find where asyncio.TaskGroup is used"
+    },
+    {
+      "breadth": 1,
+      "duration_ms": 28.017038013786077,
+      "expected": [
+        "models/chunk_id.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/models/chunk_id.py"
+      ],
+      "matched": 1,
+      "query": "where are chunk ids generated with uuid5"
+    }
+  ],
+  "retriever": "grep",
+  "schema_version": 1,
+  "space_slug": "n/a"
+}

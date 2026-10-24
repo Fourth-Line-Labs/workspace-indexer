@@ -11,15 +11,31 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from workspace_indexer.app_context import AppContext, configure_logging_for
-from workspace_indexer.config import ConfigError, WorkspaceChoiceError, load_workspace_config
+from workspace_indexer.app_context import (
+    AppContext,
+    configure_logging_for,
+    load_config_and_settings,
+)
+from workspace_indexer.config import (
+    ConfigError,
+    WorkspaceChoiceError,
+    WorkspaceConfig,
+    load_workspace_config,
+)
 from workspace_indexer.config.loader import DEFAULT_CONFIG_PATH
+from workspace_indexer.discovery.classify import LOCKFILE_NAMES
 from workspace_indexer.evaluation import (
+    GREP,
+    RIPGREP,
+    EvalCase,
     EvalComparison,
     EvalHarness,
     EvalRecord,
+    LexicalRetriever,
+    PublicPathGuard,
     Retriever,
     SearchRetriever,
+    ToolMissingError,
     ToolRetriever,
     compare,
     latest_comparable,
@@ -28,6 +44,7 @@ from workspace_indexer.evaluation import (
     write_record,
     write_report,
 )
+from workspace_indexer.evaluation.lexical_tool import translate_excludes
 from workspace_indexer.evaluation.search_retriever import Fusion
 from workspace_indexer.graph import SUPPORTED as IMPORT_LANGUAGES
 from workspace_indexer.graph.origin_coverage import OriginCoverage
@@ -584,10 +601,13 @@ def evaluate(
     ] = True,
     tool: Annotated[
         str,
-        typer.Option("--tool", help="Retrieval surface: search | search_code | find_guidance"),
+        typer.Option(
+            "--tool",
+            help="Retrieval surface: search | search_code | find_guidance | grep | ripgrep",
+        ),
     ] = "search",
     group: Annotated[
-        str, typer.Option("--group", help="Case group: all | retrieval | guidance")
+        str, typer.Option("--group", help="Case group: all | retrieval | guidance | lexical")
     ] = "all",
 ) -> None:
     """Score retrieval quality against a dataset of query/expected-file pairs.
@@ -598,39 +618,84 @@ def evaluate(
     """
 
     async def run() -> None:
-        ctx = _context(config, "eval", workspace)
+        # Decided before anything is opened. A lexical baseline shares nothing
+        # with the index except the corpus, so making it wait on the manifest,
+        # the vector store and a local embedding model meant `eval --tool grep`
+        # failed outright while `watch` or the MCP server held embedded
+        # Qdrant's single-process lock -- for a measurement that never reads a
+        # vector.
+        lexical = tool in LEXICAL_TOOLS
+        ctx: AppContext | None = None
+        if lexical:
+            try:
+                active_config, settings_obj = load_config_and_settings(config, "eval", workspace)
+            except (ConfigError, WorkspaceChoiceError) as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=2) from exc
+        else:
+            ctx = _context(config, "eval", workspace)
+            active_config, settings_obj = ctx.config, ctx.settings
         try:
-            cases = load_cases(dataset or ctx.config.eval.dataset)
+            # Held as a path rather than only loaded, because a lexical tool
+            # has to be told not to search it: the dataset quotes every query
+            # and every pattern, so a run that can read it scores the answer
+            # key above the workspace.
+            dataset_path = dataset or active_config.eval.dataset
+            cases = load_cases(dataset_path)
             if group != "all":
                 cases = [case for case in cases if case.group == group]
                 if not cases:
                     console.print(f"[red]no cases in group {group!r}[/red]")
                     raise typer.Exit(code=2)
-            # A reprojected collection is a distinct space, so it has to be
-            # addressed as one rather than by width alone.
-            space = (
-                ctx.space.model_copy(
-                    update={"dimensions": dimensions, "derived_from": ctx.space.dimensions}
+            if ctx is None:
+                retriever = build_lexical_retriever(
+                    active_config, tool=tool, cases=cases, dataset=dataset_path
                 )
-                if dimensions
-                else None
-            )
-            retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank)
+                # A lexical tool has no embedding space, fusion or reranker,
+                # and recording the ambient ones would tie its runs to settings
+                # that cannot affect them -- two grep runs would stop comparing
+                # because an embedding model changed between them.
+                # `config_hash` still over-segments for the same reason; it
+                # errs towards refusing a comparison rather than making a false
+                # one, which is the safe direction, and is tracked separately.
+                space_slug, model_name, fusion_name, reranker_name = "n/a", "n/a", "n/a", "n/a"
+                dimensions_used = 0
+            else:
+                # A reprojected collection is a distinct space, so it has to be
+                # addressed as one rather than by width alone.
+                space = (
+                    ctx.space.model_copy(
+                        update={"dimensions": dimensions, "derived_from": ctx.space.dimensions}
+                    )
+                    if dimensions
+                    else None
+                )
+                retriever = _retriever(ctx, space, tool=tool, fusion=fusion, rerank=rerank)
+                active = space or ctx.space
+                space_slug = active.slug()
+                model_name = active.model
+                dimensions_used = active.dimensions
+                fusion_name = fusion or active_config.search.fusion
+                reranker_name = "none" if rerank is False else active_config.search.rerank.model
+            # The record's filename is built from this label -- so naming an
+            # embedding space on a lexical run would produce
+            # `voyage-code-4_1024-...-tool-grep.json`, a file claiming a model
+            # that had nothing to do with it.
             label = (
-                f"{(space or ctx.space).slug()} fusion={fusion or ctx.config.search.fusion} "
-                f"tool={retriever.name} cases={group}"
+                f"{retriever.name} cases={group}"
+                if lexical
+                else (f"{space_slug} fusion={fusion_name} tool={retriever.name} cases={group}")
             )
             report = await EvalHarness(retriever).run(cases, limit=limit, label=label)
-            active = space or ctx.space
             record = EvalRecord(
                 recorded_at=datetime.now(UTC).isoformat(),
                 label=label,
-                config_hash=ctx.settings.config_hash(ctx.config),
-                space_slug=active.slug(),
-                embedding_model=active.model,
-                dimensions=active.dimensions,
-                fusion=fusion or ctx.config.search.fusion,
-                reranker="none" if rerank is False else ctx.config.search.rerank.model,
+                config_hash=settings_obj.config_hash(active_config),
+                space_slug=space_slug,
+                embedding_model=model_name,
+                dimensions=dimensions_used,
+                fusion=fusion_name,
+                reranker=reranker_name,
                 limit=limit,
                 retriever=retriever.name,
                 case_filter=group,
@@ -640,16 +705,48 @@ def evaluate(
                 miss_count=len(report.misses),
                 median_ms=report.median_ms,
                 p95_ms=report.p95_ms,
+                empty_rate=report.empty_rate,
+                flood_rate=report.flood_rate,
+                median_breadth=report.median_breadth,
                 results=report.results,
             )
+            # `evals/` is committed to a public repository and the corpus is
+            # a whole workspace, so anything a broad pattern matched under a
+            # private root is redacted before the record reaches disk. No
+            # expectation names private code, so this moves no number.
+            guard = PublicPathGuard.parse(
+                settings_obj.eval_public_roots,
+                [(root.resolved_label, root.path) for root in active_config.workspace.roots],
+                # Only the lexical retrievers name the root a path came from,
+                # and only when there is more than one. Without that the guard
+                # cannot tell which root a recorded path belongs to, so it
+                # redacts the lot rather than publishing on a coincidence of
+                # spelling.
+                root_qualified_paths=lexical,
+            )
+            if save and not guard.active:
+                # The one line that would have caught the leak. A privacy
+                # control that is off should never be indistinguishable from
+                # one that found nothing to do.
+                console.print(
+                    "[yellow]EVAL_PUBLIC_ROOTS is unset: every matched path will be "
+                    "recorded verbatim.[/yellow]"
+                )
+            record = guard.apply(record)
             # Written before the comparison, so an interrupted comparison does
             # not lose the measurement that was just paid for.
             saved = write_record(record) if save else None
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ToolMissingError) as exc:
+            # ToolMissingError is raised lazily on first use, which puts it
+            # inside the harness run rather than at construction. Without it
+            # here, `eval --tool ripgrep` on a machine without rg exits 1 with
+            # a stack dump where every other expected environment problem in
+            # this CLI is a red line and exit 2.
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=2) from exc
         finally:
-            await ctx.close()
+            if ctx is not None:
+                await ctx.close()
 
         console.print(f"[bold]{report.label}[/bold]")
         console.print(f"  recall@{limit}: [cyan]{report.recall_at_k:.3f}[/cyan]")
@@ -663,6 +760,24 @@ def evaluate(
             f"p95 [cyan]{report.p95_ms:.0f} ms[/cyan], "
             f"slowest {report.slowest_ms:.0f} ms"
         )
+        if report.reports_breadth:
+            # Only for a retriever that can miss by saying nothing or by saying
+            # everything. Printed beside recall because recall scores the flood
+            # as a success and the silence as an ordinary miss.
+            console.print(
+                f"  breadth:   median [cyan]{report.median_breadth:.0f} files[/cyan], "
+                f"empty [cyan]{report.empty_rate:.0%}[/cyan], "
+                f"flood [cyan]{report.flood_rate:.0%}[/cyan]"
+            )
+        elif report.empty_rate:
+            # A dense retriever has no breadth to report, but it can still
+            # answer nothing. Gated on `reports_breadth` rather than on a
+            # truthy `median_breadth`, because that falls back to 0.0 on an
+            # empty sample and would print "median 0 files" -- a missing
+            # measurement rendered as a measured zero, next to a real number.
+            console.print(
+                f"  empty:     [cyan]{report.empty_rate:.0%}[/cyan] of queries returned nothing"
+            )
         for miss in report.misses:
             console.print(f"  [yellow]miss[/yellow] {miss.query}")
             console.print(f"    expected {miss.expected}")
@@ -686,6 +801,90 @@ def evaluate(
     asyncio.run(run())
 
 
+LEXICAL_TOOLS = {"grep": GREP, "ripgrep": RIPGREP}
+
+
+def build_lexical_retriever(
+    config: WorkspaceConfig,
+    *,
+    tool: str,
+    cases: list[EvalCase],
+    dataset: Path,
+) -> Retriever:
+    """A command-line search tool scored over the index's own corpus.
+
+    Public because the corpus it assembles is the whole measurement, and the
+    test that asserts the tools search exactly what the walker indexes has to
+    exercise this rather than a copy of it -- three confounds in a row were
+    about which exclusions reach the tools, which is decided here.
+
+    Shares nothing with the index except the corpus and the dataset, which is
+    what makes a number from one comparable to a number from the other at all
+    -- and which makes the corpus the whole measurement. Every way the two
+    sets of files can drift apart is a confound, and two of them have already
+    produced numbers that had to be withdrawn.
+    """
+    # `not pattern`, not `is None`. An empty string is representable in the
+    # dataset and is not None, so it cleared this check and then died mid-run
+    # inside the retriever as a raw KeyError -- losing a run already partly
+    # paid for, and disagreeing with the retriever about what counts as a
+    # missing pattern.
+    missing = [case.query for case in cases if not case.grep_pattern]
+    if missing:
+        console.print(
+            f"[red]{len(missing)} case(s) have no grep_pattern, so "
+            f"--tool {tool} would be scored against a strawman:[/red]"
+        )
+        for query in missing[:5]:
+            console.print(f"  [yellow]{query}[/yellow]")
+        raise typer.Exit(code=2)
+    # The index's *effective* exclusions, not the user-editable list.
+    # `HARDCODED_EXCLUDES` keeps `evals/`, `logs/` and the baselines table out
+    # of the index because each quotes every eval query verbatim, and
+    # `excluded_paths` does the same for the configured datasets, which also
+    # quote every pattern. A lexical tool without them searches the harness's
+    # own output: measured, and `config/eval.yaml` came back rank 1 for five of
+    # eight lexical queries because it contains their answers.
+    try:
+        dirs, files = translate_excludes(config.all_excludes)
+    except ValueError as exc:
+        # Caught here rather than added to the command's handler: that `except`
+        # wraps the whole run, and a blanket ValueError there would turn a
+        # genuine bug anywhere inside it into a tidy exit 2. A bad
+        # `index.exclude` entry is an expected environment problem, so it gets
+        # this CLI's convention for one -- a red line and exit 2 -- instead of
+        # a stack dump.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    files = (
+        *files,
+        *sorted({path.name for path in config.excluded_paths}),
+        # The dataset actually in use. `excluded_paths` covers every
+        # *configured* workspace's dataset, and `--dataset` is not one of them
+        # -- so an override living inside a searched root was readable by the
+        # tools being scored against it, which is the contamination the
+        # configured exclusion exists to prevent.
+        dataset.name,
+        # Lockfiles are rejected by `Walker._consider` through `is_lockfile`,
+        # not by any pattern, so `all_excludes` cannot express them and the
+        # tools searched files the index had never seen. Measured: seven
+        # lockfile hits across the 24-case grep run, five of them filling half
+        # the top ten of a single query and pushing the expected file to rank
+        # eight. A corpus the baseline searches and the index does not is the
+        # confound that invalidated the first attempt at this comparison.
+        *sorted(LOCKFILE_NAMES),
+        "*.lock",
+    )
+    return LexicalRetriever(
+        LEXICAL_TOOLS[tool],
+        [(root.resolved_label, root.path) for root in config.workspace.roots],
+        {case.query: pattern for case in cases if (pattern := case.grep_pattern)},
+        dirs,
+        files,
+        config.index.max_file_bytes,
+    )
+
+
 def _retriever(
     ctx: AppContext,
     space: EmbeddingSpace | None,
@@ -694,7 +893,7 @@ def _retriever(
     fusion: str | None,
     rerank: bool | None,
 ) -> Retriever:
-    """Pick the surface to score.
+    """Pick the index-backed surface to score.
 
     The MCP tools are constructed over the same search service the baseline
     uses, so a difference between them is the tool's document-type policy and
@@ -716,7 +915,9 @@ def _retriever(
     if tool == "find_guidance":
         return ToolRetriever("find_guidance", lambda q, n: queries.find_guidance(q, limit=n))
 
-    console.print(f"[red]unknown --tool {tool!r}: search | search_code | find_guidance[/red]")
+    console.print(
+        f"[red]unknown --tool {tool!r}: search | search_code | find_guidance | grep | ripgrep[/red]"
+    )
     raise typer.Exit(code=2)
 
 

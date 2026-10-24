@@ -26,34 +26,42 @@
 
 - query: how does the indexer decide whether a file needs reindexing
   expect: [state/manifest.py]
+  grep_pattern: 'needs_reindex|should_reindex|requires_reindex|reindex_decision'
   note: retrieval · the decision ladder, described nowhere by that name in the code
 
 - query: where do we set the BM25 inverse document frequency modifier
   expect: [storage/qdrant_store.py]
+  grep_pattern: 'idf|inverse.document.frequency|bm25'
   note: retrieval · a rare literal; the sparse branch should carry this one
 
 - query: how are code chunks given their enclosing class or function name
   expect: [chunking/code_chunker.py]
+  grep_pattern: 'symbol_path|enclosing|qualified_name|symbol'
   note: retrieval · symbol attribution, phrased without the word "symbol"
 
 - query: what stops a search result showing text that no longer matches the file
   expect: [search/staleness.py]
+  grep_pattern: 'stale|staleness'
   note: retrieval · pure paraphrase, shares almost no vocabulary with the source
 
 - query: how do we avoid re-embedding a file that was only reformatted
   expect: [state/manifest.py, chunking/file_reader.py]
+  grep_pattern: 'content_sha|content_hash|sha256|checksum'
   note: retrieval · the content-hash rung
 
 - query: how is reranking turned off when there is no API key
   expect: [rerank/reranker_factory.py, rerank/noop_reranker.py]
+  grep_pattern: 'NoopReranker|noop.*rerank|rerank.*noop'
   note: retrieval · the graceful-degradation path
 
 - query: truncating a vector to fewer dimensions without re-embedding
   expect: [search/reprojector.py]
+  grep_pattern: 'reproject|truncat|matryoshka'
   note: retrieval · Matryoshka, phrased without the jargon
 
 - query: why does a log line know which file caused it
   expect: [obs/context.py]
+  grep_pattern: 'contextvar|bind_contextvars|bound_contextvars'
   note: retrieval · contextvars binding
 
 # ---------------------------------------------------------------------------
@@ -63,6 +71,7 @@
 - group: guidance
   query: how should I write Python for this project, what are the standards
   expect: [PythonEngineeringStandards.md]
+  grep_pattern: 'engineering standards|coding standards|style guide'
   note: >
     guidance · a genuine normative standards document. Competing against every
     README and tutorial in the workspace.
@@ -70,6 +79,7 @@
 - group: guidance
   query: what conventions must I follow when structuring a new module
   expect: [workspace-indexer/CLAUDE.md]
+  grep_pattern: 'one class per file|code organization|conventions|mandate'
   note: >
     guidance · the one-class-per-file, testing and typing mandates. A search for
     "structure" pulls architecture prose; the mandates are what actually bind.
@@ -77,6 +87,7 @@
 - group: guidance
   query: I need to add support for a new agent provider, how should it be designed
   expect: [specs/pi-agent-support/design.md]
+  grep_pattern: 'agent provider|new provider|provider.*interface'
   note: >
     guidance · THE motivating case. design.md, requirements.md, plan.md,
     summary.md and CHANGELOG.md all sit in this directory describing the same
@@ -85,6 +96,7 @@
 - group: guidance
   query: what are the requirements for running agents concurrently in waves
   expect: [specs/agent-waves/requirements.md]
+  grep_pattern: 'wave|concurrent.*agent|agent.*concurren'
   note: >
     guidance · requirements vs design vs summary, same directory, same subject.
     A hard discrimination for similarity alone.
@@ -92,11 +104,13 @@
 - group: guidance
   query: how should reusable hat definitions be imported from local files
   expect: [specs/hat-imports/design.md]
+  grep_pattern: 'hat.*import|import.*hat|hat definition'
   note: guidance · design document, competing with its own rough-idea and requirements
 
 - group: guidance
   query: how do I set up a development environment and submit a change
   expect: [CONTRIBUTING.md]
+  grep_pattern: 'contributing|development environment|pull request|submit.*change'
   note: >
     guidance · deliberately a `guide`, not `normative`. If a type filter is ever
     applied by default, this case is the one that catches it over-filtering.
@@ -104,6 +118,7 @@
 - group: guidance
   query: what is the plan for adding lifecycle hooks to the orchestrator
   expect: [specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md]
+  grep_pattern: 'lifecycle hook|hook.*lifecycle|orchestrator.*hook'
   note: >
     guidance · plan vs design vs CHANGELOG in one directory. "Plan" is the
     discriminating word and the sparse branch should help.
@@ -111,6 +126,83 @@
 - group: guidance
   query: how should this project handle logging and observability
   expect: [docs/iteration-1-plan.md, workspace-indexer/CLAUDE.md]
+  grep_pattern: 'observability|structured logging|logging strategy'
   note: >
     guidance · our own design record. Competes with obs/logging.py itself, which
     is the *implementation* rather than the guidance.
+
+# ---------------------------------------------------------------------------
+# LEXICAL — the control group, where grep should win
+#
+# Queries whose answer is a token appearing verbatim in the file: an
+# identifier, a setting, an event name. The two groups above were written to
+# defeat lexical matching, so a grep score over those alone measures the
+# dataset rather than the tool. These exist so the comparison is able to report
+# a loss, which is the only thing that makes the wins worth reading.
+#
+# Every case carries a `grep_pattern`: the pattern a competent engineer would
+# type, derived from the QUESTION and general knowledge of the codebase, never
+# from the answer file. A pattern naming the file it is meant to find would
+# make grep look clairvoyant; one handed the raw English question would make it
+# look useless. Both are easy and both are worthless, so the patterns are here
+# in the dataset where anyone can argue one was written too weak.
+# ---------------------------------------------------------------------------
+
+- group: lexical
+  query: where is the QDRANT_MODE setting read
+  expect: [workspace_indexer/config/settings.py]
+  grep_pattern: 'QDRANT_MODE'
+  note: >
+    lexical · the field is spelled `qdrant_mode`; only the case-insensitive
+    match connects the env var an operator knows to the code.
+
+- group: lexical
+  query: find the WorkspaceRegistry class definition
+  expect: [workspace_indexer/workspace_registry.py]
+  grep_pattern: 'class WorkspaceRegistry'
+  note: lexical · the case grep is built for. One file, one match, instantly.
+
+- group: lexical
+  query: where is the watch.crashed event logged
+  expect: [workspace_indexer/cli.py]
+  grep_pattern: 'watch\.crashed'
+  note: >
+    lexical · four files match and the tests match as often as the source, so
+    count-ranking has to break a tie it has no information to break.
+
+- group: lexical
+  query: which module defines path_matches
+  expect: [evaluation/eval_result.py]
+  grep_pattern: 'def path_matches'
+  note: lexical · a definition search, exact and unambiguous.
+
+- group: lexical
+  query: where is voyage-code-4 set as the default embedding model
+  expect: [workspace_indexer/config/settings.py]
+  grep_pattern: 'voyage-code-4'
+  note: >
+    lexical · 39 files match and the documentation mentions it far more often
+    than the one line that sets it, so recall is easy and rank is not.
+
+- group: lexical
+  query: find the SCHEMA_VERSION constant for recorded eval runs
+  expect: [evaluation/eval_record.py]
+  grep_pattern: 'SCHEMA_VERSION'
+  note: >
+    lexical · a common name across the workspace: other projects define their
+    own, and nothing in the token says which one is meant.
+
+- group: lexical
+  query: find where asyncio.TaskGroup is used
+  expect: [workspace_indexer/cli.py]
+  grep_pattern: 'asyncio\.TaskGroup'
+  note: lexical · a qualified call, unique in the corpus.
+
+- group: lexical
+  query: where are chunk ids generated with uuid5
+  expect: [models/chunk_id.py]
+  grep_pattern: 'uuid5'
+  note: >
+    lexical · unique in the measured corpus: one file, one match. The note
+    here used to claim other repositories competed for it, which the run
+    records contradict once the harness's own artefacts are excluded.

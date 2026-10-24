@@ -1,0 +1,193 @@
+{
+  "case_count": 8,
+  "case_filter": "guidance",
+  "config_hash": "370358757e18d584",
+  "dimensions": 0,
+  "embedding_model": "n/a",
+  "empty_rate": 0.0,
+  "flood_rate": 0.5,
+  "fusion": "n/a",
+  "label": "ripgrep cases=guidance",
+  "limit": 10,
+  "median_breadth": 50.0,
+  "median_ms": 23.329734103754163,
+  "miss_count": 3,
+  "mrr_at_k": 0.3784722222222222,
+  "p95_ms": 26.432357961311936,
+  "recall_at_k": 0.6875,
+  "recorded_at": "2026-10-23T22:46:39.707925+00:00",
+  "reranker": "n/a",
+  "results": [
+    {
+      "breadth": 9,
+      "duration_ms": 19.21748905442655,
+      "expected": [
+        "PythonEngineeringStandards.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "chrome-bookmark-manager/ai-docs/PythonEngineeringStandards.md",
+        "ralph-orchestrator/docs/guide/prompts.md",
+        "ralph-orchestrator/docs/contributing/pull-requests.md",
+        "ralph-orchestrator/docs/contributing/style.md",
+        "redacted/8c7d2d71885b7d9f",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
+        "chrome-bookmark-manager/README.md",
+        "ralph-orchestrator/docs/contributing.md",
+        "ralph-orchestrator/docs/contributing/index.md"
+      ],
+      "matched": 1,
+      "query": "how should I write Python for this project, what are the standards"
+    },
+    {
+      "breadth": 51,
+      "duration_ms": 24.377336958423257,
+      "expected": [
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": 6,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/ralph.yml",
+        "ai-workspace/workspace-indexer/tests/test_query_service.py",
+        "ralph-orchestrator/crates/ralph-cli/presets/pdd-to-code-assist.yml",
+        "ralph-orchestrator/presets/pdd-to-code-assist.yml",
+        "ai-workspace/workspace-indexer/CLAUDE.md",
+        "ralph-orchestrator/.claude/skills/code-assist/SKILL.md",
+        "ralph-orchestrator/ralph.m.yml",
+        "redacted/c41b00c99ca48331",
+        "ralph-orchestrator/crates/ralph-proto/src/json_rpc.rs"
+      ],
+      "matched": 1,
+      "query": "what conventions must I follow when structuring a new module"
+    },
+    {
+      "breadth": 2,
+      "duration_ms": 15.925138024613261,
+      "expected": [
+        "specs/pi-agent-support/design.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ralph-orchestrator/specs/roo-cli-provider/rough-idea.md"
+      ],
+      "matched": 0,
+      "query": "I need to add support for a new agent provider, how should it be designed"
+    },
+    {
+      "breadth": 59,
+      "duration_ms": 23.329734103754163,
+      "expected": [
+        "specs/agent-waves/requirements.md"
+      ],
+      "first_hit_rank": null,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs",
+        "ralph-orchestrator/specs/agent-waves/design.md",
+        "ralph-orchestrator/crates/ralph-tui/src/state.rs",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ralph-orchestrator/crates/ralph-core/src/wave_tracker.rs",
+        "ralph-orchestrator/crates/ralph-core/src/wave_detection.rs",
+        "ralph-orchestrator/crates/ralph-cli/src/wave.rs",
+        "ralph-orchestrator/crates/ralph-core/src/event_reader.rs",
+        "ralph-orchestrator/crates/ralph-core/src/wave_prompt.rs",
+        "ralph-orchestrator/docs/advanced/agent-waves.md"
+      ],
+      "matched": 0,
+      "query": "what are the requirements for running agents concurrently in waves"
+    },
+    {
+      "breadth": 61,
+      "duration_ms": 26.432357961311936,
+      "expected": [
+        "specs/hat-imports/design.md"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ralph-orchestrator/specs/hat-imports/design.md",
+        "ralph-orchestrator/specs/hat-imports/requirements.md",
+        "redacted/6807c627266ea37b",
+        "ralph-orchestrator/specs/hat-imports/rough-idea.md",
+        "ralph-orchestrator/specs/hat-imports/research/circular-import-detection.md",
+        "ralph-orchestrator/specs/hat-imports/research/merge-overlay-mechanics.md",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ralph-orchestrator/specs/hat-imports/research/serde-unknown-fields.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/graph/dependent.py"
+      ],
+      "matched": 1,
+      "query": "how should reusable hat definitions be imported from local files"
+    },
+    {
+      "breadth": 50,
+      "duration_ms": 24.709238903596997,
+      "expected": [
+        "CONTRIBUTING.md"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ralph-orchestrator/mkdocs.yml",
+        "ralph-orchestrator/docs/contributing.md",
+        "ralph-orchestrator/CONTRIBUTING.md",
+        "ralph-orchestrator/skills/ralph-docs/references/llms-txt-map.md",
+        "ralph-orchestrator/skills/ralph-docs/SKILL.md",
+        "ai-workspace/workspace-indexer/.github/workflows/ci.yml",
+        "ai-workspace/workspace-indexer/docs/iteration-2-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/classification/path_rule.py",
+        "ai-workspace/workspace-indexer/tests/test_eval_harness.py",
+        "ralph-orchestrator/README.md"
+      ],
+      "matched": 1,
+      "query": "how do I set up a development environment and submit a change"
+    },
+    {
+      "breadth": 30,
+      "duration_ms": 21.08461386524141,
+      "expected": [
+        "specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md"
+      ],
+      "first_hit_rank": 9,
+      "found": [
+        "ralph-orchestrator/crates/ralph-cli/src/loop_runner.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/summary.md",
+        "ralph-orchestrator/crates/ralph-core/src/config.rs",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/requirements.md",
+        "ralph-orchestrator/docs/guide/configuration.md",
+        "ralph-orchestrator/code-base-summary.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/CHANGELOG.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/plan.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/05-iteration-checkpoint.md"
+      ],
+      "matched": 1,
+      "query": "what is the plan for adding lifecycle hooks to the orchestrator"
+    },
+    {
+      "breadth": 24,
+      "duration_ms": 17.54182600416243,
+      "expected": [
+        "docs/iteration-1-plan.md",
+        "workspace-indexer/CLAUDE.md"
+      ],
+      "first_hit_rank": 4,
+      "found": [
+        "ralph-orchestrator/docs/deployment/qchat-production.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/requirements.md",
+        "ralph-orchestrator/specs/agent-waves/plan.md",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ralph-orchestrator/docs/03-best-practices/best-practices.md",
+        "ralph-orchestrator/docs/deployment/kubernetes.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/design.md",
+        "ralph-orchestrator/specs/add-hooks-to-ralph-orchestrator-lifecycle/research/01-lifecycle-map.md",
+        "redacted/8c7d2d71885b7d9f",
+        "redacted/c41b00c99ca48331"
+      ],
+      "matched": 1,
+      "query": "how should this project handle logging and observability"
+    }
+  ],
+  "retriever": "ripgrep",
+  "schema_version": 1,
+  "space_slug": "n/a"
+}

@@ -191,6 +191,112 @@ def test_eval_scores_a_dataset(project: Path) -> None:
 
 
 @pytest.mark.integration
+def test_eval_rejects_an_exclusion_grep_cannot_express(project: Path) -> None:
+    """`translate_excludes` refuses a directory exclusion containing glob
+    metacharacters, because grep and ripgrep cannot be given it as the same
+    literal. That refusal is reached through a user-editable `index.exclude`
+    entry, so it is an expected environment problem and gets this CLI's
+    convention for one -- a red line and exit 2 -- rather than a traceback."""
+    config = project / "config" / "workspace.yaml"
+    raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+    raw["index"]["exclude"] = ["**/bu[ld]/**"]
+    config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    (project / "config" / "eval.yaml").write_text(
+        "- query: how does the widget render\n  expect: [widget.py]\n  grep_pattern: widget\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["eval", "--dataset", "config/eval.yaml", "--tool", "grep"])
+
+    assert result.exit_code == 2, result.stdout
+    assert "glob characters" in plain(result.stdout)
+
+
+def test_a_lexical_eval_does_not_open_the_index(project: Path, workspace: Path) -> None:
+    """A grep baseline shares nothing with the index except the corpus, so
+    making it wait on the manifest, the vector store and a local embedding
+    model meant `eval --tool grep` could not run at all while `watch` or the
+    MCP server held embedded Qdrant's single-process lock -- for a measurement
+    that never reads a vector.
+
+    A regular file where the storage directory belongs makes building the store
+    impossible. The lexical run must not notice; `--tool search` must."""
+    (project / "data").mkdir(exist_ok=True)
+    (project / "data" / "qdrant").write_text("not a directory", encoding="utf-8")
+    (workspace / "repo_one" / "src" / "widget.py").write_text(
+        "def frobnicate() -> None: ...\n", encoding="utf-8"
+    )
+    (project / "config" / "eval.yaml").write_text(
+        "- query: where is frobnicate\n  expect: [widget.py]\n  grep_pattern: frobnicate\n",
+        encoding="utf-8",
+    )
+
+    lexical = runner.invoke(
+        app, ["eval", "--dataset", "config/eval.yaml", "--tool", "grep", "--no-save"]
+    )
+    dense = runner.invoke(app, ["eval", "--dataset", "config/eval.yaml", "--no-save"])
+
+    assert lexical.exit_code == 0, lexical.stdout
+    assert "recall@" in plain(lexical.stdout)
+    assert dense.exit_code != 0
+
+
+def test_a_lexical_eval_does_not_search_lockfiles(project: Path, workspace: Path) -> None:
+    """`Walker._consider` rejects lockfiles through `is_lockfile`, not through
+    any pattern, so `all_excludes` cannot express them and the tools searched
+    files the index had never seen. Measured on the committed records: seven
+    lockfile hits across the 24-case grep run, five of them filling half the
+    top ten of one query. A corpus the baseline searches and the index does not
+    is the confound that invalidated the first attempt at this comparison."""
+    needle = "zzpeculiartoken"
+    (workspace / "repo_one" / "package-lock.json").write_text(
+        f'{{"{needle}": 1, "a": "{needle}", "b": "{needle}"}}\n', encoding="utf-8"
+    )
+    (workspace / "repo_two" / "custom.lock").write_text(
+        f"{needle}\n{needle}\n{needle}\n", encoding="utf-8"
+    )
+    (workspace / "plain_folder" / "notes.md").write_text(f"{needle}\n", encoding="utf-8")
+    (project / "config" / "eval.yaml").write_text(
+        f"- query: find the token\n  expect: [notes.md]\n  grep_pattern: {needle}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app, ["eval", "--dataset", "config/eval.yaml", "--tool", "grep", "--no-save"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    # The lockfiles outscore the answer on match count, so without the
+    # exclusion they take the top ranks and this reads 1.000 at rank 3.
+    assert "recall@10: 1.000" in plain(result.stdout)
+    assert "MRR@10: 1.000" in plain(result.stdout)
+
+
+def test_a_dataset_override_is_kept_out_of_the_lexical_corpus(
+    project: Path, workspace: Path
+) -> None:
+    """`excluded_paths` covers every *configured* workspace's dataset, and
+    `--dataset` is not one of them. An override living inside a searched root
+    was therefore readable by the tools being scored against it -- and a
+    dataset quotes every query and every pattern, which makes it a near-perfect
+    match for its own cases."""
+    needle = "zzpeculiartoken"
+    (workspace / "plain_folder" / "notes.md").write_text(f"{needle}\n", encoding="utf-8")
+    override = workspace / "alternate-eval.yaml"
+    override.write_text(
+        f"- query: find the token\n  expect: [notes.md]\n  grep_pattern: {needle}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["eval", "--dataset", str(override), "--tool", "grep", "--no-save"])
+
+    assert result.exit_code == 0, result.stdout
+    # The dataset holds the pattern once and `notes.md` holds it once, so a
+    # contaminated run ties and the dataset wins on path order.
+    assert "MRR@10: 1.000" in plain(result.stdout)
+
+
+@pytest.mark.integration
 def test_reproject_creates_a_narrower_collection(project: Path) -> None:
     runner.invoke(app, ["index"])
     result = runner.invoke(app, ["reproject", "--dimensions", "128"])

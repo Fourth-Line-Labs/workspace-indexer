@@ -130,3 +130,148 @@ def test_match_direction_is_not_reversible() -> None:
 
     assert path_matches("manifest.py", "src/state/manifest.py")
     assert not path_matches("src/state/manifest.py", "manifest.py")
+
+
+def _breadth(breadths: list[int | None], limit: int = 10) -> EvalReport:
+    return EvalReport(
+        label="t",
+        limit=limit,
+        results=[
+            # `found` follows the breadth it is given, because a real
+            # retriever cannot match zero files and still return one. A fixture
+            # pairing breadth 0 with a hit would let `empty_rate` key on either
+            # and look right both ways.
+            EvalResult(query="q", expected=["a.py"], found=[] if b == 0 else ["a.py"], breadth=b)
+            for b in breadths
+        ],
+    )
+
+
+def test_an_empty_result_is_counted_separately_from_a_miss() -> None:
+    """An agent can act on a wrong answer: it reads the file and moves on. It
+    cannot act on silence, and recall scores the two the same."""
+    assert _breadth([0, 0, 3, 5]).empty_rate == pytest.approx(0.5)
+
+
+def test_a_flood_is_counted_although_recall_calls_it_a_success() -> None:
+    """The failure recall@k cannot see. Four hundred files containing the right
+    one scores a perfect recall while leaving the agent a haystack, and the
+    ranking that chose which ten it sees is match count, not relevance."""
+    report = _breadth([400, 2], limit=10)
+
+    assert report.results[0].recall == 1.0  # recall is blind to it
+    assert report.flood_rate == pytest.approx(0.5)
+
+
+def test_the_flood_threshold_scales_with_the_cutoff() -> None:
+    """Thirty files is a flood at -n 10 and an ordinary page at -n 50, so a
+    flat number would mean different things at different limits."""
+    assert _breadth([40], limit=10).flood_rate == pytest.approx(1.0)
+    assert _breadth([40], limit=50).flood_rate == pytest.approx(0.0)
+
+
+def test_a_retriever_that_reports_no_breadth_is_not_counted_as_zero_breadth() -> None:
+    """A dense retriever returns `limit` hits by construction and has no
+    breadth. Treating its None as zero would report it as silent on every
+    query -- a 100% empty rate for the tool that is never empty. Breadth and
+    flood keep the optional capability; emptiness does not need it."""
+    report = _breadth([None, None, 0])
+
+    assert report.empty_rate == pytest.approx(1 / 3)  # the one that returned nothing
+    assert report.median_breadth == pytest.approx(0.0)
+    assert _breadth([None, None]).empty_rate == pytest.approx(0.0)
+
+
+def test_a_capped_retriever_that_returns_nothing_is_still_empty() -> None:
+    """`empty_rate` used to be computed only over results reporting a breadth,
+    so a search or tool run that answered nothing at all recorded 0.0 -- on the
+    surface the metric exists to compare the lexical tools against, and one the
+    harness already has a case for (an empty tool response is a miss). Silence
+    is visible in `found` whether or not the retriever counts its matches."""
+    report = EvalReport(
+        label="t",
+        limit=10,
+        results=[
+            EvalResult(query="q", expected=["a.py"], found=[]),
+            EvalResult(query="q", expected=["a.py"], found=["a.py"], first_hit_rank=1),
+        ],
+    )
+
+    assert report.empty_rate == pytest.approx(0.5)
+    # Breadth is genuinely unknown here, and inventing one would turn "this
+    # retriever does not count" into "it matched nothing".
+    assert report.flood_rate == pytest.approx(0.0)
+
+
+def test_a_redacted_path_does_not_rescore_the_case() -> None:
+    """`PublicPathGuard` rewrites `found` on the way to disk. A recall derived
+    from those paths afterwards scores the redaction rather than the
+    retrieval -- saving recall 0 beside first_hit_rank 1, with the record's own
+    aggregate disagreeing with both."""
+    measured = EvalResult(
+        query="q", expected=["a.py"], found=["mine/a.py"], first_hit_rank=1
+    ).measured()
+
+    redacted = measured.model_copy(update={"found": ["redacted/0123456789abcdef"]})
+
+    assert measured.recall == 1.0
+    assert redacted.recall == 1.0
+    # A result built without a measurement still falls back to the paths, so
+    # records written before the field loaded unchanged.
+    assert redacted.model_copy(update={"matched": None}).recall == 0.0
+
+
+async def test_the_harness_records_breadth_only_from_a_retriever_that_reports_it() -> None:
+    """Asked after the call through an optional capability, so the protocol
+    every retriever implements keeps its contract that `limit` is a cap. A
+    retriever that cannot exceed the cutoff is left at None rather than being
+    given a number that only restates the cutoff."""
+    from workspace_indexer.evaluation import EvalHarness
+
+    class Wide:
+        name = "wide"
+
+        def __init__(self) -> None:
+            # Starts unset and is assigned inside `retrieve`, exactly as the
+            # real retriever does. As a class-level constant the assertion
+            # below passed whether the harness read the attribute before or
+            # after the await, so it pinned the value and not the ordering --
+            # and a regression that moved the read above the call would have
+            # broken every real run with this test still green.
+            self.last_breadth: int | None = None
+
+        async def retrieve(self, query: str, limit: int) -> list[str]:
+            self.last_breadth = 42
+            return ["a.py"]
+
+    class Plain:
+        name = "plain"
+
+        async def retrieve(self, query: str, limit: int) -> list[str]:
+            return ["a.py"]
+
+    cases = [EvalCase(query="q", expect=["a.py"])]
+
+    wide = await EvalHarness(Wide()).run(cases, limit=10)
+    plain = await EvalHarness(Plain()).run(cases, limit=10)
+
+    assert wide.results[0].breadth == 42
+    assert plain.results[0].breadth is None
+
+
+def test_a_report_says_whether_any_retriever_counted_its_matches() -> None:
+    """`median_breadth` falls back to 0.0 on an empty sample, which renders
+    identically to a measured zero. Since `empty_rate` is now counted over
+    every result, it is no longer a usable proxy for "this retriever reports
+    a breadth" -- a dense run that answered nothing would have opened the
+    breadth line and printed `median 0 files` as though it were measured."""
+    dense = EvalReport(
+        label="t",
+        limit=10,
+        results=[EvalResult(query="q", expected=["a.py"], found=[])],
+    )
+
+    assert dense.empty_rate == pytest.approx(1.0)
+    assert dense.median_breadth == pytest.approx(0.0)
+    assert dense.reports_breadth is False
+    assert _breadth([0, 3]).reports_breadth is True

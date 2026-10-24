@@ -1,0 +1,195 @@
+{
+  "case_count": 8,
+  "case_filter": "retrieval",
+  "config_hash": "370358757e18d584",
+  "dimensions": 1024,
+  "embedding_model": "voyageai:voyage-code-4",
+  "empty_rate": 0.0,
+  "flood_rate": 0.0,
+  "fusion": "rrf",
+  "label": "voyageai_voyage-code-4_1024 fusion=rrf tool=search cases=retrieval",
+  "limit": 10,
+  "median_breadth": 0.0,
+  "median_ms": 493.92272997647524,
+  "miss_count": 0,
+  "mrr_at_k": 0.6145833333333334,
+  "p95_ms": 879.5286931563169,
+  "recall_at_k": 1.0,
+  "recorded_at": "2026-10-18T22:10:27.813128+00:00",
+  "reranker": "voyageai:rerank-2.5-lite",
+  "results": [
+    {
+      "breadth": null,
+      "duration_ms": 523.4800488688052,
+      "expected": [
+        "state/manifest.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/index_decision.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/tests/test_manifest.py",
+        "ai-workspace/workspace-indexer/tests/test_manifest.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/watching/change_debouncer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/workspace_config.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/watch_section.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py"
+      ],
+      "query": "how does the indexer decide whether a file needs reindexing"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 879.5286931563169,
+      "expected": [
+        "storage/qdrant_store.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/qdrant_store.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/embedding/fastembed_sparse_backend.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_index_spec.py",
+        "ai-workspace/workspace-indexer/tests/test_fastembed_sparse_backend.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/mongo_store.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/embedding/fastembed_sparse_backend.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/settings.py",
+        "ai-workspace/workspace-indexer/docs/reference.md"
+      ],
+      "query": "where do we set the BM25 inverse document frequency modifier"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 615.6778589356691,
+      "expected": [
+        "chunking/code_chunker.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py",
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/declaration_scanner.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/tests/test_code_chunker.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/code_chunker.py"
+      ],
+      "query": "how are code chunks given their enclosing class or function name"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 492.43225809186697,
+      "expected": [
+        "search/staleness.py"
+      ],
+      "first_hit_rank": 3,
+      "found": [
+        "ai-workspace/workspace-indexer/config/workspace.example.yaml",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/config/search_section.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/staleness.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/models/search_hit.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/config/workspace.example.yaml",
+        "ai-workspace/workspace-indexer/tests/test_staleness.py",
+        "ai-workspace/workspace-indexer/tests/test_workspace_config.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/staleness.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/mcp/result_budget.py"
+      ],
+      "query": "what stops a search result showing text that no longer matches the file"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 441.3761228788644,
+      "expected": [
+        "state/manifest.py",
+        "chunking/file_reader.py"
+      ],
+      "first_hit_rank": 1,
+      "found": [
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/manifest.py",
+        "ai-workspace/workspace-indexer/tests/test_indexer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/state/index_decision.py",
+        "ai-workspace/workspace-indexer/tests/test_manifest.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/pipeline/indexer.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/chunking/file_reader.py",
+        "redacted/c908d5196dd7ce78"
+      ],
+      "query": "how do we avoid re-embedding a file that was only reformatted"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 479.76841195486486,
+      "expected": [
+        "rerank/reranker_factory.py",
+        "rerank/noop_reranker.py"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/reranker_factory.py",
+        "ai-workspace/workspace-indexer/tests/test_reranker_factory.py",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/tests/test_reranker_factory.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/rerank/noop_reranker.py",
+        "ai-workspace/workspace-indexer/CLAUDE.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/storage/no_server_rerank.py",
+        "ai-workspace/workspace-indexer/tests/test_multi_workspace.py",
+        "redacted/6807c627266ea37b"
+      ],
+      "query": "how is reranking turned off when there is no API key"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 490.8388040494174,
+      "expected": [
+        "search/reprojector.py"
+      ],
+      "first_hit_rank": 4,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/matryoshka.py",
+        "ai-workspace/workspace-indexer/tests/test_reprojector.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/reprojector.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/search_service.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/search/reprojector.py",
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/tests/test_search_service.py",
+        "ai-workspace/workspace-indexer/tests/test_embedding_service.py"
+      ],
+      "query": "truncating a vector to fewer dimensions without re-embedding"
+    },
+    {
+      "breadth": null,
+      "duration_ms": 493.92272997647524,
+      "expected": [
+        "obs/context.py"
+      ],
+      "first_hit_rank": 2,
+      "found": [
+        "ai-workspace/workspace-indexer/docs/iteration-1-plan.md",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/context.py",
+        "ai-workspace/workspace-indexer/tests/test_logging_setup.py",
+        "ai-workspace/workspace-indexer/docs/reference.md",
+        "ai-workspace/workspace-indexer/tests/test_reference_doc.py",
+        "ai-workspace/workspace-indexer/tests/test_reference_doc.py",
+        "ai-workspace/workspace-indexer/tests/test_indexer.py",
+        "ai-workspace/workspace-indexer/tests/test_embedding_service.py",
+        "ai-workspace/workspace-indexer/src/workspace_indexer/obs/logging.py",
+        "ralph-orchestrator/crates/ralph-tui/src/rpc_source.rs"
+      ],
+      "query": "why does a log line know which file caused it"
+    }
+  ],
+  "retriever": "search",
+  "schema_version": 1,
+  "space_slug": "voyageai_voyage-code-4_1024"
+}
